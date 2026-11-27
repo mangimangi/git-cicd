@@ -32,6 +32,14 @@
 # is cancelled or dies leaves the status pending or failed, never green. This
 # is why the two status-writing jobs get `statuses: write` (the one write
 # permission on `open`); the jobs that run the config's scripts get none.
+#
+# There is no workflow-level `concurrency`: a run waiting on one would have no
+# job, so no check and no status, until the run it supersedes had finished
+# cancelling. The group is on the `run` job alone (one per pull request and
+# job), so a newer push cancels the older run's script-running jobs while its
+# own `decide` posts pending at once. `decide` fails when the pull request's
+# head has moved on, so a superseded run queues no `run` job that could cancel
+# the newer run's, and its report is FAILED for every job it needed.
 
 name: git-cicd
 
@@ -40,10 +48,6 @@ on:
     types: [opened, synchronize, reopened]
 permissions:
   contents: read
-
-concurrency:
-  group: git-cicd-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   decide:
@@ -92,6 +96,18 @@ jobs:
             --json > "$RUNNER_TEMP/git-cicd/decisions.json"
           cat "$RUNNER_TEMP/git-cicd/decisions.json"
 
+      - name: Stop if a newer push superseded this run
+        if: github.event_name == 'pull_request'
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          LATEST="$(git ls-remote origin "refs/pull/$PR_NUMBER/head" | cut -f1)"
+          if [ -n "$LATEST" ] && [ "$LATEST" != "$HEAD_SHA" ]; then
+            echo "::error::superseded: the pull request's head is now $LATEST"
+            exit 1
+          fi
+
       - name: Upload decisions
         if: always()
         uses: actions/upload-artifact@v4
@@ -105,6 +121,9 @@ jobs:
     needs: decide
     if: needs.decide.outputs.any == 'true'
     runs-on: ubuntu-latest
+    concurrency:
+      group: git-cicd-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ matrix.job }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     strategy:
       fail-fast: false
       max-parallel: ${{ fromJSON(needs.decide.outputs.max_parallel) }}

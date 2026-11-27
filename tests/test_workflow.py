@@ -73,7 +73,7 @@ def test_generate_writes_file(tool_repo):
 def test_no_expressions_inside_run_blocks(tool_repo):
     text = generate(tool_repo, base_config())
     blocks = run_blocks(text)
-    assert len(blocks) == 7
+    assert len(blocks) == 8
     for block in blocks:
         assert "${{" not in block, block
 
@@ -88,10 +88,6 @@ def test_workflow_contract(tool_repo):
     text = generate(tool_repo, base_config())
     assert "  pull_request:\n    types: [opened, synchronize, reopened]\n" in text
     assert "permissions:\n  contents: read\n" in text
-    assert ("group: git-cicd-${{ github.workflow }}-${{ "
-            "github.event.pull_request.number || github.ref }}") in text
-    assert ("cancel-in-progress: ${{ github.event_name == 'pull_request' }}"
-            in text)
     assert "name: git-cicd report" in text
     assert "if: always()" in text
     assert "max-parallel: ${{ fromJSON(needs.decide.outputs.max_parallel) }}" \
@@ -136,7 +132,7 @@ def test_permissions_status_write_only(tool_repo):
     scripts get no write at all."""
     text = generate(tool_repo, base_config())
     top = text.split("\njobs:\n", 1)[0]
-    assert "\npermissions:\n  contents: read\n\n" in top
+    assert top.endswith("\npermissions:\n  contents: read\n")
     jobs = job_blocks(text)
     assert set(jobs) == {"decide", "run", "verdict"}
     assert STATUS_PERMISSIONS in jobs["decide"]
@@ -146,6 +142,45 @@ def test_permissions_status_write_only(tool_repo):
     assert writes == ["statuses", "statuses"]
     assert "write-all" not in text
     assert text.count("permissions:") == 3
+
+
+RUN_CONCURRENCY = (
+    "    concurrency:\n"
+    "      group: git-cicd-${{ github.workflow }}-${{ "
+    "github.event.pull_request.number || github.ref }}-${{ matrix.job }}\n"
+    "      cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n")
+
+
+def test_concurrency_only_on_the_script_running_job(tool_repo):
+    """The pending status never waits on a superseded run: no concurrency at
+    the workflow level or on the status-posting jobs. A newer push still
+    cancels the older run's script-running jobs, one group per pull request
+    and job, so the jobs of one run do not cancel each other."""
+    text = generate(tool_repo, base_config())
+    top = text.split("\njobs:\n", 1)[0]
+    assert not re.search(r"(?m)^concurrency:", top)
+    jobs = job_blocks(text)
+    assert "concurrency" not in jobs["decide"]
+    assert "concurrency" not in jobs["verdict"]
+    assert RUN_CONCURRENCY in jobs["run"]
+    assert text.count("concurrency:") == 1
+
+
+def test_superseded_run_stops_after_deciding(tool_repo):
+    """A run whose head is no longer the pull request's head fails in decide,
+    after the pending status and the decisions, so it queues no job that
+    could cancel the newer run's and its report is not green for jobs that
+    never ran."""
+    text = generate(tool_repo, base_config())
+    steps = job_blocks(text)["decide"].split("      - name: ")[1:]
+    names = [s.split("\n", 1)[0] for s in steps]
+    assert names.index("Stop if a newer push superseded this run") == \
+        names.index("Decide which jobs the change needs") + 1
+    guard = steps[names.index("Stop if a newer push superseded this run")]
+    assert "if: github.event_name == 'pull_request'" in guard
+    assert "PR_NUMBER: ${{ github.event.pull_request.number }}" in guard
+    assert 'git ls-remote origin "refs/pull/$PR_NUMBER/head"' in guard
+    assert '"$LATEST" != "$HEAD_SHA"' in guard and "exit 1" in guard
 
 
 def test_verdict_status_pending_first_and_final_last(tool_repo):
