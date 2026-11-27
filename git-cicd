@@ -16,6 +16,7 @@ Subcommands:
   generate   write .github/workflows/git-cicd.yml from the config
   verify     check that the workflow file matches the config
   report     one line per job with times, and one verdict
+  check      decide, run and report locally, without GitHub
 """
 
 import argparse
@@ -911,6 +912,86 @@ def load_decisions(path):
     return data
 
 
+# ── Check (local) ───────────────────────────────────────────────────────────
+
+def _git_out(root, *args):
+    result = git(*args, cwd=root)
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def default_source(root):
+    return _git_out(root, "rev-parse", "--abbrev-ref", "HEAD") or "HEAD"
+
+
+def default_target(root, source):
+    """The upstream's branch name if one is set (and it is not the branch's
+    own remote copy), else the remote default branch, else main."""
+    if source and source != "HEAD":
+        upstream = _git_out(root, "rev-parse", "--abbrev-ref",
+                            "--symbolic-full-name", "@{upstream}")
+        remote = _git_out(root, "config", "--get",
+                          f"branch.{source}.remote")
+        if upstream:
+            name = upstream
+            if remote and remote != "." and name.startswith(remote + "/"):
+                name = name[len(remote) + 1:]
+            if name != source:
+                return name
+    origin_head = _git_out(root, "symbolic-ref", "--quiet", "--short",
+                           "refs/remotes/origin/HEAD")
+    if origin_head.startswith("origin/"):
+        return origin_head[len("origin/"):]
+    return "main"
+
+
+def default_base(root, target):
+    if resolve_commit(root, f"origin/{target}"):
+        return f"origin/{target}"
+    return target
+
+
+def check(config, root, target=None, source=None, base=None, head=None,
+          job=None, force=False, setup=False):
+    """Decide, run the needed jobs one after another, report. Return the
+    exit code (0 passed, 1 failed)."""
+    if force and not job:
+        raise UsageError("--force needs --job NAME")
+    if job is not None and job not in config["jobs"]:
+        raise UsageError(f"unknown job {job!r} (declared: "
+                         f"{', '.join(config['jobs']) or 'none'})")
+    source = source or default_source(root)
+    target = target or default_target(root, source)
+    base = base or default_base(root, target)
+    head = head or "HEAD"
+    base_sha = resolve_commit(root, base) or base
+    head_sha = resolve_commit(root, head) or head
+
+    files, diff_error = changed_files(root, base_sha, head_sha)
+    decision = decide(config, root, "open", target, source, base_sha,
+                      head_sha, files=files, diff_error=diff_error)
+    if job is not None:
+        for d in decision["jobs"]:
+            if d["name"] != job:
+                d.update(needed=False, reason=f"not selected (--job {job})")
+            elif force and not d["needed"] and d["reason"] in (
+                    "no changed file matches paths",
+                    "only needs_nothing files changed"):
+                d.update(needed=True, reason="forced with --force (paths "
+                                             "ignored)")
+    print(format_decision(decision), flush=True)
+
+    facts = {"moment": "open", "target": target, "source": source,
+             "base": base_sha, "head": head_sha}
+    results = {}
+    for name in needed_jobs(decision):
+        results[name] = run_job(config, root, name, facts, setup=setup,
+                                files=files or [])
+    print("", flush=True)
+    passed, _ = report(config, root, decision, results,
+                       setup_note=not setup)
+    return 0 if passed else 1
+
+
 # ── Commands ────────────────────────────────────────────────────────────────
 
 def cmd_validate(args, root):
@@ -987,6 +1068,13 @@ def cmd_report(args, root):
     return 0 if passed else 1
 
 
+def cmd_check(args, root):
+    config = load_config(root, args.config)
+    return check(config, root, target=args.target, source=args.source,
+                 base=args.base, head=args.head, job=args.job,
+                 force=args.force, setup=args.setup)
+
+
 def add_change_args(p):
     """The facts about a change, as given by the platform or the caller."""
     p.add_argument("--moment", required=True, choices=ALL_MOMENTS)
@@ -1042,6 +1130,22 @@ def build_parser():
                    help="directory holding run-job --result files (any "
                         "nesting)")
     p.add_argument("--moment", default="open", choices=ALL_MOMENTS)
+
+    p = add("check", cmd_check, "decide, run the needed jobs one after "
+            "another and report, locally (no GitHub needed)")
+    p.add_argument("--target", help="target branch (default: the upstream's "
+                   "branch, else origin/HEAD, else main)")
+    p.add_argument("--source", help="source branch (default: the current "
+                   "branch)")
+    p.add_argument("--base", help="base revision (default: origin/<target> "
+                   "if it exists, else <target>)")
+    p.add_argument("--head", help="head revision (default: HEAD)")
+    p.add_argument("--job", metavar="NAME", help="run only this job (still "
+                   "bound by its branches and the decision)")
+    p.add_argument("--force", action="store_true",
+                   help="with --job: run it regardless of its paths")
+    p.add_argument("--setup", action="store_true",
+                   help="run setup scripts (they install things for real)")
     return parser
 
 
