@@ -1,6 +1,41 @@
 # git-cicd
 git platform hooks for managing cicd
 
+## Installing
+
+git-cicd is vendored into a repository by
+[git-vendored](https://github.com/mangimangi/git-vendored):
+
+```bash
+python3 .vendored/install mangimangi/git-cicd
+```
+
+What lands where:
+
+| Path | What | On upgrade |
+|---|---|---|
+| `.vendored/pkg/git-cicd/git-cicd` | the tool (one Python 3 file; Python 3 and git only) | replaced |
+| `.vendored/pkg/git-cicd/templates/workflow.yml` | the template `generate` fills | replaced |
+| `.vendored/manifests/git-cicd.schema` | the config schema, for `.vendored/audit` | replaced |
+| `.vendored/configs/git-cicd.json` | your config: the jobs | **created once**, only when missing; never overwritten |
+| `.github/workflows/git-cicd.yml` | the generated workflow | **regenerated on every install**, so an upgrade reaches it in the install pull request |
+
+The default config declares no jobs (`"jobs": {}`, `"needs_nothing": []`), so
+a fresh install validates and needs nothing until you declare jobs. The config
+and the generated workflow are listed as editable (`_vendor.allowed`) for
+git-vendored's check; the tool's own files are protected.
+
+**Whoever changes the config runs**
+
+```bash
+.vendored/pkg/git-cicd/git-cicd generate
+```
+
+**and commits `.github/workflows/git-cicd.yml` in the same pull request.** The
+platform's token cannot push workflow files, so CI never regenerates: it
+verifies, and the `git-cicd verdict` check fails with that command when the
+committed file differs from what the config generates.
+
 ## Running the checks locally
 
 The same jobs CI runs on a pull request run on your machine, or in a session
