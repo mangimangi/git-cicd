@@ -4,6 +4,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -72,15 +73,28 @@ class Repo:
     def git(self, *args):
         return git(self.path, *args)
 
+    def install_tool(self, rel=".vendored/pkg/git-cicd"):
+        """Copy the script and its template into the repository, as the
+        installer does. Return the tool path relative to the root."""
+        dest = self.path / rel
+        (dest / "templates").mkdir(parents=True, exist_ok=True)
+        shutil.copy2(SCRIPT, dest / "git-cicd")
+        shutil.copy2(ROOT / "templates" / "workflow.yml",
+                     dest / "templates" / "workflow.yml")
+        self.tool = dest / "git-cicd"
+        return f"{rel}/git-cicd"
+
     def run(self, *args, env=None, cwd=None):
-        """Run the git-cicd script as a subprocess in the repository."""
+        """Run the git-cicd script as a subprocess in the repository (the
+        installed copy when install_tool was called)."""
         run_env = os.environ.copy()
         for key in list(run_env):
             if key.startswith(("GITHUB_", "CICD_")):
                 del run_env[key]
         if env:
             run_env.update(env)
-        return subprocess.run([sys.executable, str(SCRIPT), *args],
+        script = getattr(self, "tool", SCRIPT)
+        return subprocess.run([sys.executable, str(script), *args],
                               cwd=cwd or self.path, capture_output=True,
                               text=True, env=run_env)
 

@@ -13,9 +13,12 @@ Subcommands:
   validate   load and validate the config
   decide     decide which jobs a change needs on a moment
   run-job    run one job: setup when asked, then its steps
+  generate   write .github/workflows/git-cicd.yml from the config
+  verify     check that the workflow file matches the config
 """
 
 import argparse
+import difflib
 import json
 import os
 import re
@@ -26,6 +29,8 @@ import tempfile
 import time
 
 CONFIG_PATH = ".vendored/configs/git-cicd.json"
+WORKFLOW_PATH = ".github/workflows/git-cicd.yml"
+TEMPLATE_PATH = os.path.join("templates", "workflow.yml")
 
 MOMENTS = ("open", "merge", "cron")
 DEFAULT_MAX_PARALLEL = 3
@@ -619,6 +624,88 @@ def run_job(config, root, name, facts, setup=False, files=None):
             pass
 
 
+# ── Workflow ────────────────────────────────────────────────────────────────
+
+TOOL_PATH_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
+
+
+def tool_path(root):
+    """The running script's path relative to the repository root: where the
+    tool is installed, never something the config decides."""
+    here = os.path.realpath(os.path.abspath(__file__))
+    rel = _norm(os.path.relpath(here, os.path.realpath(root)))
+    if rel.startswith("../") or rel == "..":
+        raise UsageError(f"git-cicd runs from {here}, outside the repository "
+                         f"{root}; the generated workflow needs the tool "
+                         "inside the repository (install it, or run the "
+                         "installed copy)")
+    if not TOOL_PATH_RE.match(rel):
+        raise UsageError(f"the tool path {rel!r} contains characters the "
+                         "generated workflow does not accept")
+    return rel
+
+
+def template_text():
+    path = os.path.join(os.path.dirname(os.path.realpath(
+        os.path.abspath(__file__))), TEMPLATE_PATH)
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except OSError as e:
+        raise UsageError(f"cannot read the workflow template {path}: "
+                         f"{e.strerror}")
+
+
+def schedule_block(config):
+    crons = sorted({j["cron"] for j in config["jobs"].values()
+                    if "cron" in j["on"] and j["cron"]})
+    if not crons:
+        return ""
+    lines = ["  schedule:"]
+    lines += [f"    - cron: {json.dumps(c)}" for c in crons]
+    return "\n".join(lines) + "\n"
+
+
+def render_workflow(config, tool, template=None):
+    """The workflow file for the config, deterministic byte for byte. Only
+    the schedule block depends on the config; the tool path depends on where
+    the tool is installed."""
+    text = template if template is not None else template_text()
+    text = text.replace("__SCHEDULE__\n", schedule_block(config))
+    return text.replace("__TOOL__", tool)
+
+
+def generate_command(tool):
+    return f"{tool} generate"
+
+
+def verify_workflow(config, root, tool=None):
+    """Regenerate in memory and compare the whole file.
+
+    Return (ok, message); message holds a unified diff and the command to
+    run when the file does not match."""
+    tool = tool or tool_path(root)
+    expected = render_workflow(config, tool)
+    path = os.path.join(root, WORKFLOW_PATH)
+    try:
+        with open(path, encoding="utf-8", newline="") as f:
+            actual = f.read()
+    except OSError:
+        actual = None
+    if actual == expected:
+        return True, "workflow matches config"
+    if actual is None:
+        diff = f"{WORKFLOW_PATH} is missing\n"
+    else:
+        diff = "".join(difflib.unified_diff(
+            actual.splitlines(keepends=True),
+            expected.splitlines(keepends=True),
+            fromfile=f"{WORKFLOW_PATH} (committed)",
+            tofile=f"{WORKFLOW_PATH} (generated from the config)"))
+    return False, (diff + "the workflow does not match the config; run: "
+                   f"{generate_command(tool)} and commit {WORKFLOW_PATH}")
+
+
 # ── Commands ────────────────────────────────────────────────────────────────
 
 def cmd_validate(args, root):
@@ -662,6 +749,24 @@ def cmd_run_job(args, root):
     return 0 if result["state"] == "passed" else 1
 
 
+def cmd_generate(args, root):
+    config = load_config(root, args.config)
+    text = render_workflow(config, tool_path(root))
+    path = os.path.join(root, WORKFLOW_PATH)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        f.write(text)
+    print(f"wrote {WORKFLOW_PATH}")
+    return 0
+
+
+def cmd_verify(args, root):
+    config = load_config(root, args.config)
+    ok, message = verify_workflow(config, root)
+    print(message)
+    return 0 if ok else 1
+
+
 def add_change_args(p):
     """The facts about a change, as given by the platform or the caller."""
     p.add_argument("--moment", required=True, choices=ALL_MOMENTS)
@@ -703,6 +808,11 @@ def build_parser():
                    help="run the job's setup script first")
     p.add_argument("--result", metavar="PATH",
                    help="write the job's result JSON to PATH")
+
+    add("generate", cmd_generate,
+        f"write {WORKFLOW_PATH} from the config")
+    add("verify", cmd_verify,
+        f"check that {WORKFLOW_PATH} matches what the config generates")
     return parser
 
 
