@@ -81,17 +81,19 @@ def test_times_present_for_every_job_and_step(config, repo):
     dec = decision(test=(True, "r"))
     ok, _, text = run_report(config, repo, dec, {"test": passed_result("test")})
     assert ok
-    assert "setup ci/setup.sh  1.2s  (exit 0)" in text
-    assert text.count("step ci/test.sh  2.5s") == 1
-    assert text.count("step ci/cov.sh  2.5s") == 1
+    assert "test / repo:test:setup.sh  passed  1.2s" in text
+    assert text.count("test / repo:test:test.sh  passed  2.5s") == 1
+    assert text.count("test / repo:test:cov.sh  passed  2.5s") == 1
 
 
 def test_one_line_per_declared_job_in_config_order(config, repo):
     dec = decision(test=(True, "r"))
     _, _, text = run_report(config, repo, dec, {"test": passed_result("test")})
     names = [l.split()[0] for l in text.splitlines()
-             if l.startswith("  ") and l.split()[0] in ("test", "lint", "docs")]
+             if l.startswith("  ") and not l.startswith("    ")
+             and l.split()[0] in ("test", "lint", "docs")]
     assert names == ["test", "lint", "docs"]
+    assert "  test / repo:test  passed" in text
     assert "not needed (no changed file matches paths) (non-blocking)" in \
         line_for(text, "lint")
 
@@ -205,10 +207,12 @@ def test_summary_written_when_set(config, repo, tmp_path, monkeypatch):
     md = summary.read_text()
     assert md.startswith("## git-cicd verdict: FAILED")
     assert "| Job | State | Time | Detail |" in md
-    assert "| test | failed | 6.2s | step ci/cov.sh, exit 4 |" in md
-    assert "↳ `setup ci/setup.sh` | exit 0 | 1.2s" in md
-    assert "↳ `step ci/cov.sh`" in md
-    assert "| lint | not needed (non-blocking) |" in md
+    assert "| `test / repo:test` | failed | 6.2s | step ci/cov.sh, exit 4 |" \
+        in md
+    assert "↳ `test / repo:test:setup.sh` | passed | 1.2s" in md
+    assert "↳ `test / repo:test:cov.sh`" in md
+    assert "| `lint / repo:lint` | not needed (non-blocking) |" in md
+    assert "git-cicd report: repo at h" in md
 
 
 def test_summary_not_written_when_unset(config, repo, tmp_path, monkeypatch):
@@ -365,3 +369,142 @@ def test_status_description_is_one_short_line():
     long = git_cicd.status_description("FAILED - " + "x" * 300)
     assert len(long) == git_cicd.STATUS_DESCRIPTION_MAX
     assert long.endswith("...")
+
+
+# ── names, owners and versions ──────────────────────────────────────────────
+
+@pytest.fixture
+def owned(repo):
+    """A job with a repository step and steps under .vendored/pkg/."""
+    repo.script("ci/setup.sh")
+    repo.script("ci/test.sh")
+    repo.script(".vendored/pkg/tool/check.sh")
+    repo.script(".vendored/pkg/bare/lint.sh")
+    repo.config({"jobs": {
+        "unit": {"name": "Unit tests", "on": ["open"], "branches": ["**"],
+                 "setup": "ci/setup.sh",
+                 "steps": ["ci/test.sh", ".vendored/pkg/tool/check.sh",
+                           [".vendored/pkg/bare/lint.sh", "--x"]]},
+    }})
+    return repo
+
+
+def owned_result():
+    return {"job": "unit", "state": "passed", "failed_step": None,
+            "exit_code": 0, "error": None,
+            "setup": {"script": "ci/setup.sh", "seconds": 1.0,
+                      "exit_code": 0, "error": None},
+            "setup_skipped": False,
+            "steps": [
+                {"step": "ci/test.sh", "file": "ci/test.sh", "seconds": 2.0,
+                 "exit_code": 0, "error": None},
+                {"step": ".vendored/pkg/tool/check.sh",
+                 "file": ".vendored/pkg/tool/check.sh", "seconds": 3.0,
+                 "exit_code": 0, "error": None},
+                # an older result without "file": the label's first word
+                {"step": ".vendored/pkg/bare/lint.sh --x", "seconds": 4.0,
+                 "exit_code": 2, "error": None},
+            ],
+            "seconds": 10.0}
+
+
+def owned_decision():
+    return {"moment": "open", "target": "main", "source": "f", "base": "b",
+            "head": "0123456789abcdef0123", "changed_files": [],
+            "jobs": [{"name": "unit", "title": "Unit tests", "needed": True,
+                      "reason": "r", "blocking": True}], "max_parallel": 3}
+
+
+def owned_report(repo, monkeypatch):
+    monkeypatch.setenv("GITHUB_REPOSITORY", "someone/medici")
+    config = git_cicd.load_config(str(repo.path))
+    return run_report(config, repo, owned_decision(),
+                      {"unit": owned_result()})[2]
+
+
+def test_step_lines_vendored_with_manifest_and_repo_with_version(
+        owned, monkeypatch):
+    owned.write(".vendored/manifests/tool.version", "1.4.2\n")
+    owned.write("VERSION", "0.3.0\n")
+    text = owned_report(owned, monkeypatch)
+    assert "  Unit tests / medici:unit  failed" not in text
+    assert "  Unit tests / medici:unit  passed  10.0s" in text
+    assert "    Unit tests / medici@0.3.0:unit:setup.sh  passed  1.0s" in text
+    assert "    Unit tests / medici@0.3.0:unit:test.sh  passed  2.0s" in text
+    assert "    Unit tests / tool@1.4.2:unit:check.sh  passed  3.0s" in text
+    # a vendor with no manifest version: no @, never a guessed version
+    assert "    Unit tests / bare:unit:lint.sh  failed (exit 2)  4.0s" in text
+
+
+def test_step_lines_repo_without_version(owned, monkeypatch):
+    text = owned_report(owned, monkeypatch)
+    assert "    Unit tests / medici:unit:test.sh  passed" in text
+    assert "    Unit tests / tool:unit:check.sh  passed" in text
+    assert "@" not in text
+
+
+def test_repo_version_file_from_git_semver_config(owned, monkeypatch):
+    owned.write(".vendored/configs/git-semver.json",
+                '{"version_file": "meta/version.txt"}\n')
+    owned.write("VERSION", "9.9.9\n")
+    owned.write("meta/version.txt", "2.0.1\n")
+    text = owned_report(owned, monkeypatch)
+    assert "Unit tests / medici@2.0.1:unit:test.sh" in text
+    assert "9.9.9" not in text
+
+
+def test_header_gives_the_short_head_commit(owned, monkeypatch):
+    owned.write("VERSION", "0.3.0\n")
+    text = owned_report(owned, monkeypatch)
+    header = text.splitlines()[0]
+    assert header.startswith("git-cicd report: medici at 0123456 ")
+    assert "change under test" in header
+
+
+def test_header_resolves_head_in_the_repository(owned, monkeypatch):
+    sha = owned.commit("c")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "someone/medici")
+    config = git_cicd.load_config(str(owned.path))
+    dec = owned_decision()
+    dec["head"] = sha
+    text = run_report(config, owned, dec, {"unit": owned_result()})[2]
+    short = owned.git("rev-parse", "--short", sha)
+    assert text.splitlines()[0].startswith(f"git-cicd report: medici at "
+                                           f"{short} ")
+
+
+def test_verdict_description_has_no_step_lines(owned, monkeypatch):
+    owned.write("VERSION", "0.3.0\n")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "someone/medici")
+    config = git_cicd.load_config(str(owned.path))
+    _, verdict, _ = run_report(config, owned, owned_decision(),
+                               {"unit": owned_result()})
+    assert verdict == "PASSED - 1 of 1 jobs needed, 1 passed"
+    assert "@" not in git_cicd.status_description(verdict)
+
+
+def test_repo_name_sources(repo, monkeypatch):
+    root = str(repo.path)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/from-actions")
+    assert git_cicd.repo_name(root) == "from-actions"
+    monkeypatch.delenv("GITHUB_REPOSITORY")
+    # no origin remote: the checkout's top-level directory
+    assert git_cicd.repo_name(root) == repo.path.name
+    repo.git("remote", "add", "origin", "git@github.com:someone/medici.git")
+    assert git_cicd.repo_name(root) == "medici"
+    repo.git("remote", "set-url", "origin",
+             "https://github.com/someone/other-repo")
+    assert git_cicd.repo_name(root) == "other-repo"
+
+
+def test_markdown_shows_names_literally(owned, monkeypatch, tmp_path):
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    owned.config({"jobs": {"unit": {
+        "name": "a `b` | c", "on": ["open"], "branches": ["**"],
+        "setup": "ci/setup.sh",
+        "steps": ["ci/test.sh", ".vendored/pkg/tool/check.sh",
+                  [".vendored/pkg/bare/lint.sh", "--x"]]}}})
+    owned_report(owned, monkeypatch)
+    md = summary.read_text()
+    assert "| ``a `b` \\| c / medici:unit`` | passed |" in md

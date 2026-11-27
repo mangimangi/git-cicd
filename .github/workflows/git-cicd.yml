@@ -11,6 +11,12 @@
 # and every fact about the change reaches the tool as an environment variable,
 # never spliced into a command.
 #
+# A job's row is `<name> / <repo>:<job>`: its display name and its job name
+# come from the decide job's outputs (data, evaluated into the row name, never
+# into a command), the repository's name from the event. No version is in a
+# row name, so what waits on a check does not change on an upgrade; the
+# report names each step with its owner and version.
+#
 # Reserved for later moments (not built yet): when `merge` and manual runs are
 # built they are added here as FIXED text, in a git-cicd version change that is
 # regenerated on upgrade, never per config:
@@ -58,6 +64,7 @@ jobs:
       statuses: write
     outputs:
       jobs: ${{ steps.decide.outputs.jobs }}
+      names: ${{ steps.decide.outputs.names }}
       any: ${{ steps.decide.outputs.any }}
       max_parallel: ${{ steps.decide.outputs.max_parallel }}
     steps:
@@ -117,7 +124,7 @@ jobs:
           if-no-files-found: ignore
 
   run:
-    name: ${{ matrix.job }}
+    name: ${{ fromJSON(needs.decide.outputs.names)[matrix.job] }} / ${{ github.event.repository.name }}:${{ matrix.job }}
     needs: decide
     if: needs.decide.outputs.any == 'true'
     runs-on: ubuntu-latest

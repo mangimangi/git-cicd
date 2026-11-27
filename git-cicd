@@ -38,7 +38,7 @@ MOMENTS = ("open", "merge", "cron")
 DEFAULT_MAX_PARALLEL = 3
 
 TOP_LEVEL_FIELDS = ("_vendor", "jobs", "needs_nothing", "max_parallel")
-JOB_FIELDS = ("on", "branches", "paths", "setup", "steps", "cron", "manual",
+JOB_FIELDS = ("name", "on", "branches", "paths", "setup", "steps", "cron", "manual",
               "blocking")
 
 JOB_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -183,6 +183,24 @@ def _validate_job(root, name, job):
         if key not in JOB_FIELDS:
             errors.append(f"{prefix}: unknown field {key}")
 
+    # name (the display name; data, never part of a command line)
+    title = job.get("name", name)
+    if "name" in job:
+        if not isinstance(title, str):
+            errors.append(f"{prefix}: name must be a string (a short "
+                          "human-readable display name)")
+            title = name
+        elif not title.strip():
+            errors.append(f"{prefix}: name is empty; give a short "
+                          "human-readable display name or leave the field "
+                          "out")
+            title = name
+        elif not all(ch.isprintable() for ch in title):
+            errors.append(f"{prefix}: name {title!r} must be a single line "
+                          "of printable characters (no newline, tab or "
+                          "other control character)")
+            title = name
+
     # on
     on = job.get("on", [])
     if not _is_str_list(on):
@@ -275,6 +293,7 @@ def _validate_job(root, name, job):
 
     normalized = {
         "name": name,
+        "title": title,
         "on": list(on),
         "branches": list(branches),
         "paths": list(paths) if paths is not None else None,
@@ -489,7 +508,8 @@ def decide(config, root, moment, target, source, base, head, files=None,
                 reason = f"{n} changed file{'' if n == 1 else 's'} match paths"
             else:
                 needed, reason = False, "no changed file matches paths"
-        decisions.append({"name": name, "needed": needed, "reason": reason,
+        decisions.append({"name": name, "title": job["title"],
+                          "needed": needed, "reason": reason,
                           "blocking": job["blocking"]})
 
     return {
@@ -526,6 +546,9 @@ def write_github_output(decision):
         return
     with open(path, "a", encoding="utf-8") as f:
         f.write(f"jobs={json.dumps(needed_jobs(decision))}\n")
+        names = {j["name"]: j.get("title") or j["name"]
+                 for j in decision["jobs"]}
+        f.write(f"names={json.dumps(names)}\n")
         f.write(f"any={'true' if needed_jobs(decision) else 'false'}\n")
         f.write(f"max_parallel={decision['max_parallel']}\n")
 
@@ -611,7 +634,8 @@ def run_job(config, root, name, facts, setup=False, files=None):
             argv = [os.path.join(root, step[0]), *step[1:]]
             code, error, seconds = _run_script(
                 argv, root, env, f"job {name}: step {i}/{total} {label}")
-            result["steps"].append({"step": label, "seconds": seconds,
+            result["steps"].append({"step": label, "file": step[0],
+                                    "seconds": seconds,
                                     "exit_code": code, "error": error})
             if code != 0:
                 result.update(state="failed", failed_step=label,
@@ -740,13 +764,122 @@ def _exit_text(code, error):
     return f"error: {error}" if error else f"exit {code}"
 
 
-def job_rows(config, decision, results):
+SEMVER_CONFIG_PATH = ".vendored/configs/git-semver.json"
+VENDOR_PKG_PREFIX = ".vendored/pkg/"
+VENDOR_VERSION_PATH = ".vendored/manifests/{vendor}.version"
+
+
+def repo_name(root):
+    """The name of the repository the checks run in.
+
+    In Actions, the name part of GITHUB_REPOSITORY (the platform's own fact).
+    Locally, the last path segment of the `origin` remote's URL without
+    `.git`; with no such remote, the name of the checkout's top-level
+    directory."""
+    gh = os.environ.get("GITHUB_REPOSITORY", "").strip()
+    if gh:
+        return gh.rstrip("/").rsplit("/", 1)[-1]
+    url = _git_out(root, "config", "--get", "remote.origin.url")
+    if url:
+        name = re.split(r"[/:]", url.rstrip("/"))[-1]
+        if name.endswith(".git"):
+            name = name[:-len(".git")]
+        if name:
+            return name
+    return os.path.basename(os.path.abspath(root)) or "repository"
+
+
+def _read_version(root, rel):
+    """The first line of a version file, or None when there is none. A
+    version is read, never guessed."""
+    if not isinstance(rel, str) or not rel or os.path.isabs(rel) \
+            or ".." in rel.replace("\\", "/").split("/"):
+        return None
+    try:
+        with open(os.path.join(root, rel), encoding="utf-8") as f:
+            line = f.readline().strip()
+    except (OSError, ValueError):
+        return None
+    if not line or not all(ch.isprintable() for ch in line):
+        return None
+    return line
+
+
+def repo_version_file(root):
+    """The version file the repository's git-semver config names (default
+    VERSION)."""
+    try:
+        with open(os.path.join(root, SEMVER_CONFIG_PATH),
+                  encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        data = None
+    if isinstance(data, dict) and isinstance(data.get("version_file"), str):
+        return data["version_file"]
+    return "VERSION"
+
+
+def step_owner(root, path, repo):
+    """(owner, version or None) of a setup or step file: the vendor for a
+    file under .vendored/pkg/<vendor>/ with the version from its manifest,
+    otherwise the repository with the version from its version file."""
+    rel = _norm(path or "")
+    if rel.startswith(VENDOR_PKG_PREFIX):
+        vendor = rel[len(VENDOR_PKG_PREFIX):].split("/", 1)[0]
+        if vendor:
+            return vendor, _read_version(
+                root, VENDOR_VERSION_PATH.format(vendor=vendor))
+    if root is None:
+        return repo, None
+    return repo, _read_version(root, repo_version_file(root))
+
+
+def row_name(title, repo, job):
+    """A job's row: `<name> / <repo>:<job>`. No version: a row name is what
+    anything waiting on a check refers to."""
+    return f"{title} / {repo}:{job}"
+
+
+def step_name(title, owner, version, job, path):
+    """A step's report line: `<name> / <owner>@<version>:<job>:<step>`, the
+    step being its file name; without `@<version>` when there is none."""
+    at = f"@{version}" if version else ""
+    return f"{title} / {owner}{at}:{job}:{os.path.basename(_norm(path))}"
+
+
+def _child_result(code, error):
+    if error:
+        return f"failed (error: {error})"
+    if code == 0:
+        return "passed"
+    return f"failed (exit {code})"
+
+
+def short_head(root, head):
+    """The head commit, short, for the report's header."""
+    if not head:
+        return "unknown"
+    if root is not None:
+        sha = resolve_commit(root, str(head))
+        if sha:
+            return _git_out(root, "rev-parse", "--short", sha) or sha[:7]
+    head = str(head)
+    if re.fullmatch(r"[0-9a-f]{7,40}", head):
+        return head[:7]
+    return head
+
+
+def job_rows(config, decision, results, root=None, repo=None):
     """One row per declared job, in config order."""
+    repo = repo or (repo_name(root) if root is not None else "repository")
     by_name = {j["name"]: j for j in (decision or {}).get("jobs", [])}
     rows = []
     for name, job in config["jobs"].items():
+        title = job.get("title") or name
         d = by_name.get(name)
-        row = {"name": name, "blocking": job["blocking"], "seconds": None,
+        row = {"name": name, "title": title,
+               "display": row_name(title, repo, name),
+               "blocking": job["blocking"], "seconds": None,
                "children": [], "setup_skipped": False}
         if d is None:
             row.update(state="could not run", detail="no decision")
@@ -761,16 +894,26 @@ def job_rows(config, decision, results):
                 row["setup_skipped"] = bool(r.get("setup_skipped"))
                 setup = r.get("setup")
                 if setup:
+                    path = setup.get("script") or job["setup"] or "setup"
+                    owner, version = step_owner(root, path, repo)
                     row["children"].append(
-                        (f"setup {setup.get('script') or job['setup']}",
+                        (step_name(title, owner, version, name, path),
                          setup.get("seconds"),
-                         _exit_text(setup.get("exit_code"),
-                                    setup.get("error"))))
+                         _child_result(setup.get("exit_code"),
+                                       setup.get("error"))))
                 for step in r.get("steps", []):
+                    path = step.get("file")
+                    if not path:
+                        try:
+                            path = shlex.split(str(step.get("step")))[0]
+                        except (ValueError, IndexError):
+                            path = str(step.get("step"))
+                    owner, version = step_owner(root, path, repo)
                     row["children"].append(
-                        (f"step {step.get('step')}", step.get("seconds"),
-                         _exit_text(step.get("exit_code"),
-                                    step.get("error"))))
+                        (step_name(title, owner, version, name, path),
+                         step.get("seconds"),
+                         _child_result(step.get("exit_code"),
+                                       step.get("error"))))
                 state = r.get("state")
                 if state == "passed":
                     row.update(state="passed", detail="")
@@ -831,19 +974,23 @@ def _state_text(row):
     return text
 
 
-def format_report(rows, verdict, workflow_text, setup_note=False):
-    width = max([len(r["name"]) for r in rows] + [4])
-    lines = ["git-cicd report"]
+def header_text(repo, head):
+    return (f"git-cicd report: {repo} at {head} (the change under test; a "
+            "version below is its owner's last release)")
+
+
+def format_report(rows, verdict, workflow_text, setup_note=False,
+                  header="git-cicd report"):
+    width = max([len(r["display"]) for r in rows] + [4])
+    lines = [header]
     for r in rows:
         time_text = _secs(r["seconds"]) if r["seconds"] is not None else ""
-        lines.append(f"  {r['name']:<{width}}  {_state_text(r)}"
+        lines.append(f"  {r['display']:<{width}}  {_state_text(r)}"
                      + (f"  {time_text}" if time_text else ""))
-        for label, seconds, exit_text in r["children"]:
-            lines.append(f"  {'':<{width}}    {label}  {_secs(seconds)}  "
-                         f"({exit_text})")
+        for label, seconds, result in r["children"]:
+            lines.append(f"    {label}  {result}  {_secs(seconds)}")
         if setup_note and r["setup_skipped"]:
-            lines.append(f"  {'':<{width}}    setup skipped (pass --setup to "
-                         "run it)")
+            lines.append("    setup skipped (pass --setup to run it)")
     lines.append(workflow_text)
     lines.append(verdict)
     return "\n".join(lines) + "\n"
@@ -853,17 +1000,29 @@ def _md(text):
     return str(text).replace("|", "\\|").replace("\n", " ")
 
 
-def format_markdown(rows, verdict, workflow_text, setup_note=False):
+def _md_code(text):
+    """Text as inline code, shown literally whatever it holds."""
+    text = _md(text)
+    fence = "`"
+    while fence in text:
+        fence += "`"
+    pad = " " if text.startswith("`") or text.endswith("`") else ""
+    return f"{fence}{pad}{text}{pad}{fence}"
+
+
+def format_markdown(rows, verdict, workflow_text, setup_note=False,
+                    header="git-cicd report"):
     word = verdict.split(" ", 1)[0]
     lines = [f"## git-cicd verdict: {word}", "", f"**{_md(verdict)}**", "",
+             _md(header), "",
              "| Job | State | Time | Detail |", "|---|---|---|---|"]
     for r in rows:
         state = r["state"] + ("" if r["blocking"] else " (non-blocking)")
         time_text = _secs(r["seconds"]) if r["seconds"] is not None else ""
-        lines.append(f"| {_md(r['name'])} | {_md(state)} | {time_text} | "
-                     f"{_md(r['detail'])} |")
-        for label, seconds, exit_text in r["children"]:
-            lines.append(f"| &nbsp;&nbsp;↳ `{_md(label)}` | {_md(exit_text)} "
+        lines.append(f"| {_md_code(r['display'])} | {_md(state)} | "
+                     f"{time_text} | {_md(r['detail'])} |")
+        for label, seconds, result in r["children"]:
+            lines.append(f"| &nbsp;&nbsp;↳ {_md_code(label)} | {_md(result)} "
                          f"| {_secs(seconds)} | |")
         if setup_note and r["setup_skipped"]:
             lines.append("| &nbsp;&nbsp;↳ setup | skipped | | pass --setup "
@@ -889,15 +1048,18 @@ def report(config, root, decision, results, workflow=None, setup_note=False,
             tool = "git-cicd"
         workflow_text = ("workflow does not match config: run "
                          f"{generate_command(tool)}")
-    rows = job_rows(config, decision, results)
+    repo = repo_name(root)
+    rows = job_rows(config, decision, results, root=root, repo=repo)
     passed, verdict = verdict_line(rows, decision, workflow_ok)
-    out.write(format_report(rows, verdict, workflow_text, setup_note))
+    header = header_text(repo, short_head(root, (decision or {}).get("head")))
+    out.write(format_report(rows, verdict, workflow_text, setup_note,
+                            header))
     out.flush()
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         with open(summary, "a", encoding="utf-8") as f:
             f.write(format_markdown(rows, verdict, workflow_text,
-                                    setup_note))
+                                    setup_note, header))
     return passed, verdict
 
 

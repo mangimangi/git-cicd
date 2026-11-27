@@ -331,8 +331,9 @@ def test_github_output_written(repo, tmp_path):
                       env={"GITHUB_OUTPUT": str(out)})
     assert result.returncode == 0, result.stderr
     lines = out.read_text().splitlines()
-    assert lines == ["previous=1", 'jobs=["test"]', "any=true",
-                     "max_parallel=2"]
+    assert lines == ["previous=1", 'jobs=["test"]',
+                     'names={"test": "test", "lint": "lint", "release": "release"}',
+                     "any=true", "max_parallel=2"]
 
 
 def test_github_output_none_needed(repo, tmp_path):
@@ -344,8 +345,9 @@ def test_github_output_none_needed(repo, tmp_path):
                       "--source", "feature", "--base", base, "--head", head,
                       env={"GITHUB_OUTPUT": str(out)})
     assert result.returncode == 0
-    assert out.read_text().splitlines() == ["jobs=[]", "any=false",
-                                            "max_parallel=3"]
+    assert out.read_text().splitlines() == [
+        "jobs=[]", 'names={"test": "test", "lint": "lint", "release": "release"}',
+        "any=false", "max_parallel=3"]
 
 
 def test_changed_files_out_and_human_output(repo, tmp_path):
@@ -369,7 +371,9 @@ def test_json_shape(repo):
     data, _ = decide(repo, base)
     assert set(data) == {"moment", "target", "source", "base", "head",
                          "changed_files", "jobs", "max_parallel"}
-    assert set(data["jobs"][0]) == {"name", "needed", "reason", "blocking"}
+    assert set(data["jobs"][0]) == {"name", "title", "needed", "reason",
+                                    "blocking"}
+    assert data["jobs"][0]["title"] == data["jobs"][0]["name"]
 
 
 def test_invalid_config_refused(repo):

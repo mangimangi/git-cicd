@@ -63,6 +63,7 @@ in the README.
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
+| `name` | non-empty single-line string | the job name | a short human-readable display name (`"Unit tests"`); it is data, shown in the job's row and the report, never part of a command |
 | `on` | array of `open`, `merge`, `cron` | `[]` | the moments the job runs at; several allowed, no duplicates; none means manual-only |
 | `branches` | non-empty array of patterns | **required** | target branches the job runs for (`main`, `plan/**`, `**`). For a job with `cron` in `on`, literal branch names only (no `*`, `?`, `[`) |
 | `paths` | array of patterns | none | the files that affect the job |
@@ -71,6 +72,12 @@ in the README.
 | `cron` | five-field cron expression | | required when `on` contains `cron`, refused otherwise |
 | `manual` | boolean | `true` | the job can be run by hand |
 | `blocking` | boolean | `true` | `false` makes the job non-blocking: its failure is reported and does not fail the verdict |
+
+A `name` that is not a string, is empty (or only spaces), or holds a newline,
+tab or other control character is refused naming the job and the reason.
+Quotes, `$` and backticks are allowed and shown literally: the name reaches
+the workflow only through the decide job's outputs, into a job's `name:`,
+never a `run:` block.
 
 A setup or step file must be a relative path to an **executable** regular file
 in the repository, without `..` segments. A string step containing whitespace
@@ -147,11 +154,54 @@ Every decision carries a reason, and the report shows it.
 
 ## The report and the `git-cicd verdict` check
 
-One line per declared job, in config order: `passed`, `failed (step <step>,
-exit <code>)`, `could not run (setup failed)` (or `(no result)` when a runner
-was lost), or `not needed (<reason>)`; non-blocking jobs are marked. Under each
-job that ran: the time of setup and of each step, so cost is visible in every
-pull request. Then whether the workflow matches the config, then one verdict:
+### Rows
+
+On a pull request the checks are `git-cicd decide`, one row per needed job,
+`git-cicd report`, and the commit status `git-cicd verdict`. A job's row is
+
+    <name> / <repo>:<job>        for example  Unit tests / medici:unit-tests
+
+where `<name>` is the job's display name (its job name when it has none) and
+`<repo>` the name of the repository the workflow runs in. GitHub shows it after
+the workflow's name (`git-cicd / Unit tests / medici:unit-tests`). A row name
+carries no version: it is what branch protection and anything else that waits
+on a check refers to, and it does not change when a tool is upgraded.
+
+### The report
+
+The header names the change under test: the repository and the short head
+commit (`git-cicd report: medici at 1a2b3c4 ...`). A pull request tests a
+change, not a release, so the versions in the step lines are their owners'
+last releases, never the version of the change.
+
+Then one line per declared job, in config order, named like its row:
+`passed`, `failed (step <step>, exit <code>)`, `could not run (setup failed)`
+(or `(no result)` when a runner was lost), or `not needed (<reason>)`;
+non-blocking jobs are marked. Under each job that ran, one line for setup and
+for every step that ran, with its result and its time, so cost is visible in
+every pull request:
+
+    <name> / <owner>@<version>:<job>:<step>  passed  2.5s
+
+`<step>` is the step's (or setup's) file name. `<owner>` and `<version>`:
+
+| The file is | `<owner>` | `<version>` |
+|---|---|---|
+| under `.vendored/pkg/<vendor>/` | the vendor | the first line of `.vendored/manifests/<vendor>.version` |
+| anywhere else | the repository (`<repo>`) | the first line of the version file the repository's git-semver config names (`version_file` in `.vendored/configs/git-semver.json`, default `VERSION`) |
+
+When that file does not exist (or is empty) the line has no `@<version>`; a
+version is never guessed. Step lines are in the report only: there is no row
+or status per step, and the `git-cicd verdict` description stays the verdict
+line (at most 140 characters).
+
+`<repo>` comes from the platform in Actions (the name part of
+`GITHUB_REPOSITORY`, and `github.event.repository.name` in a row). Locally
+(`git-cicd check`) it is the last path segment of the `origin` remote's URL
+without `.git`; with no `origin` remote, the name of the checkout's top-level
+directory.
+
+After the jobs: whether the workflow matches the config, then one verdict:
 
 - **FAILED** when a blocking job failed or could not run, or the workflow does
   not match the config;
@@ -216,7 +266,8 @@ differ only in jobs that are not `cron` generate the same file.
   run the config's scripts (a `concurrency` group per pull request and job on
   the `run` job only; there is none on the workflow or on the status-posting
   jobs, so the newer run's pending status never waits for the older run).
-- `decide` works out the needed jobs; `run` gives each needed job its own
+- `decide` works out the needed jobs and their display names (its `jobs`
+  and `names` outputs); `run` gives each needed job its own
   runner (`ubuntu-latest`), at most `max_parallel` at once, always with setup;
   `verdict` (`git-cicd report`) collects the results, verifies the workflow,
   reports and sets the `git-cicd verdict` status.

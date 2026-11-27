@@ -325,3 +325,29 @@ def test_template_documents_reserved_triggers():
     assert "`workflow_dispatch` with one free-text `job` input" in head
     assert "`permissions` cannot be expressions" in head
     assert "cron moment is not built yet" in head
+
+
+ROW_NAME = ("    name: ${{ fromJSON(needs.decide.outputs.names)[matrix.job] }}"
+            " / ${{ github.event.repository.name }}:${{ matrix.job }}\n")
+
+
+def test_run_row_is_display_name_repo_and_job(tool_repo):
+    """The row is `<name> / <repo>:<job>`, from the decide job's outputs and
+    the event, never from the config text, and carries no version."""
+    text = generate(tool_repo, base_config())
+    jobs = job_blocks(text)
+    assert ROW_NAME in jobs["run"]
+    assert "      names: ${{ steps.decide.outputs.names }}\n" in jobs["decide"]
+    assert "    name: git-cicd decide\n" in jobs["decide"]
+    assert "    name: git-cicd report\n" in jobs["verdict"]
+    assert "version" not in ROW_NAME
+
+
+def test_display_names_do_not_change_the_file(tool_repo):
+    a = generate(tool_repo, base_config())
+    config = base_config()
+    config["jobs"]["test"]["name"] = "Unit tests"
+    config["jobs"]["release"]["name"] = "Release `$(x)` \"q\""
+    b = generate(tool_repo, config)
+    assert a == b
+    assert "Unit tests" not in b

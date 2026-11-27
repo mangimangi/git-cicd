@@ -373,3 +373,42 @@ def test_main_in_process(scripts, capsys):
     scripts.config(STRAWMAN)
     assert git_cicd.main(["validate"]) == 0
     assert "config ok: 2 jobs" in capsys.readouterr().out
+
+
+# ── name (display name) ─────────────────────────────────────────────────────
+
+def test_name_validates(scripts):
+    scripts.config({"jobs": {"test": job(name="Unit tests")}})
+    result = scripts.run("validate")
+    assert result.returncode == 0, result.stderr
+    config = git_cicd.load_config(str(scripts.path))
+    assert config["jobs"]["test"]["title"] == "Unit tests"
+    assert config["jobs"]["test"]["name"] == "test"
+
+
+def test_name_defaults_to_job_name(scripts):
+    scripts.config({"jobs": {"test": job()}})
+    config = git_cicd.load_config(str(scripts.path))
+    assert config["jobs"]["test"]["title"] == "test"
+
+
+def test_name_with_shell_metacharacters_is_data(scripts):
+    name = "It's \"$(touch pwned)\" `id` $HOME; | &"
+    scripts.config({"jobs": {"test": job(name=name)}})
+    config = git_cicd.load_config(str(scripts.path))
+    assert config["jobs"]["test"]["title"] == name
+
+
+@pytest.mark.parametrize("value,reason", [
+    (42, "name must be a string"),
+    (None, "name must be a string"),
+    (["a"], "name must be a string"),
+    ("", "name is empty"),
+    ("   ", "name is empty"),
+    ("two\nlines", "must be a single line"),
+    ("cr\rhere", "must be a single line"),
+    ("tab\there", "must be a single line"),
+])
+def test_bad_name_refused(scripts, value, reason):
+    refused(scripts, {"jobs": {"test": job(name=value)}},
+            "job test: name", reason)
