@@ -190,11 +190,36 @@ that catches a stale file and any hand edit.
 
 ## Installing
 
-git-cicd is vendored into a repository by git-vendored:
+**Install and upgrade git-cicd by running the repository's Install Vendored
+workflow, with `mangimangi/git-cicd` as the vendor.** Nothing else is the way
+to install or upgrade it.
 
-```bash
-python3 .vendored/install mangimangi/git-cicd
-```
+1. In the repository, open the Actions tab, pick **Install Vendored**
+   (`.github/workflows/install-vendored.yml`), choose *Run workflow* and enter
+   `mangimangi/git-cicd` as the vendor (the version defaults to the latest).
+2. The workflow opens the install pull request from the branch
+   `chore/install-git-cicd`. That pull request carries the tool, the schema,
+   the config when it is missing, and the regenerated
+   `.github/workflows/git-cicd.yml`. Review and merge it like any other.
+3. Upgrades are the same run (the workflow's weekly schedule also updates every
+   vendor); each one opens a new install pull request with the regenerated
+   workflow.
+
+**The one exception is git-vendored itself.** A repository with no `.vendored/`
+yet gets git-vendored once from git-vendored's documented bootstrap (the
+`curl ... install.sh | bash` in git-vendored's README), because that bootstrap
+is what delivers the Install Vendored workflow. Everything after it, git-cicd
+included, goes through the workflow.
+
+**Do not run `.vendored/install` by hand in a checkout to install or upgrade.**
+The workflow runs `python3 .vendored/install mangimangi/git-cicd --pr` for you;
+run by hand and pushed from an ordinary branch, the same command produces a
+pull request that `.vendored/check` (the Check Vendor Files job) rejects with
+"Protected vendor files were modified": the check lets vendor-managed files
+through only from the vendor's own install branch (`chore/install-git-cicd`).
+An agent session never writes, copies or edits a vendor-protected file at all;
+when a task needs a vendored tool installed or upgraded, that is a step for the
+repository's owner (running the workflow), and the session stops and says so.
 
 What lands where:
 
