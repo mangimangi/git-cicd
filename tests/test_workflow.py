@@ -73,7 +73,7 @@ def test_generate_writes_file(tool_repo):
 def test_no_expressions_inside_run_blocks(tool_repo):
     text = generate(tool_repo, base_config())
     blocks = run_blocks(text)
-    assert len(blocks) == 5
+    assert len(blocks) == 8
     for block in blocks:
         assert "${{" not in block, block
 
@@ -88,11 +88,7 @@ def test_workflow_contract(tool_repo):
     text = generate(tool_repo, base_config())
     assert "  pull_request:\n    types: [opened, synchronize, reopened]\n" in text
     assert "permissions:\n  contents: read\n" in text
-    assert ("group: git-cicd-${{ github.workflow }}-${{ "
-            "github.event.pull_request.number || github.ref }}") in text
-    assert ("cancel-in-progress: ${{ github.event_name == 'pull_request' }}"
-            in text)
-    assert "name: git-cicd verdict" in text
+    assert "name: git-cicd report" in text
     assert "if: always()" in text
     assert "max-parallel: ${{ fromJSON(needs.decide.outputs.max_parallel) }}" \
         in text
@@ -102,7 +98,7 @@ def test_workflow_contract(tool_repo):
     assert "VENDOR_PAT: ${{ secrets.VENDOR_PAT }}" in text
     assert "--setup --result=" in text
     assert "name: git-cicd-result-${{ matrix.job }}" in text
-    uses = re.findall(r"uses:\s*(\S+)", text)
+    uses = re.findall(r"(?m)^\s*(?:- )?uses:\s*(\S+)", text)
     assert uses and all(re.fullmatch(
         r"actions/(checkout|upload-artifact|download-artifact)@v\d+", u)
         for u in uses), uses
@@ -113,6 +109,102 @@ def test_workflow_contract(tool_repo):
     assert 'BASE: ${{ github.event.pull_request.base.sha }}' in text
     assert 'HEAD_SHA: ${{ github.event.pull_request.head.sha }}' in text
     assert '--target="$TARGET"' in text and '--source="$SOURCE"' in text
+
+
+def job_blocks(text):
+    """Each job's lines under `jobs:`, by job id."""
+    body = text.split("\njobs:\n", 1)[1]
+    jobs = {}
+    for chunk in re.split(r"(?m)^(?=  [A-Za-z0-9_-]+:$)", body):
+        m = re.match(r"  ([A-Za-z0-9_-]+):\n", chunk)
+        if m:
+            jobs[m.group(1)] = chunk
+    return jobs
+
+
+STATUS_PERMISSIONS = ("    permissions:\n      contents: read\n"
+                      "      statuses: write\n")
+
+
+def test_permissions_status_write_only(tool_repo):
+    """On the pull request trigger the token may write commit statuses, and
+    nothing else: contents stay read-only, and the jobs that run the config's
+    scripts get no write at all."""
+    text = generate(tool_repo, base_config())
+    top = text.split("\njobs:\n", 1)[0]
+    assert top.endswith("\npermissions:\n  contents: read\n")
+    jobs = job_blocks(text)
+    assert set(jobs) == {"decide", "run", "verdict"}
+    assert STATUS_PERMISSIONS in jobs["decide"]
+    assert STATUS_PERMISSIONS in jobs["verdict"]
+    assert "permissions:" not in jobs["run"]
+    writes = re.findall(r"^\s*([a-z-]+):\s*write\s*$", text, re.M)
+    assert writes == ["statuses", "statuses"]
+    assert "write-all" not in text
+    assert text.count("permissions:") == 3
+
+
+RUN_CONCURRENCY = (
+    "    concurrency:\n"
+    "      group: git-cicd-${{ github.workflow }}-${{ "
+    "github.event.pull_request.number || github.ref }}-${{ matrix.job }}\n"
+    "      cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n")
+
+
+def test_concurrency_only_on_the_script_running_job(tool_repo):
+    """The pending status never waits on a superseded run: no concurrency at
+    the workflow level or on the status-posting jobs. A newer push still
+    cancels the older run's script-running jobs, one group per pull request
+    and job, so the jobs of one run do not cancel each other."""
+    text = generate(tool_repo, base_config())
+    top = text.split("\njobs:\n", 1)[0]
+    assert not re.search(r"(?m)^concurrency:", top)
+    jobs = job_blocks(text)
+    assert "concurrency" not in jobs["decide"]
+    assert "concurrency" not in jobs["verdict"]
+    assert RUN_CONCURRENCY in jobs["run"]
+    assert text.count("concurrency:") == 1
+
+
+def test_superseded_run_stops_after_deciding(tool_repo):
+    """A run whose head is no longer the pull request's head fails in decide,
+    after the pending status and the decisions, so it queues no job that
+    could cancel the newer run's and its report is not green for jobs that
+    never ran."""
+    text = generate(tool_repo, base_config())
+    steps = job_blocks(text)["decide"].split("      - name: ")[1:]
+    names = [s.split("\n", 1)[0] for s in steps]
+    assert names.index("Stop if a newer push superseded this run") == \
+        names.index("Decide which jobs the change needs") + 1
+    guard = steps[names.index("Stop if a newer push superseded this run")]
+    assert "if: github.event_name == 'pull_request'" in guard
+    assert "PR_NUMBER: ${{ github.event.pull_request.number }}" in guard
+    assert 'git ls-remote origin "refs/pull/$PR_NUMBER/head"' in guard
+    assert '"$LATEST" != "$HEAD_SHA"' in guard and "exit 1" in guard
+
+
+def test_verdict_status_pending_first_and_final_last(tool_repo):
+    """The `git-cicd verdict` status is set to pending by the first step of
+    the first job and to the verdict by the last step of the report job, which
+    runs whatever happened before it; no job's check run carries the name."""
+    text = generate(tool_repo, base_config())
+    jobs = job_blocks(text)
+    assert "needs:" not in jobs["decide"]
+    decide_steps = jobs["decide"].split("      - name: ")[1:]
+    assert decide_steps[0].startswith(
+        "Set the git-cicd verdict status to pending\n")
+    assert "if: github.event_name == 'pull_request'" in decide_steps[0]
+    assert "-f state=pending" in decide_steps[0]
+    assert '-f context="git-cicd verdict"' in decide_steps[0]
+    report_steps = jobs["verdict"].split("      - name: ")[1:]
+    last = report_steps[-1]
+    assert last.startswith("Set the git-cicd verdict status\n")
+    assert "if: always() && github.event_name == 'pull_request'" in last
+    assert "STATE=failure" in last
+    assert '-f context="git-cicd verdict"' in last
+    assert "--verdict-out=" in report_steps[-2]
+    assert "if: always()" in jobs["verdict"].split("    steps:")[0]
+    assert not re.search(r"(?m)^    name: git-cicd verdict$", text)
 
 
 def test_non_cron_differences_generate_identical_file(tool_repo):

@@ -288,3 +288,80 @@ def test_load_results_ignores_other_json(tmp_path):
     (tmp_path / "a" / "other.json").write_text("[1]")
     (tmp_path / "a" / "notes.txt").write_text("hi")
     assert list(git_cicd.load_results(str(tmp_path))) == ["x"]
+
+
+# ── --verdict-out: what the workflow sets the `git-cicd verdict` status to ──
+
+def test_verdict_out_passed(config, repo, tmp_path):
+    repo.install_tool()
+    assert repo.run("generate").returncode == 0
+    (tmp_path / "d.json").write_text(json.dumps(decision()))
+    out = tmp_path / "v" / "verdict.txt"
+    result = repo.run("report", "--decisions", str(tmp_path / "d.json"),
+                      "--results", str(tmp_path / "none"),
+                      "--verdict-out", str(out))
+    assert result.returncode == 0, result.stdout + result.stderr
+    state, description = out.read_text().splitlines()
+    assert state == "success"
+    assert description.startswith("PASSED - 0 of 3 jobs needed: ")
+    assert description == result.stdout.splitlines()[-1]
+
+
+def test_verdict_out_failed_job(config, repo, tmp_path):
+    repo.install_tool()
+    assert repo.run("generate").returncode == 0
+    (tmp_path / "d.json").write_text(json.dumps(
+        decision(test=(True, "1 changed file match paths"))))
+    res = passed_result("test")
+    res.update(state="failed", failed_step="ci/cov.sh", exit_code=1)
+    (tmp_path / "r").mkdir()
+    (tmp_path / "r" / "result.json").write_text(json.dumps(res))
+    out = tmp_path / "verdict.txt"
+    result = repo.run("report", "--decisions", str(tmp_path / "d.json"),
+                      "--results", str(tmp_path / "r"),
+                      "--verdict-out", str(out))
+    assert result.returncode == 1
+    state, description = out.read_text().splitlines()
+    assert state == "failure"
+    assert description == "FAILED - 1 of 3 jobs needed, 1 failed"
+
+
+def test_verdict_out_stale_workflow_fails(config, repo, tmp_path):
+    repo.install_tool()
+    (tmp_path / "d.json").write_text(json.dumps(decision()))
+    out = tmp_path / "verdict.txt"
+    result = repo.run("report", "--decisions", str(tmp_path / "d.json"),
+                      "--results", str(tmp_path / "none"),
+                      "--verdict-out", str(out))
+    assert result.returncode == 1
+    assert out.read_text().splitlines()[0] == "failure"
+
+
+def test_verdict_out_moment_not_built(config, repo, tmp_path):
+    repo.install_tool()
+    out = tmp_path / "verdict.txt"
+    result = repo.run("report", "--moment", "cron", "--decisions", "x",
+                      "--results", "y", "--verdict-out", str(out))
+    assert result.returncode == 2
+    state, description = out.read_text().splitlines()
+    assert state == "failure"
+    assert "the cron moment is not built yet" in description
+
+
+def test_verdict_out_invalid_config(repo, tmp_path):
+    repo.install_tool()
+    repo.config({"jobs": {"x": {"steps": ["ci/missing.sh"]}}})
+    out = tmp_path / "verdict.txt"
+    result = repo.run("report", "--decisions", "x", "--results", "y",
+                      "--verdict-out", str(out))
+    assert result.returncode == 2
+    state, description = out.read_text().splitlines()
+    assert state == "failure"
+    assert description.startswith("FAILED - the config is invalid: ")
+
+
+def test_status_description_is_one_short_line():
+    assert git_cicd.status_description("PASSED - a\nb") == "PASSED - a b"
+    long = git_cicd.status_description("FAILED - " + "x" * 300)
+    assert len(long) == git_cicd.STATUS_DESCRIPTION_MAX
+    assert long.endswith("...")
