@@ -1,0 +1,384 @@
+#!/usr/bin/env python3
+"""git-cicd - decide which jobs a change needs, run them, and report.
+
+A repository declares jobs in .vendored/configs/git-cicd.json. Each job is a
+setup script and ordered steps, every one a plain file the repository owns.
+git-cicd knows nothing about what the checks are: it decides from a change
+which jobs are needed, runs them, and reports every decision, so that
+"nothing ran" is never read as "passed".
+
+Python 3 standard library and the git CLI only.
+
+Subcommands:
+  validate   load and validate the config
+"""
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+
+CONFIG_PATH = ".vendored/configs/git-cicd.json"
+
+MOMENTS = ("open", "merge", "cron")
+DEFAULT_MAX_PARALLEL = 3
+
+TOP_LEVEL_FIELDS = ("_vendor", "jobs", "needs_nothing", "max_parallel")
+JOB_FIELDS = ("on", "branches", "paths", "setup", "steps", "cron", "manual",
+              "blocking")
+
+JOB_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+GLOB_CHARS = ("*", "?", "[")
+
+
+class ConfigError(Exception):
+    """The config breaks the interface. Carries every error found."""
+
+    def __init__(self, errors):
+        self.errors = list(errors)
+        super().__init__("\n".join(self.errors))
+
+
+class UsageError(Exception):
+    """A request the tool refuses (exit 2)."""
+
+
+# ── Patterns ────────────────────────────────────────────────────────────────
+
+_PATTERN_CACHE = {}
+
+
+def compile_pattern(pattern):
+    """Compile a glob pattern to a regex.
+
+    `**` matches any sequence including `/` (`dir/**` matches everything
+    under dir; a `**/` segment may also match no directory at all), `*`
+    matches any sequence without `/`, `?` matches one character other than
+    `/`. Everything else is literal. fnmatch is not used: its `*` crosses `/`.
+    """
+    cached = _PATTERN_CACHE.get(pattern)
+    if cached is not None:
+        return cached
+    out = []
+    i = 0
+    n = len(pattern)
+    while i < n:
+        c = pattern[i]
+        if c == "*":
+            if i + 1 < n and pattern[i + 1] == "*":
+                at_segment_start = i == 0 or pattern[i - 1] == "/"
+                if at_segment_start and i + 2 < n and pattern[i + 2] == "/":
+                    out.append("(?:.*/)?")
+                    i += 3
+                else:
+                    out.append(".*")
+                    i += 2
+            else:
+                out.append("[^/]*")
+                i += 1
+        elif c == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(c))
+            i += 1
+    regex = re.compile("".join(out) + r"\Z", re.DOTALL)
+    _PATTERN_CACHE[pattern] = regex
+    return regex
+
+
+def match(pattern, path):
+    """True when path matches the glob pattern as a whole."""
+    return compile_pattern(pattern).match(path) is not None
+
+
+def match_any(patterns, path):
+    return any(match(p, path) for p in patterns)
+
+
+# ── Repository ──────────────────────────────────────────────────────────────
+
+def git(*args, cwd=None, check=False):
+    """Run git with a list argv (never through a shell)."""
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True,
+                          text=True, check=check)
+
+
+def repo_root(cwd=None):
+    result = git("rev-parse", "--show-toplevel", cwd=cwd)
+    if result.returncode != 0:
+        raise UsageError("not inside a git repository: "
+                         + result.stderr.strip())
+    return result.stdout.strip()
+
+
+# ── Config ──────────────────────────────────────────────────────────────────
+
+def _is_str_list(value):
+    return isinstance(value, list) and all(isinstance(v, str) for v in value)
+
+
+def _check_file(root, path, where):
+    """Errors for a setup or step file: a repository path to an executable
+    regular file, relative, without `..` segments."""
+    if path == "":
+        return [f"{where}: empty path"]
+    if os.path.isabs(path):
+        return [f"{where}: {path} is an absolute path; use a path relative "
+                "to the repository root"]
+    if ".." in path.replace("\\", "/").split("/"):
+        return [f"{where}: {path} contains a '..' segment"]
+    full = os.path.join(root, path)
+    if not os.path.isfile(full):
+        return [f"{where}: {path} is not a file in the repository"]
+    if not os.access(full, os.X_OK):
+        return [f"{where}: {path} is not executable (chmod +x it)"]
+    return []
+
+
+def _validate_step(root, step, where):
+    if isinstance(step, str):
+        if step.strip() != step or any(ch.isspace() for ch in step):
+            return [f"{where}: {step!r} contains whitespace; a step is a file "
+                    "plus fixed arguments, never a shell command line - use "
+                    "the array form [\"file\", \"arg\", ...]"]
+        return _check_file(root, step, where)
+    if isinstance(step, list):
+        if not step:
+            return [f"{where}: empty array; a step is a file plus fixed "
+                    "arguments"]
+        if not _is_str_list(step):
+            return [f"{where}: every element of an array step must be a "
+                    "string"]
+        return _check_file(root, step[0], where)
+    return [f"{where}: a step must be a file (string) or an array of a file "
+            "and fixed arguments"]
+
+
+def _validate_job(root, name, job):
+    """Return (errors, normalized job)."""
+    errors = []
+    prefix = f"job {name}"
+    if not JOB_NAME_RE.match(name):
+        errors.append(f"{prefix}: invalid job name (letters, digits, - and _ "
+                      "only)")
+    if not isinstance(job, dict):
+        return errors + [f"{prefix}: a job must be an object"], None
+
+    for key in job:
+        if key not in JOB_FIELDS:
+            errors.append(f"{prefix}: unknown field {key}")
+
+    # on
+    on = job.get("on", [])
+    if not _is_str_list(on):
+        errors.append(f"{prefix}: on must be an array of moments "
+                      f"({', '.join(MOMENTS)})")
+        on = []
+    else:
+        for moment in on:
+            if moment not in MOMENTS:
+                errors.append(f"{prefix}: unknown moment {moment!r} in on "
+                              f"(allowed: {', '.join(MOMENTS)})")
+        dupes = sorted({m for m in on if on.count(m) > 1})
+        for moment in dupes:
+            errors.append(f"{prefix}: moment {moment} listed more than once "
+                          "in on")
+
+    # branches
+    branches = job.get("branches")
+    if "branches" not in job:
+        errors.append(f"{prefix}: missing required field branches")
+        branches = []
+    elif not _is_str_list(branches):
+        errors.append(f"{prefix}: branches must be an array of strings")
+        branches = []
+    elif not branches:
+        errors.append(f"{prefix}: missing required field branches (the list "
+                      "is empty)")
+    elif any(b == "" for b in branches):
+        errors.append(f"{prefix}: branches contains an empty pattern")
+
+    # cron
+    has_cron = "cron" in on
+    cron = job.get("cron")
+    if "cron" in job:
+        if not has_cron:
+            errors.append(f"{prefix}: cron is set but on does not contain "
+                          "cron")
+        elif not isinstance(cron, str):
+            errors.append(f"{prefix}: cron must be a string cron expression")
+        elif len(cron.split()) != 5:
+            errors.append(f"{prefix}: cron {cron!r} is not a cron expression "
+                          "(five space-separated fields)")
+    elif has_cron:
+        errors.append(f"{prefix}: on contains cron but no cron expression is "
+                      "given")
+    if has_cron:
+        for b in branches:
+            if any(ch in b for ch in GLOB_CHARS):
+                errors.append(f"{prefix}: a cron job's branches are literal "
+                              f"names; {b!r} is a pattern")
+
+    # paths
+    paths = job.get("paths")
+    if "paths" in job and not _is_str_list(paths):
+        errors.append(f"{prefix}: paths must be an array of strings")
+        paths = None
+
+    # setup
+    setup = job.get("setup")
+    if "setup" in job:
+        if not isinstance(setup, str):
+            errors.append(f"{prefix}: setup must be one repository path "
+                          "(a string)")
+            setup = None
+        elif any(ch.isspace() for ch in setup):
+            errors.append(f"{prefix}: setup {setup!r} contains whitespace; "
+                          "setup is one file, never a shell command line")
+        else:
+            errors.extend(_check_file(root, setup, f"{prefix}: setup"))
+
+    # steps
+    steps = job.get("steps")
+    norm_steps = []
+    if "steps" not in job:
+        errors.append(f"{prefix}: missing required field steps")
+    elif not isinstance(steps, list) or not steps:
+        errors.append(f"{prefix}: steps must be a non-empty array")
+    else:
+        for i, step in enumerate(steps, 1):
+            step_errors = _validate_step(root, step, f"{prefix}: step {i}")
+            errors.extend(step_errors)
+            if not step_errors:
+                norm_steps.append([step] if isinstance(step, str)
+                                  else list(step))
+
+    # flags
+    for flag in ("manual", "blocking"):
+        if flag in job and not isinstance(job[flag], bool):
+            errors.append(f"{prefix}: {flag} must be a boolean")
+
+    normalized = {
+        "name": name,
+        "on": list(on),
+        "branches": list(branches),
+        "paths": list(paths) if paths is not None else None,
+        "setup": setup,
+        "steps": norm_steps,
+        "cron": cron if has_cron else None,
+        "manual": job.get("manual", True) is not False,
+        "blocking": job.get("blocking", True) is not False,
+    }
+    return errors, normalized
+
+
+def validate_config(data, root):
+    """Validate a parsed config. Return the normalized config or raise
+    ConfigError with every error found."""
+    errors = []
+    if not isinstance(data, dict):
+        raise ConfigError(["config: the top level must be a JSON object"])
+
+    for key in data:
+        if key not in TOP_LEVEL_FIELDS:
+            errors.append(f"config: unknown field {key}")
+
+    jobs = {}
+    raw_jobs = data.get("jobs")
+    if "jobs" not in data:
+        errors.append("config: missing required field jobs")
+    elif not isinstance(raw_jobs, dict):
+        errors.append("config: jobs must be an object (job name -> job)")
+    else:
+        for name, job in raw_jobs.items():
+            job_errors, normalized = _validate_job(root, name, job)
+            errors.extend(job_errors)
+            if normalized is not None:
+                jobs[name] = normalized
+
+    needs_nothing = data.get("needs_nothing", [])
+    if not _is_str_list(needs_nothing):
+        errors.append("config: needs_nothing must be an array of path "
+                      "patterns")
+        needs_nothing = []
+
+    max_parallel = data.get("max_parallel", DEFAULT_MAX_PARALLEL)
+    if (not isinstance(max_parallel, int) or isinstance(max_parallel, bool)
+            or max_parallel < 1):
+        errors.append("config: max_parallel must be a positive integer")
+        max_parallel = DEFAULT_MAX_PARALLEL
+
+    if errors:
+        raise ConfigError(errors)
+    return {
+        "jobs": jobs,
+        "needs_nothing": list(needs_nothing),
+        "max_parallel": max_parallel,
+    }
+
+
+def load_config(root, path=None):
+    """Read and validate the config. Raise ConfigError on any problem."""
+    path = path or os.path.join(root, CONFIG_PATH)
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except OSError as e:
+        raise ConfigError([f"config: cannot read {path}: {e.strerror}"])
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise ConfigError([f"config: {path} is not valid JSON: {e}"])
+    config = validate_config(data, root)
+    config["path"] = path
+    return config
+
+
+# ── Commands ────────────────────────────────────────────────────────────────
+
+def cmd_validate(args, root):
+    config = load_config(root, args.config)
+    n = len(config["jobs"])
+    print(f"config ok: {n} jobs")
+    return 0
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="git-cicd",
+        description="Decide which jobs a change needs, run them, report.")
+    sub = parser.add_subparsers(dest="command", metavar="COMMAND")
+    sub.required = True
+
+    def add(name, func, help_text):
+        p = sub.add_parser(name, help=help_text, description=help_text)
+        p.add_argument("--config", default=None,
+                       help=f"config file (default: {CONFIG_PATH} at the "
+                            "repository root)")
+        p.set_defaults(func=func)
+        return p
+
+    add("validate", cmd_validate, "load and validate the config")
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        root = repo_root()
+        return args.func(args, root)
+    except ConfigError as e:
+        for line in e.errors:
+            print(line, file=sys.stderr)
+        return 2
+    except UsageError as e:
+        print(f"git-cicd: {e}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

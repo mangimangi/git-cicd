@@ -1,0 +1,375 @@
+"""Tests for loading and validating .vendored/configs/git-cicd.json."""
+
+import json
+
+import pytest
+
+from tests.conftest import git_cicd
+
+
+@pytest.fixture
+def scripts(repo):
+    for name in ("ci/setup.sh", "ci/test.sh", "ci/coverage.sh", "ci/bump.sh",
+                 "ci/publish.sh"):
+        repo.script(name)
+    return repo
+
+
+STRAWMAN = {
+    "jobs": {
+        "test": {"on": ["open"], "branches": ["**"],
+                 "paths": ["medici/**", "tests/**"], "setup": "ci/setup.sh",
+                 "steps": ["ci/test.sh", "ci/coverage.sh"]},
+        "release": {"on": ["merge"], "branches": ["main"],
+                    "steps": ["ci/bump.sh", "ci/publish.sh"]},
+    }
+}
+
+
+def job(**fields):
+    base = {"on": ["open"], "branches": ["**"], "steps": ["ci/test.sh"]}
+    base.update(fields)
+    return base
+
+
+def refused(repo, config, *expected):
+    """Assert the config is refused (exit 2) naming every expected text."""
+    repo.config(config)
+    result = repo.run("validate")
+    assert result.returncode == 2, result.stdout + result.stderr
+    for text in expected:
+        assert text in result.stderr, result.stderr
+    return result
+
+
+def test_strawman_validates(scripts):
+    scripts.config(STRAWMAN)
+    result = scripts.run("validate")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "config ok: 2 jobs"
+
+
+def test_strawman_normalized(scripts):
+    scripts.config(STRAWMAN)
+    config = git_cicd.load_config(str(scripts.path))
+    test = config["jobs"]["test"]
+    assert test["steps"] == [["ci/test.sh"], ["ci/coverage.sh"]]
+    assert test["setup"] == "ci/setup.sh"
+    assert test["manual"] is True and test["blocking"] is True
+    assert config["jobs"]["release"]["paths"] is None
+    assert config["max_parallel"] == 3
+    assert config["needs_nothing"] == []
+    assert list(config["jobs"]) == ["test", "release"]
+
+
+def test_all_optional_fields_accepted(scripts):
+    config = {
+        "_vendor": {"repo": "mangimangi/git-cicd", "anything": [1, 2]},
+        "jobs": {
+            "test": job(paths=["src/**"], setup="ci/setup.sh",
+                        steps=["ci/test.sh", ["ci/coverage.sh", "--min", "80",
+                                              "$(x); `y` && z"]],
+                        manual=False, blocking=False),
+            "nightly": {"on": ["cron", "open", "merge"],
+                        "branches": ["main", "plan/x"],
+                        "cron": "0 3 * * 1", "steps": ["ci/test.sh"]},
+            "manual-only": {"branches": ["main"], "steps": ["ci/test.sh"]},
+            "empty_on": {"on": [], "branches": ["**"],
+                         "steps": ["ci/test.sh"]},
+        },
+        "needs_nothing": [".pearls/**", "*.md"],
+        "max_parallel": 5,
+    }
+    scripts.config(config)
+    result = scripts.run("validate")
+    assert result.returncode == 0, result.stderr
+    loaded = git_cicd.load_config(str(scripts.path))
+    assert loaded["max_parallel"] == 5
+    assert loaded["needs_nothing"] == [".pearls/**", "*.md"]
+    test = loaded["jobs"]["test"]
+    assert test["manual"] is False and test["blocking"] is False
+    assert test["steps"][1] == ["ci/coverage.sh", "--min", "80",
+                                "$(x); `y` && z"]
+    assert loaded["jobs"]["nightly"]["cron"] == "0 3 * * 1"
+    assert loaded["jobs"]["manual-only"]["on"] == []
+
+
+def test_vendor_key_ignored(scripts):
+    scripts.config({"_vendor": "not even an object", "jobs": {}})
+    assert scripts.run("validate").returncode == 0
+
+
+def test_empty_jobs_valid(repo):
+    repo.config({"jobs": {}, "needs_nothing": []})
+    result = repo.run("validate")
+    assert result.returncode == 0
+    assert "config ok: 0 jobs" in result.stdout
+
+
+def test_explicit_config_path(scripts):
+    scripts.write("other.json", json.dumps(STRAWMAN))
+    result = scripts.run("validate", "--config", "other.json")
+    assert result.returncode == 0, result.stderr
+
+
+def test_runs_from_subdirectory(scripts):
+    scripts.config(STRAWMAN)
+    (scripts.path / "ci").mkdir(exist_ok=True)
+    result = scripts.run("validate", cwd=scripts.path / "ci")
+    assert result.returncode == 0, result.stderr
+
+
+# ── refusals ────────────────────────────────────────────────────────────────
+
+def test_job_without_branches(scripts):
+    j = job()
+    del j["branches"]
+    refused(scripts, {"jobs": {"test": j}},
+            "job test: missing required field branches")
+
+
+def test_job_with_empty_branches(scripts):
+    refused(scripts, {"jobs": {"test": job(branches=[])}},
+            "job test: missing required field branches")
+
+
+def test_step_not_a_file(scripts):
+    refused(scripts, {"jobs": {"test": job(steps=["ci/missing.sh"])}},
+            "job test: step 1: ci/missing.sh is not a file in the repository")
+
+
+def test_step_is_a_directory(scripts):
+    refused(scripts, {"jobs": {"test": job(steps=["ci"])}},
+            "job test: step 1: ci is not a file")
+
+
+def test_step_not_executable(scripts):
+    scripts.write("ci/plain.sh", "echo hi\n")
+    refused(scripts, {"jobs": {"test": job(steps=["ci/plain.sh"])}},
+            "job test: step 1: ci/plain.sh is not executable")
+
+
+def test_step_shell_string(scripts):
+    refused(scripts, {"jobs": {"test": job(steps=["ci/test.sh --fast"])}},
+            "job test: step 1:", "whitespace", "array form")
+
+
+def test_step_absolute_path(scripts):
+    refused(scripts, {"jobs": {"test": job(steps=["/bin/true"])}},
+            "job test: step 1: /bin/true is an absolute path")
+
+
+def test_step_dotdot(scripts):
+    refused(scripts, {"jobs": {"test": job(steps=["ci/../ci/test.sh"])}},
+            "job test: step 1:", "'..' segment")
+
+
+def test_step_empty_array(scripts):
+    refused(scripts, {"jobs": {"test": job(steps=[[]])}},
+            "job test: step 1: empty array")
+
+
+def test_step_array_with_non_string(scripts):
+    refused(scripts, {"jobs": {"test": job(steps=[["ci/test.sh", 3]])}},
+            "job test: step 1: every element of an array step must be a "
+            "string")
+
+
+def test_step_wrong_type(scripts):
+    refused(scripts, {"jobs": {"test": job(steps=[{"run": "x"}])}},
+            "job test: step 1: a step must be a file")
+
+
+def test_step_array_file_missing(scripts):
+    refused(scripts, {"jobs": {"test": job(steps=[["ci/nope.sh", "-x"]])}},
+            "job test: step 1: ci/nope.sh is not a file")
+
+
+def test_steps_missing_or_empty(scripts):
+    j = job()
+    del j["steps"]
+    refused(scripts, {"jobs": {"a": j, "b": job(steps=[])}},
+            "job a: missing required field steps",
+            "job b: steps must be a non-empty array")
+
+
+def test_setup_not_a_file(scripts):
+    refused(scripts, {"jobs": {"test": job(setup="ci/nope.sh")}},
+            "job test: setup: ci/nope.sh is not a file in the repository")
+
+
+def test_setup_not_executable(scripts):
+    scripts.write("ci/plain.sh", "echo hi\n")
+    refused(scripts, {"jobs": {"test": job(setup="ci/plain.sh")}},
+            "job test: setup: ci/plain.sh is not executable")
+
+
+def test_setup_shell_string(scripts):
+    refused(scripts, {"jobs": {"test": job(setup="ci/setup.sh && rm -rf")}},
+            "job test: setup", "whitespace")
+
+
+def test_setup_wrong_type(scripts):
+    refused(scripts, {"jobs": {"test": job(setup=["ci/setup.sh"])}},
+            "job test: setup must be one repository path")
+
+
+def test_unknown_moment(scripts):
+    refused(scripts, {"jobs": {"test": job(on=["open", "push"])}},
+            "job test: unknown moment 'push' in on")
+
+
+def test_duplicate_moment(scripts):
+    refused(scripts, {"jobs": {"test": job(on=["open", "open"])}},
+            "job test: moment open listed more than once")
+
+
+def test_on_wrong_type(scripts):
+    refused(scripts, {"jobs": {"test": job(on="open")}},
+            "job test: on must be an array")
+
+
+def test_cron_without_expression(scripts):
+    refused(scripts, {"jobs": {"nightly": job(on=["cron"], branches=["main"])}},
+            "job nightly: on contains cron but no cron expression is given")
+
+
+def test_cron_expression_without_cron_moment(scripts):
+    refused(scripts, {"jobs": {"test": job(cron="0 3 * * *")}},
+            "job test: cron is set but on does not contain cron")
+
+
+def test_cron_expression_malformed(scripts):
+    refused(scripts, {"jobs": {"n": job(on=["cron"], branches=["main"],
+                                         cron="0 3 * *")}},
+            "job n: cron '0 3 * *' is not a cron expression")
+
+
+def test_cron_expression_wrong_type(scripts):
+    refused(scripts, {"jobs": {"n": job(on=["cron"], branches=["main"],
+                                         cron=5)}},
+            "job n: cron must be a string")
+
+
+@pytest.mark.parametrize("branch", ["**", "plan/*", "v?", "rel[12]"])
+def test_cron_job_with_pattern_branches(scripts, branch):
+    refused(scripts, {"jobs": {"n": job(on=["cron"], branches=["main", branch],
+                                         cron="0 3 * * *")}},
+            f"job n: a cron job's branches are literal names; {branch!r} is "
+            "a pattern")
+
+
+def test_unknown_job_field(scripts):
+    refused(scripts, {"jobs": {"test": job(runs_on="ubuntu")}},
+            "job test: unknown field runs_on")
+
+
+def test_unknown_top_level_field(scripts):
+    refused(scripts, {"jobs": {}, "parallel": 2},
+            "config: unknown field parallel")
+
+
+def test_comment_keys_refused(scripts):
+    refused(scripts, {"jobs": {}, "_comment_jobs": "hello"},
+            "config: unknown field _comment_jobs")
+
+
+def test_missing_jobs(scripts):
+    refused(scripts, {"needs_nothing": []},
+            "config: missing required field jobs")
+
+
+def test_jobs_wrong_type(scripts):
+    refused(scripts, {"jobs": []}, "config: jobs must be an object")
+
+
+def test_job_wrong_type(scripts):
+    refused(scripts, {"jobs": {"test": "ci/test.sh"}},
+            "job test: a job must be an object")
+
+
+def test_invalid_job_name(scripts):
+    refused(scripts, {"jobs": {"my job": job()}},
+            "job my job: invalid job name")
+
+
+@pytest.mark.parametrize("value", [0, -1, "3", 1.5, True])
+def test_max_parallel_wrong(scripts, value):
+    refused(scripts, {"jobs": {}, "max_parallel": value},
+            "config: max_parallel must be a positive integer")
+
+
+def test_needs_nothing_wrong_type(scripts):
+    refused(scripts, {"jobs": {}, "needs_nothing": "docs/**"},
+            "config: needs_nothing must be an array")
+
+
+@pytest.mark.parametrize("flag", ["manual", "blocking"])
+def test_flags_must_be_boolean(scripts, flag):
+    refused(scripts, {"jobs": {"test": job(**{flag: "false"})}},
+            f"job test: {flag} must be a boolean")
+
+
+def test_paths_wrong_type(scripts):
+    refused(scripts, {"jobs": {"test": job(paths="src/**")}},
+            "job test: paths must be an array")
+
+
+def test_branches_wrong_type(scripts):
+    refused(scripts, {"jobs": {"test": job(branches="main")}},
+            "job test: branches must be an array")
+
+
+def test_branches_empty_pattern(scripts):
+    refused(scripts, {"jobs": {"test": job(branches=[""])}},
+            "job test: branches contains an empty pattern")
+
+
+def test_top_level_not_object(scripts):
+    scripts.write(".vendored/configs/git-cicd.json", "[]")
+    result = scripts.run("validate")
+    assert result.returncode == 2
+    assert "top level must be a JSON object" in result.stderr
+
+
+def test_all_errors_reported_one_per_line(scripts):
+    j = job(on=["push"])
+    del j["branches"]
+    result = refused(scripts, {"jobs": {"a": j, "b": job(bogus=1)},
+                               "extra": 1},
+                     "job a: missing required field branches",
+                     "job a: unknown moment 'push'",
+                     "job b: unknown field bogus",
+                     "config: unknown field extra")
+    assert len(result.stderr.strip().splitlines()) == 4
+
+
+def test_missing_config_file(repo):
+    result = repo.run("validate")
+    assert result.returncode == 2
+    assert "cannot read" in result.stderr
+
+
+def test_invalid_json(repo):
+    repo.write(".vendored/configs/git-cicd.json", "{nope")
+    result = repo.run("validate")
+    assert result.returncode == 2
+    assert "is not valid JSON" in result.stderr
+
+
+def test_outside_git_repository(tmp_path):
+    import subprocess
+    import sys
+    from tests.conftest import SCRIPT
+    result = subprocess.run([sys.executable, str(SCRIPT), "validate"],
+                            cwd=tmp_path, capture_output=True, text=True,
+                            env={"PATH": "/usr/bin:/bin",
+                                 "GIT_CEILING_DIRECTORIES": str(tmp_path)})
+    assert result.returncode == 2
+    assert "not inside a git repository" in result.stderr
+
+
+def test_main_in_process(scripts, capsys):
+    scripts.config(STRAWMAN)
+    assert git_cicd.main(["validate"]) == 0
+    assert "config ok: 2 jobs" in capsys.readouterr().out
