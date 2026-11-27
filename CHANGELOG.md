@@ -2,6 +2,11 @@
 
 Releases of git-cicd, written by git-semver on each merge to `main`.
 
+## [0.0.2] - 2026-11-27
+
+### Changed
+- gcd-d9eb: pending git-cicd verdict no longer waits for a superseded run (#6) (#7)
+
 ## [0.0.1] - 2026-11-27
 
 ### Changed
