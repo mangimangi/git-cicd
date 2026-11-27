@@ -20,7 +20,7 @@ def setup_repo(repo, jobs, log):
 
 
 def run_job(repo, job, base, head, *extra, env=None, source="feature"):
-    return repo.run("run-job", job, "--moment=open", "--target=main",
+    return repo.run("run-job", job, "--trigger=open", "--target=main",
                     f"--source={source}", f"--base={base}", f"--head={head}",
                     *extra, env=env)
 
@@ -135,7 +135,7 @@ def test_step_that_cannot_execute_fails(repo, log, tmp_path):
     assert "cannot execute" in data["error"]
 
 
-DUMP_ENV = """for v in CICD_MOMENT CICD_JOB CICD_TARGET_BRANCH CICD_SOURCE_BRANCH \\
+DUMP_ENV = """for v in CICD_TRIGGER CICD_JOB CICD_TARGET_BRANCH CICD_SOURCE_BRANCH \\
          CICD_BASE CICD_HEAD CICD_CHANGED_FILES GITHUB_TOKEN VENDOR_PAT; do
   printf '%s=' "$v" >> "$LOG"
   eval "printf '%s' \\"\\$$v\\"" >> "$LOG"
@@ -157,7 +157,7 @@ def test_environment_reaches_step(repo, log):
     lines = logged(log)
     values = dict(line.split("=", 1) for line in lines[:9])
     assert values == {
-        "CICD_MOMENT": "open", "CICD_JOB": "envjob",
+        "CICD_TRIGGER": "open", "CICD_JOB": "envjob",
         "CICD_TARGET_BRANCH": "main", "CICD_SOURCE_BRANCH": "feature",
         "CICD_BASE": base, "CICD_HEAD": head,
         "CICD_CHANGED_FILES": values["CICD_CHANGED_FILES"],
@@ -171,8 +171,38 @@ def test_environment_reaches_step(repo, log):
     assert "ghs_tok" not in result.stdout + result.stderr
 
 
+def test_step_receives_trigger_not_moment(repo, log):
+    """The step sees CICD_TRIGGER=open; the old name CICD_MOMENT is not set."""
+    repo.script("ci/env.sh", 'env >> "$LOG"\n')
+    base, head = setup_repo(repo, {"envjob": {
+        "on": ["open"], "branches": ["**"], "steps": ["ci/env.sh"]}}, log)
+    result = run_job(repo, "envjob", base, head, env=env_for(log))
+    assert result.returncode == 0, result.stdout + result.stderr
+    names = {line.split("=", 1)[0]: line.split("=", 1)[1]
+             for line in logged(log) if "=" in line}
+    assert names["CICD_TRIGGER"] == "open"
+    assert "CICD_MOMENT" not in names
+
+
+@pytest.mark.parametrize("command", [
+    ["decide"], ["run-job", "t"], ["report", "--decisions", "x",
+                                   "--results", "y"]])
+def test_moment_option_is_rejected(repo, command):
+    """--moment is gone with no alias: argparse rejects it on every command
+    that took it."""
+    repo.config({"jobs": {"t": {"on": ["open"], "branches": ["**"],
+                                "steps": ["ci/t.sh"]}}})
+    # every other argument is valid, so the unknown option is the only error
+    change = [] if command[0] == "report" else [
+        "--trigger=open", "--target=main", "--source=f", "--base=b",
+        "--head=h"]
+    result = repo.run(*command, "--moment=open", *change)
+    assert result.returncode == 2
+    assert "unrecognized arguments: --moment=open" in result.stderr
+
+
 def test_setup_receives_environment(repo, log):
-    repo.script("ci/setup.sh", 'echo "$CICD_JOB $CICD_MOMENT" >> "$LOG"\n'
+    repo.script("ci/setup.sh", 'echo "$CICD_JOB $CICD_TRIGGER" >> "$LOG"\n'
                 'test -f "$CICD_CHANGED_FILES"\n')
     repo.script("ci/a.sh")
     base, head = setup_repo(repo, {"t": {
@@ -196,7 +226,7 @@ def test_branch_with_shell_metacharacters_reaches_step_unaltered(repo, log):
     base, head = setup_repo(repo, {"t": {
         "on": ["open"], "branches": ["**"], "steps": ["ci/show.sh"]}}, log)
     repo.git("branch", INJECTION)
-    result = repo.run("run-job", "t", "--moment=open",
+    result = repo.run("run-job", "t", "--trigger=open",
                       f"--target={INJECTION}", f"--source={INJECTION}",
                       f"--base={base}", f"--head={head}", env=env_for(log))
     assert result.returncode == 0, result.stderr
@@ -231,15 +261,15 @@ def test_unknown_job(repo, log):
     assert "unknown job 'nope'" in result.stderr
 
 
-@pytest.mark.parametrize("moment", ["merge", "cron", "manual"])
-def test_unbuilt_moment(repo, log, moment):
+@pytest.mark.parametrize("trigger", ["merge", "cron", "manual"])
+def test_unbuilt_trigger(repo, log, trigger):
     repo.script("ci/a.sh")
     base, head = setup_repo(repo, {"t": {
         "on": ["open"], "branches": ["**"], "steps": ["ci/a.sh"]}}, log)
-    result = repo.run("run-job", "t", f"--moment={moment}", "--target=main",
+    result = repo.run("run-job", "t", f"--trigger={trigger}", "--target=main",
                       "--source=f", f"--base={base}", f"--head={head}")
     assert result.returncode == 2
-    assert f"the {moment} moment is not built yet" in result.stderr
+    assert f"the {trigger} trigger is not built yet" in result.stderr
 
 
 def test_changed_files_when_diff_fails_is_empty_file(repo, log):
@@ -256,7 +286,7 @@ def test_run_job_function(repo, log):
     setup_repo(repo, {"t": {
         "on": ["open"], "branches": ["**"], "steps": ["ci/a.sh"]}}, log)
     config = git_cicd.load_config(str(repo.path))
-    facts = {"moment": "open", "target": "main", "source": "f",
+    facts = {"trigger": "open", "target": "main", "source": "f",
              "base": "HEAD~1", "head": "HEAD"}
     result = git_cicd.run_job(config, str(repo.path), "t", facts)
     assert result["state"] == "passed"

@@ -1,4 +1,4 @@
-"""Tests for deciding which jobs a change needs on the open moment."""
+"""Tests for deciding which jobs a change needs on the open trigger."""
 
 import json
 
@@ -38,9 +38,9 @@ def setup_repo(repo, jobs=None, needs_nothing=None, **top):
 
 
 def decide(repo, base, head=None, target="main", source="feature",
-           moment="open"):
+           trigger="open"):
     head = head or repo.git("rev-parse", "HEAD")
-    result = repo.run("decide", f"--moment={moment}", f"--target={target}",
+    result = repo.run("decide", f"--trigger={trigger}", f"--target={target}",
                       f"--source={source}", f"--base={base}",
                       f"--head={head}", "--json")
     assert result.returncode == 0, result.stderr
@@ -282,20 +282,20 @@ def test_not_open_jobs_reported(repo):
     assert jobs["release"]["reason"] == "not an open job"
 
 
-@pytest.mark.parametrize("moment", ["merge", "cron", "manual"])
-def test_unbuilt_moments_exit_2(repo, moment):
+@pytest.mark.parametrize("trigger", ["merge", "cron", "manual"])
+def test_unbuilt_triggers_exit_2(repo, trigger):
     base = setup_repo(repo)
-    result = repo.run("decide", "--moment", moment, "--target", "main",
+    result = repo.run("decide", "--trigger", trigger, "--target", "main",
                       "--source", "feature", "--base", base, "--head", base)
     assert result.returncode == 2
-    assert (f"the {moment} moment is not built yet (git-cicd gcd-e74c builds "
+    assert (f"the {trigger} trigger is not built yet (git-cicd gcd-e74c builds "
             "open only)") in result.stderr
     assert result.stdout == ""
 
 
-def test_unbuilt_moment_lists_declaring_jobs(repo):
+def test_unbuilt_trigger_lists_declaring_jobs(repo):
     base = setup_repo(repo)
-    result = repo.run("decide", "--moment", "merge", "--target", "main",
+    result = repo.run("decide", "--trigger", "merge", "--target", "main",
                       "--source", "feature", "--base", base, "--head", base)
     assert "jobs declaring it: release" in result.stderr
 
@@ -326,13 +326,14 @@ def test_github_output_written(repo, tmp_path):
     head = repo.commit("deep")
     out = tmp_path / "github_output"
     out.write_text("previous=1\n")
-    result = repo.run("decide", "--moment", "open", "--target", "main",
+    result = repo.run("decide", "--trigger", "open", "--target", "main",
                       "--source", "feature", "--base", base, "--head", head,
                       env={"GITHUB_OUTPUT": str(out)})
     assert result.returncode == 0, result.stderr
     lines = out.read_text().splitlines()
-    assert lines == ["previous=1", 'jobs=["test"]', "any=true",
-                     "max_parallel=2"]
+    assert lines == ["previous=1", 'jobs=["test"]',
+                     'names={"test": "Test", "lint": "Lint", "release": "Release"}',
+                     "any=true", "max_parallel=2"]
 
 
 def test_github_output_none_needed(repo, tmp_path):
@@ -340,12 +341,34 @@ def test_github_output_none_needed(repo, tmp_path):
     repo.write("README.md", "x\n")
     head = repo.commit("readme")
     out = tmp_path / "github_output"
-    result = repo.run("decide", "--moment", "open", "--target", "main",
+    result = repo.run("decide", "--trigger", "open", "--target", "main",
                       "--source", "feature", "--base", base, "--head", head,
                       env={"GITHUB_OUTPUT": str(out)})
     assert result.returncode == 0
-    assert out.read_text().splitlines() == ["jobs=[]", "any=false",
-                                            "max_parallel=3"]
+    assert out.read_text().splitlines() == [
+        "jobs=[]", 'names={"test": "Test", "lint": "Lint", "release": "Release"}',
+        "any=false", "max_parallel=3"]
+
+
+def test_github_output_names_title_case_default_and_written(repo, tmp_path):
+    """The row names the workflow reads: the job name in title case without
+    `name`, a written `name` exactly as written."""
+    repo.script("ci/t.sh")
+    repo.config({"jobs": {
+        "unit-tests": {"on": ["open"], "branches": ["**"],
+                       "steps": ["ci/t.sh"]},
+        "pypi": {"name": "PyPI", "on": ["open"], "branches": ["**"],
+                 "steps": ["ci/t.sh"]}}})
+    base = repo.commit("base")
+    repo.write("x", "1\n")
+    head = repo.commit("x")
+    out = tmp_path / "github_output"
+    result = repo.run("decide", "--trigger", "open", "--target", "main",
+                      "--source", "feature", "--base", base, "--head", head,
+                      env={"GITHUB_OUTPUT": str(out)})
+    assert result.returncode == 0, result.stderr
+    assert 'names={"unit-tests": "Unit Tests", "pypi": "PyPI"}' in \
+        out.read_text().splitlines()
 
 
 def test_changed_files_out_and_human_output(repo, tmp_path):
@@ -354,7 +377,7 @@ def test_changed_files_out_and_human_output(repo, tmp_path):
     repo.write("README.md", "x\n")
     head = repo.commit("two")
     out = tmp_path / "changed.txt"
-    result = repo.run("decide", "--moment", "open", "--target", "main",
+    result = repo.run("decide", "--trigger", "open", "--target", "main",
                       "--source", "feature", "--base", base, "--head", head,
                       "--changed-files-out", str(out))
     assert result.returncode == 0
@@ -367,15 +390,18 @@ def test_changed_files_out_and_human_output(repo, tmp_path):
 def test_json_shape(repo):
     base = setup_repo(repo)
     data, _ = decide(repo, base)
-    assert set(data) == {"moment", "target", "source", "base", "head",
+    assert set(data) == {"trigger", "target", "source", "base", "head",
                          "changed_files", "jobs", "max_parallel"}
-    assert set(data["jobs"][0]) == {"name", "needed", "reason", "blocking"}
+    assert set(data["jobs"][0]) == {"name", "title", "needed", "reason",
+                                    "blocking"}
+    assert data["jobs"][0]["title"] == \
+        git_cicd.default_title(data["jobs"][0]["name"])
 
 
 def test_invalid_config_refused(repo):
     base = setup_repo(repo)
     repo.config({"jobs": {"x": {"steps": ["ci/test.sh"]}}})
-    result = repo.run("decide", "--moment", "open", "--target", "main",
+    result = repo.run("decide", "--trigger", "open", "--target", "main",
                       "--source", "f", "--base", base, "--head", base)
     assert result.returncode == 2
     assert "job x: missing required field branches" in result.stderr

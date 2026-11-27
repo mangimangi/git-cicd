@@ -11,10 +11,10 @@ Python 3 standard library and the git CLI only.
 
 Subcommands:
   validate   load and validate the config
-  decide     decide which jobs a change needs on a moment
+  decide     decide which jobs a change needs on a trigger
   run-job    run one job: setup when asked, then its steps
-  generate   write .github/workflows/git-cicd.yml from the config
-  verify     check that the workflow file matches the config
+  generate   write the generated workflows (one per trigger) from the config
+  verify     check that the generated workflows match the config
   report     one line per job with times, and one verdict
   check      decide, run and report locally, without GitHub
 """
@@ -31,14 +31,32 @@ import tempfile
 import time
 
 CONFIG_PATH = ".vendored/configs/git-cicd.json"
-WORKFLOW_PATH = ".github/workflows/git-cicd.yml"
-TEMPLATE_PATH = os.path.join("templates", "workflow.yml")
+# One generated workflow per trigger: (workflow name, file). The names and the
+# files are fixed for good, so no adopter has to rename a file again. Only the
+# triggers in GENERATED_TRIGGERS are written; adding one adds its template under
+# templates/workflows/ and its word here, and changes no other file.
+WORKFLOWS = {
+    "open": ("Open", ".github/workflows/git-cicd-open.yml"),
+    "merge": ("Merge", ".github/workflows/git-cicd-merge.yml"),
+    "cron": ("Cron", ".github/workflows/git-cicd-cron.yml"),
+    "manual": ("Manual", ".github/workflows/git-cicd-manual.yml"),
+}
+GENERATED_TRIGGERS = ("open",)
+# The single workflow file of git-cicd before the per-trigger files; generate
+# removes it and verify fails while it is there.
+LEGACY_WORKFLOW_PATH = ".github/workflows/git-cicd.yml"
+TEMPLATE_DIR = os.path.join("templates", "workflows")
 
-MOMENTS = ("open", "merge", "cron")
+# The commit status a reader waits on, named `<name> / <owner>:<job>` like
+# every row (git-cicd's own rows, in the templates, are
+# `Decide / git-cicd:decide` and `Report / git-cicd:report`).
+VERDICT_STATUS = "Verdict / git-cicd:verdict"
+
+TRIGGERS = ("open", "merge", "cron")
 DEFAULT_MAX_PARALLEL = 3
 
 TOP_LEVEL_FIELDS = ("_vendor", "jobs", "needs_nothing", "max_parallel")
-JOB_FIELDS = ("on", "branches", "paths", "setup", "steps", "cron", "manual",
+JOB_FIELDS = ("name", "on", "branches", "paths", "setup", "steps", "cron", "manual",
               "blocking")
 
 JOB_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -55,6 +73,14 @@ class ConfigError(Exception):
 
 class UsageError(Exception):
     """A request the tool refuses (exit 2)."""
+
+
+def default_title(name):
+    """The display name of a job without `name`: its job name with `-` and
+    `_` as spaces and each word capitalised (`unit-tests` -> `Unit Tests`).
+    A `name` the repository wrote is never passed through this."""
+    words = [w for w in re.split(r"[-_]+", name) if w]
+    return " ".join(w[:1].upper() + w[1:] for w in words) or name
 
 
 # ── Patterns ────────────────────────────────────────────────────────────────
@@ -183,20 +209,38 @@ def _validate_job(root, name, job):
         if key not in JOB_FIELDS:
             errors.append(f"{prefix}: unknown field {key}")
 
+    # name (the display name; data, never part of a command line)
+    title = job.get("name", default_title(name))
+    if "name" in job:
+        if not isinstance(title, str):
+            errors.append(f"{prefix}: name must be a string (a short "
+                          "human-readable display name)")
+            title = default_title(name)
+        elif not title.strip():
+            errors.append(f"{prefix}: name is empty; give a short "
+                          "human-readable display name or leave the field "
+                          "out")
+            title = default_title(name)
+        elif not all(ch.isprintable() for ch in title):
+            errors.append(f"{prefix}: name {title!r} must be a single line "
+                          "of printable characters (no newline, tab or "
+                          "other control character)")
+            title = default_title(name)
+
     # on
     on = job.get("on", [])
     if not _is_str_list(on):
-        errors.append(f"{prefix}: on must be an array of moments "
-                      f"({', '.join(MOMENTS)})")
+        errors.append(f"{prefix}: on must be an array of triggers "
+                      f"({', '.join(TRIGGERS)})")
         on = []
     else:
-        for moment in on:
-            if moment not in MOMENTS:
-                errors.append(f"{prefix}: unknown moment {moment!r} in on "
-                              f"(allowed: {', '.join(MOMENTS)})")
+        for trigger in on:
+            if trigger not in TRIGGERS:
+                errors.append(f"{prefix}: unknown trigger {trigger!r} in on "
+                              f"(allowed: {', '.join(TRIGGERS)})")
         dupes = sorted({m for m in on if on.count(m) > 1})
-        for moment in dupes:
-            errors.append(f"{prefix}: moment {moment} listed more than once "
+        for trigger in dupes:
+            errors.append(f"{prefix}: trigger {trigger} listed more than once "
                           "in on")
 
     # branches
@@ -275,6 +319,7 @@ def _validate_job(root, name, job):
 
     normalized = {
         "name": name,
+        "title": title,
         "on": list(on),
         "branches": list(branches),
         "paths": list(paths) if paths is not None else None,
@@ -351,21 +396,21 @@ def load_config(root, path=None):
 
 # ── Decide ──────────────────────────────────────────────────────────────────
 
-NOT_BUILT = "the {moment} moment is not built yet (git-cicd gcd-e74c builds open only)"
-ALL_MOMENTS = MOMENTS + ("manual",)
+NOT_BUILT = "the {trigger} trigger is not built yet (git-cicd gcd-e74c builds open only)"
+ALL_TRIGGERS = TRIGGERS + ("manual",)
 
 
-def check_moment(config, moment):
-    """Raise UsageError for a moment that is not built yet, naming the jobs
+def check_trigger(config, trigger):
+    """Raise UsageError for a trigger that is not built yet, naming the jobs
     that declare it. Never silently succeed."""
-    if moment == "open":
+    if trigger == "open":
         return
-    if moment == "manual":
+    if trigger == "manual":
         declaring = [n for n, j in config["jobs"].items() if j["manual"]]
     else:
-        declaring = [n for n, j in config["jobs"].items() if moment in j["on"]]
+        declaring = [n for n, j in config["jobs"].items() if trigger in j["on"]]
     names = ", ".join(declaring) if declaring else "none"
-    raise UsageError(NOT_BUILT.format(moment=moment)
+    raise UsageError(NOT_BUILT.format(trigger=trigger)
                      + f"; jobs declaring it: {names}")
 
 
@@ -410,7 +455,7 @@ def _norm(path):
 
 def job_scripts(config):
     """Every file any job names (setup and step files), whatever its
-    moments."""
+    triggers."""
     files = set()
     for job in config["jobs"].values():
         if job["setup"]:
@@ -433,11 +478,11 @@ def _name_files(files, limit=5):
     return shown
 
 
-def decide(config, root, moment, target, source, base, head, files=None,
+def decide(config, root, trigger, target, source, base, head, files=None,
            diff_error=None):
-    """Decide every declared job for the moment, one decision each, with a
+    """Decide every declared job for the trigger, one decision each, with a
     reason. Return the decision record (what `decide --json` prints)."""
-    check_moment(config, moment)
+    check_trigger(config, trigger)
     if files is None and diff_error is None:
         files, diff_error = changed_files(root, base, head)
 
@@ -468,8 +513,8 @@ def decide(config, root, moment, target, source, base, head, files=None,
     relevant = [f for f in (files or []) if not match_any(needs_nothing, f)]
     decisions = []
     for name, job in config["jobs"].items():
-        if moment not in job["on"]:
-            needed, reason = False, f"not an {moment} job"
+        if trigger not in job["on"]:
+            needed, reason = False, f"not an {trigger} job"
         elif not match_any(job["branches"], target or ""):
             needed, reason = False, f"target {target} does not match branches"
         elif force:
@@ -489,11 +534,12 @@ def decide(config, root, moment, target, source, base, head, files=None,
                 reason = f"{n} changed file{'' if n == 1 else 's'} match paths"
             else:
                 needed, reason = False, "no changed file matches paths"
-        decisions.append({"name": name, "needed": needed, "reason": reason,
+        decisions.append({"name": name, "title": job["title"],
+                          "needed": needed, "reason": reason,
                           "blocking": job["blocking"]})
 
     return {
-        "moment": moment,
+        "trigger": trigger,
         "target": target,
         "source": source,
         "base": base,
@@ -509,7 +555,7 @@ def needed_jobs(decision):
 
 
 def format_decision(decision):
-    lines = [f"git-cicd decide: moment {decision['moment']}, target "
+    lines = [f"git-cicd decide: trigger {decision['trigger']}, target "
              f"{decision['target']}, source {decision['source']}",
              f"  base {decision['base']}, head {decision['head']}",
              f"  {len(decision['changed_files'])} changed files"]
@@ -526,6 +572,9 @@ def write_github_output(decision):
         return
     with open(path, "a", encoding="utf-8") as f:
         f.write(f"jobs={json.dumps(needed_jobs(decision))}\n")
+        names = {j["name"]: j.get("title") or default_title(j["name"])
+                 for j in decision["jobs"]}
+        f.write(f"names={json.dumps(names)}\n")
         f.write(f"any={'true' if needed_jobs(decision) else 'false'}\n")
         f.write(f"max_parallel={decision['max_parallel']}\n")
 
@@ -546,7 +595,7 @@ def script_env(job_name, facts, changed_files_path):
     """
     env = dict(os.environ)
     env.update({
-        "CICD_MOMENT": facts["moment"],
+        "CICD_TRIGGER": facts["trigger"],
         "CICD_JOB": job_name,
         "CICD_TARGET_BRANCH": facts["target"],
         "CICD_SOURCE_BRANCH": facts["source"],
@@ -576,7 +625,7 @@ def _run_script(argv, root, env, header):
 def run_job(config, root, name, facts, setup=False, files=None):
     """Run a job: setup when asked, then each step in order, stopping at the
     first failing step. Return the result record."""
-    check_moment(config, facts["moment"])
+    check_trigger(config, facts["trigger"])
     job = config["jobs"].get(name)
     if job is None:
         raise UsageError(f"unknown job {name!r} (declared: "
@@ -611,7 +660,8 @@ def run_job(config, root, name, facts, setup=False, files=None):
             argv = [os.path.join(root, step[0]), *step[1:]]
             code, error, seconds = _run_script(
                 argv, root, env, f"job {name}: step {i}/{total} {label}")
-            result["steps"].append({"step": label, "seconds": seconds,
+            result["steps"].append({"step": label, "file": step[0],
+                                    "seconds": seconds,
                                     "exit_code": code, "error": error})
             if code != 0:
                 result.update(state="failed", failed_step=label,
@@ -647,9 +697,9 @@ def tool_path(root):
     return rel
 
 
-def template_text():
+def template_text(trigger):
     path = os.path.join(os.path.dirname(os.path.realpath(
-        os.path.abspath(__file__))), TEMPLATE_PATH)
+        os.path.abspath(__file__))), TEMPLATE_DIR, f"{trigger}.yml")
     try:
         with open(path, encoding="utf-8") as f:
             return f.read()
@@ -668,13 +718,28 @@ def schedule_block(config):
     return "\n".join(lines) + "\n"
 
 
-def render_workflow(config, tool, template=None):
-    """The workflow file for the config, deterministic byte for byte. Only
-    the schedule block depends on the config; the tool path depends on where
-    the tool is installed."""
-    text = template if template is not None else template_text()
-    text = text.replace("__SCHEDULE__\n", schedule_block(config))
+def render_workflow(config, tool, template):
+    """One workflow file from its template, deterministic byte for byte. A
+    template is fixed text; the only part that depends on the config is the
+    schedule block, which only the cron template holds (`__SCHEDULE__`). The
+    tool path depends on where the tool is installed."""
+    text = template.replace("__SCHEDULE__\n", schedule_block(config))
     return text.replace("__TOOL__", tool)
+
+
+def render_workflows(config, tool, templates=None):
+    """{path: text} for every generated workflow, in trigger order."""
+    out = {}
+    for trigger in GENERATED_TRIGGERS:
+        template = (templates or {}).get(trigger)
+        if template is None:
+            template = template_text(trigger)
+        out[WORKFLOWS[trigger][1]] = render_workflow(config, tool, template)
+    return out
+
+
+def generated_paths():
+    return [WORKFLOWS[m][1] for m in GENERATED_TRIGGERS]
 
 
 def generate_command(tool):
@@ -682,30 +747,41 @@ def generate_command(tool):
 
 
 def verify_workflow(config, root, tool=None):
-    """Regenerate in memory and compare the whole file.
+    """Regenerate every workflow in memory and compare each whole file; the
+    single file of earlier versions must be gone.
 
-    Return (ok, message); message holds a unified diff and the command to
-    run when the file does not match."""
+    Return (ok, message); message holds a unified diff per file that differs
+    and the command to run when anything does not match."""
     tool = tool or tool_path(root)
-    expected = render_workflow(config, tool)
-    path = os.path.join(root, WORKFLOW_PATH)
-    try:
-        with open(path, encoding="utf-8", newline="") as f:
-            actual = f.read()
-    except OSError:
-        actual = None
-    if actual == expected:
-        return True, "workflow matches config"
-    if actual is None:
-        diff = f"{WORKFLOW_PATH} is missing\n"
-    else:
-        diff = "".join(difflib.unified_diff(
-            actual.splitlines(keepends=True),
-            expected.splitlines(keepends=True),
-            fromfile=f"{WORKFLOW_PATH} (committed)",
-            tofile=f"{WORKFLOW_PATH} (generated from the config)"))
-    return False, (diff + "the workflow does not match the config; run: "
-                   f"{generate_command(tool)} and commit {WORKFLOW_PATH}")
+    problems = []
+    for rel, expected in render_workflows(config, tool).items():
+        try:
+            with open(os.path.join(root, rel), encoding="utf-8",
+                      newline="") as f:
+                actual = f.read()
+        except OSError:
+            actual = None
+        if actual == expected:
+            continue
+        if actual is None:
+            problems.append(f"{rel} is missing\n")
+        else:
+            problems.append("".join(difflib.unified_diff(
+                actual.splitlines(keepends=True),
+                expected.splitlines(keepends=True),
+                fromfile=f"{rel} (committed)",
+                tofile=f"{rel} (generated from the config)")))
+    commit = ", ".join(generated_paths())
+    if os.path.lexists(os.path.join(root, LEGACY_WORKFLOW_PATH)):
+        problems.append(f"{LEGACY_WORKFLOW_PATH} is still there (the single "
+                        "workflow of earlier git-cicd versions; generate "
+                        "removes it)\n")
+        commit += f" and the removal of {LEGACY_WORKFLOW_PATH}"
+    if not problems:
+        return True, "workflows match config"
+    return False, ("".join(problems) + "the workflows do not match the "
+                   f"config; run: {generate_command(tool)} and commit "
+                   f"{commit}")
 
 
 # ── Report ──────────────────────────────────────────────────────────────────
@@ -740,13 +816,122 @@ def _exit_text(code, error):
     return f"error: {error}" if error else f"exit {code}"
 
 
-def job_rows(config, decision, results):
+SEMVER_CONFIG_PATH = ".vendored/configs/git-semver.json"
+VENDOR_PKG_PREFIX = ".vendored/pkg/"
+VENDOR_VERSION_PATH = ".vendored/manifests/{vendor}.version"
+
+
+def repo_name(root):
+    """The name of the repository the checks run in.
+
+    In Actions, the name part of GITHUB_REPOSITORY (the platform's own fact).
+    Locally, the last path segment of the `origin` remote's URL without
+    `.git`; with no such remote, the name of the checkout's top-level
+    directory."""
+    gh = os.environ.get("GITHUB_REPOSITORY", "").strip()
+    if gh:
+        return gh.rstrip("/").rsplit("/", 1)[-1]
+    url = _git_out(root, "config", "--get", "remote.origin.url")
+    if url:
+        name = re.split(r"[/:]", url.rstrip("/"))[-1]
+        if name.endswith(".git"):
+            name = name[:-len(".git")]
+        if name:
+            return name
+    return os.path.basename(os.path.abspath(root)) or "repository"
+
+
+def _read_version(root, rel):
+    """The first line of a version file, or None when there is none. A
+    version is read, never guessed."""
+    if not isinstance(rel, str) or not rel or os.path.isabs(rel) \
+            or ".." in rel.replace("\\", "/").split("/"):
+        return None
+    try:
+        with open(os.path.join(root, rel), encoding="utf-8") as f:
+            line = f.readline().strip()
+    except (OSError, ValueError):
+        return None
+    if not line or not all(ch.isprintable() for ch in line):
+        return None
+    return line
+
+
+def repo_version_file(root):
+    """The version file the repository's git-semver config names (default
+    VERSION)."""
+    try:
+        with open(os.path.join(root, SEMVER_CONFIG_PATH),
+                  encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        data = None
+    if isinstance(data, dict) and isinstance(data.get("version_file"), str):
+        return data["version_file"]
+    return "VERSION"
+
+
+def step_owner(root, path, repo):
+    """(owner, version or None) of a setup or step file: the vendor for a
+    file under .vendored/pkg/<vendor>/ with the version from its manifest,
+    otherwise the repository with the version from its version file."""
+    rel = _norm(path or "")
+    if rel.startswith(VENDOR_PKG_PREFIX):
+        vendor = rel[len(VENDOR_PKG_PREFIX):].split("/", 1)[0]
+        if vendor:
+            return vendor, _read_version(
+                root, VENDOR_VERSION_PATH.format(vendor=vendor))
+    if root is None:
+        return repo, None
+    return repo, _read_version(root, repo_version_file(root))
+
+
+def row_name(title, repo, job):
+    """A job's row: `<name> / <repo>:<job>`. No version: a row name is what
+    anything waiting on a check refers to."""
+    return f"{title} / {repo}:{job}"
+
+
+def step_name(title, owner, version, job, path):
+    """A step's report line: `<name> / <owner>@<version>:<job>:<step>`, the
+    step being its file name; without `@<version>` when there is none."""
+    at = f"@{version}" if version else ""
+    return f"{title} / {owner}{at}:{job}:{os.path.basename(_norm(path))}"
+
+
+def _child_result(code, error):
+    if error:
+        return f"failed (error: {error})"
+    if code == 0:
+        return "passed"
+    return f"failed (exit {code})"
+
+
+def short_head(root, head):
+    """The head commit, short, for the report's header."""
+    if not head:
+        return "unknown"
+    if root is not None:
+        sha = resolve_commit(root, str(head))
+        if sha:
+            return _git_out(root, "rev-parse", "--short", sha) or sha[:7]
+    head = str(head)
+    if re.fullmatch(r"[0-9a-f]{7,40}", head):
+        return head[:7]
+    return head
+
+
+def job_rows(config, decision, results, root=None, repo=None):
     """One row per declared job, in config order."""
+    repo = repo or (repo_name(root) if root is not None else "repository")
     by_name = {j["name"]: j for j in (decision or {}).get("jobs", [])}
     rows = []
     for name, job in config["jobs"].items():
+        title = job.get("title") or default_title(name)
         d = by_name.get(name)
-        row = {"name": name, "blocking": job["blocking"], "seconds": None,
+        row = {"name": name, "title": title,
+               "display": row_name(title, repo, name),
+               "blocking": job["blocking"], "seconds": None,
                "children": [], "setup_skipped": False}
         if d is None:
             row.update(state="could not run", detail="no decision")
@@ -761,16 +946,26 @@ def job_rows(config, decision, results):
                 row["setup_skipped"] = bool(r.get("setup_skipped"))
                 setup = r.get("setup")
                 if setup:
+                    path = setup.get("script") or job["setup"] or "setup"
+                    owner, version = step_owner(root, path, repo)
                     row["children"].append(
-                        (f"setup {setup.get('script') or job['setup']}",
+                        (step_name(title, owner, version, name, path),
                          setup.get("seconds"),
-                         _exit_text(setup.get("exit_code"),
-                                    setup.get("error"))))
+                         _child_result(setup.get("exit_code"),
+                                       setup.get("error"))))
                 for step in r.get("steps", []):
+                    path = step.get("file")
+                    if not path:
+                        try:
+                            path = shlex.split(str(step.get("step")))[0]
+                        except (ValueError, IndexError):
+                            path = str(step.get("step"))
+                    owner, version = step_owner(root, path, repo)
                     row["children"].append(
-                        (f"step {step.get('step')}", step.get("seconds"),
-                         _exit_text(step.get("exit_code"),
-                                    step.get("error"))))
+                        (step_name(title, owner, version, name, path),
+                         step.get("seconds"),
+                         _child_result(step.get("exit_code"),
+                                       step.get("error"))))
                 state = r.get("state")
                 if state == "passed":
                     row.update(state="passed", detail="")
@@ -818,7 +1013,7 @@ def verdict_line(rows, decision, workflow_ok):
         if nonblocking_bad:
             text += f" ({nonblocking_bad} non-blocking)"
     if not workflow_ok:
-        text += "; the workflow does not match the config"
+        text += "; the workflows do not match the config"
     return passed, text
 
 
@@ -831,19 +1026,23 @@ def _state_text(row):
     return text
 
 
-def format_report(rows, verdict, workflow_text, setup_note=False):
-    width = max([len(r["name"]) for r in rows] + [4])
-    lines = ["git-cicd report"]
+def header_text(repo, head):
+    return (f"git-cicd report: {repo} at {head} (the change under test; a "
+            "version below is its owner's last release)")
+
+
+def format_report(rows, verdict, workflow_text, setup_note=False,
+                  header="git-cicd report"):
+    width = max([len(r["display"]) for r in rows] + [4])
+    lines = [header]
     for r in rows:
         time_text = _secs(r["seconds"]) if r["seconds"] is not None else ""
-        lines.append(f"  {r['name']:<{width}}  {_state_text(r)}"
+        lines.append(f"  {r['display']:<{width}}  {_state_text(r)}"
                      + (f"  {time_text}" if time_text else ""))
-        for label, seconds, exit_text in r["children"]:
-            lines.append(f"  {'':<{width}}    {label}  {_secs(seconds)}  "
-                         f"({exit_text})")
+        for label, seconds, result in r["children"]:
+            lines.append(f"    {label}  {result}  {_secs(seconds)}")
         if setup_note and r["setup_skipped"]:
-            lines.append(f"  {'':<{width}}    setup skipped (pass --setup to "
-                         "run it)")
+            lines.append("    setup skipped (pass --setup to run it)")
     lines.append(workflow_text)
     lines.append(verdict)
     return "\n".join(lines) + "\n"
@@ -853,17 +1052,29 @@ def _md(text):
     return str(text).replace("|", "\\|").replace("\n", " ")
 
 
-def format_markdown(rows, verdict, workflow_text, setup_note=False):
+def _md_code(text):
+    """Text as inline code, shown literally whatever it holds."""
+    text = _md(text)
+    fence = "`"
+    while fence in text:
+        fence += "`"
+    pad = " " if text.startswith("`") or text.endswith("`") else ""
+    return f"{fence}{pad}{text}{pad}{fence}"
+
+
+def format_markdown(rows, verdict, workflow_text, setup_note=False,
+                    header="git-cicd report"):
     word = verdict.split(" ", 1)[0]
-    lines = [f"## git-cicd verdict: {word}", "", f"**{_md(verdict)}**", "",
+    lines = [f"## {VERDICT_STATUS}: {word}", "", f"**{_md(verdict)}**", "",
+             _md(header), "",
              "| Job | State | Time | Detail |", "|---|---|---|---|"]
     for r in rows:
         state = r["state"] + ("" if r["blocking"] else " (non-blocking)")
         time_text = _secs(r["seconds"]) if r["seconds"] is not None else ""
-        lines.append(f"| {_md(r['name'])} | {_md(state)} | {time_text} | "
-                     f"{_md(r['detail'])} |")
-        for label, seconds, exit_text in r["children"]:
-            lines.append(f"| &nbsp;&nbsp;↳ `{_md(label)}` | {_md(exit_text)} "
+        lines.append(f"| {_md_code(r['display'])} | {_md(state)} | "
+                     f"{time_text} | {_md(r['detail'])} |")
+        for label, seconds, result in r["children"]:
+            lines.append(f"| &nbsp;&nbsp;↳ {_md_code(label)} | {_md(result)} "
                          f"| {_secs(seconds)} | |")
         if setup_note and r["setup_skipped"]:
             lines.append("| &nbsp;&nbsp;↳ setup | skipped | | pass --setup "
@@ -881,23 +1092,26 @@ def report(config, root, decision, results, workflow=None, setup_note=False,
         workflow = verify_workflow(config, root)
     workflow_ok = workflow[0]
     if workflow_ok:
-        workflow_text = "workflow matches config"
+        workflow_text = "workflows match config"
     else:
         try:
             tool = tool_path(root)
         except UsageError:
             tool = "git-cicd"
-        workflow_text = ("workflow does not match config: run "
+        workflow_text = ("workflows do not match config: run "
                          f"{generate_command(tool)}")
-    rows = job_rows(config, decision, results)
+    repo = repo_name(root)
+    rows = job_rows(config, decision, results, root=root, repo=repo)
     passed, verdict = verdict_line(rows, decision, workflow_ok)
-    out.write(format_report(rows, verdict, workflow_text, setup_note))
+    header = header_text(repo, short_head(root, (decision or {}).get("head")))
+    out.write(format_report(rows, verdict, workflow_text, setup_note,
+                            header))
     out.flush()
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         with open(summary, "a", encoding="utf-8") as f:
             f.write(format_markdown(rows, verdict, workflow_text,
-                                    setup_note))
+                                    setup_note, header))
     return passed, verdict
 
 
@@ -980,7 +1194,7 @@ def check(config, root, target=None, source=None, base=None, head=None,
                                              "ignored)")
     print(format_decision(decision), flush=True)
 
-    facts = {"moment": "open", "target": target, "source": source,
+    facts = {"trigger": "open", "target": target, "source": source,
              "base": base_sha, "head": head_sha}
     results = {}
     for name in needed_jobs(decision):
@@ -1003,7 +1217,7 @@ def cmd_validate(args, root):
 
 def cmd_decide(args, root):
     config = load_config(root, args.config)
-    decision = decide(config, root, args.moment, args.target, args.source,
+    decision = decide(config, root, args.trigger, args.target, args.source,
                       args.base, args.head)
     if args.changed_files_out:
         write_changed_files(args.changed_files_out, decision["changed_files"])
@@ -1016,7 +1230,7 @@ def cmd_decide(args, root):
 
 
 def facts_from_args(args):
-    return {"moment": args.moment, "target": args.target,
+    return {"trigger": args.trigger, "target": args.target,
             "source": args.source, "base": args.base, "head": args.head}
 
 
@@ -1037,12 +1251,17 @@ def cmd_run_job(args, root):
 
 def cmd_generate(args, root):
     config = load_config(root, args.config)
-    text = render_workflow(config, tool_path(root))
-    path = os.path.join(root, WORKFLOW_PATH)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8", newline="") as f:
-        f.write(text)
-    print(f"wrote {WORKFLOW_PATH}")
+    for rel, text in render_workflows(config, tool_path(root)).items():
+        path = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            f.write(text)
+        print(f"wrote {rel}")
+    legacy = os.path.join(root, LEGACY_WORKFLOW_PATH)
+    if os.path.lexists(legacy):
+        os.remove(legacy)
+        print(f"removed {LEGACY_WORKFLOW_PATH} (replaced by the per-trigger "
+              "workflows; commit the removal)")
     return 0
 
 
@@ -1067,8 +1286,8 @@ def status_description(verdict):
 
 def write_verdict(path, passed, verdict):
     """Write the commit status state (success or failure) and description,
-    one per line, for the workflow step that sets the `git-cicd verdict`
-    status."""
+    one per line, for the workflow step that sets the
+    `Verdict / git-cicd:verdict` status."""
     if not path:
         return
     parent = os.path.dirname(path)
@@ -1082,12 +1301,12 @@ def write_verdict(path, passed, verdict):
 def cmd_report(args, root):
     try:
         config = load_config(root, args.config)
-        check_moment(config, args.moment)
+        check_trigger(config, args.trigger)
     except UsageError as e:
         summary = os.environ.get("GITHUB_STEP_SUMMARY")
         if summary:
             with open(summary, "a", encoding="utf-8") as f:
-                f.write(f"## git-cicd verdict: FAILED\n\n{e}\n")
+                f.write(f"## {VERDICT_STATUS}: FAILED\n\n{e}\n")
         write_verdict(args.verdict_out, False, f"FAILED - {e}")
         raise
     except ConfigError as e:
@@ -1110,7 +1329,7 @@ def cmd_check(args, root):
 
 def add_change_args(p):
     """The facts about a change, as given by the platform or the caller."""
-    p.add_argument("--moment", required=True, choices=ALL_MOMENTS)
+    p.add_argument("--trigger", required=True, choices=ALL_TRIGGERS)
     p.add_argument("--target", required=True, help="target branch")
     p.add_argument("--source", required=True, help="source branch")
     p.add_argument("--base", required=True, help="base commit")
@@ -1151,9 +1370,11 @@ def build_parser():
                    help="write the job's result JSON to PATH")
 
     add("generate", cmd_generate,
-        f"write {WORKFLOW_PATH} from the config")
+        f"write {', '.join(generated_paths())} from the config (and remove "
+        f"{LEGACY_WORKFLOW_PATH})")
     add("verify", cmd_verify,
-        f"check that {WORKFLOW_PATH} matches what the config generates")
+        f"check that {', '.join(generated_paths())} match what the config "
+        f"generates and {LEGACY_WORKFLOW_PATH} is gone")
 
     p = add("report", cmd_report, "one line per job with times, and one "
             "verdict")
@@ -1162,7 +1383,7 @@ def build_parser():
     p.add_argument("--results", required=True, metavar="DIR",
                    help="directory holding run-job --result files (any "
                         "nesting)")
-    p.add_argument("--moment", default="open", choices=ALL_MOMENTS)
+    p.add_argument("--trigger", default="open", choices=ALL_TRIGGERS)
     p.add_argument("--verdict-out", metavar="PATH",
                    help="write the commit status state (success or failure) "
                         "and description, one per line, to PATH")

@@ -6,6 +6,6 @@
     "allowed": [".vendored/configs/git-semver.json"]
   },
   "version_file": "VERSION",
-  "files": ["git-cicd", "install.sh", "templates/workflow.yml", "templates/config.json", "templates/config.schema"],
+  "files": ["git-cicd", "install.sh", "templates/workflows/open.yml", "templates/config.json", "templates/config.schema"],
   "changelog": {"enabled": true}
 }

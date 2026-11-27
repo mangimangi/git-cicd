@@ -10,11 +10,13 @@ import pytest
 
 ROOT = Path(__file__).parent.parent
 INSTALL_SH = ROOT / "install.sh"
-SHIPPED = ["git-cicd", "templates/workflow.yml", "templates/config.json",
+SHIPPED = ["git-cicd", "templates/workflows/open.yml", "templates/config.json",
            "templates/config.schema"]
 INSTALL_DIR = ".vendored/pkg/git-cicd"
 CONFIG = ".vendored/configs/git-cicd.json"
-WORKFLOW = ".github/workflows/git-cicd.yml"
+WORKFLOW = ".github/workflows/git-cicd-open.yml"
+WORKFLOWS_ALLOWED = ".github/workflows/git-cicd-*.yml"
+LEGACY = ".github/workflows/git-cicd.yml"
 
 
 def _mirror(tmp_path):
@@ -72,8 +74,9 @@ def test_code_lands_under_install_dir(tmp_path, project):
     tool = project / INSTALL_DIR / "git-cicd"
     assert tool.read_bytes() == (ROOT / "git-cicd").read_bytes()
     assert tool.stat().st_mode & 0o111
-    assert (project / INSTALL_DIR / "templates" / "workflow.yml").read_bytes() \
-        == (ROOT / "templates" / "workflow.yml").read_bytes()
+    assert (project / INSTALL_DIR / "templates" / "workflows" / "open.yml") \
+        .read_bytes() == (ROOT / "templates" / "workflows" / "open.yml") \
+        .read_bytes()
     assert "Installing git-cicd v1.2.3 from mangimangi/git-cicd" in result.stdout
 
 
@@ -93,7 +96,7 @@ def test_config_created_when_missing_and_valid(tmp_path, project):
     assert config["_vendor"]["repo"] == "mangimangi/git-cicd"
     assert config["_vendor"]["install_branch"] == "chore/install-git-cicd"
     assert config["_vendor"]["protected"] == [".vendored/pkg/git-cicd/**"]
-    assert config["_vendor"]["allowed"] == [CONFIG, WORKFLOW]
+    assert config["_vendor"]["allowed"] == [CONFIG, WORKFLOWS_ALLOWED]
     validate = subprocess.run(
         ["python3", f"{INSTALL_DIR}/git-cicd", "validate"], cwd=project,
         capture_output=True, text=True)
@@ -148,8 +151,7 @@ def test_workflow_generated_and_regenerated(tmp_path, project):
         "on": ["cron"], "branches": ["main"], "cron": "0 4 * * *",
         "steps": ["ci/n.sh"]}}}))
     assert run_install(project, script).returncode == 0
-    text = workflow.read_text()
-    assert '- cron: "0 4 * * *"' in text
+    assert workflow.read_text() == text
     verify = subprocess.run(["python3", f"{INSTALL_DIR}/git-cicd", "verify"],
                             cwd=project, capture_output=True, text=True)
     assert verify.returncode == 0, verify.stdout
@@ -162,11 +164,57 @@ def test_manifest_lists_installed_files(tmp_path, project):
     assert result.returncode == 0
     files = manifest.read_text().splitlines()
     assert files == [f"{INSTALL_DIR}/git-cicd",
-                     f"{INSTALL_DIR}/templates/workflow.yml",
+                     f"{INSTALL_DIR}/templates/workflows/open.yml",
                      ".vendored/manifests/git-cicd.schema", WORKFLOW]
     assert CONFIG not in files
     for f in files:
         assert (project / f).is_file()
+
+
+def _vendor_check_allows(path, allowed):
+    """The vendor check's own matching (.vendored/check)."""
+    import importlib.machinery
+    import importlib.util
+    loader = importlib.machinery.SourceFileLoader(
+        "vendored_check", str(ROOT / ".vendored" / "check"))
+    spec = importlib.util.spec_from_loader("vendored_check", loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module.matches_any_pattern(path, allowed)
+
+
+def test_allowed_covers_every_per_trigger_workflow():
+    """The editable list covers the generated files, those still to come
+    included, and nothing else under .github/workflows."""
+    allowed = json.loads((ROOT / "templates" / "config.json").read_text())[
+        "_vendor"]["allowed"]
+    for trigger in ("open", "merge", "cron", "manual"):
+        assert _vendor_check_allows(f".github/workflows/git-cicd-{trigger}.yml",
+                                    allowed), trigger
+    for other in (".github/workflows/version-bump.yml",
+                  ".github/workflows/check-vendor.yml",
+                  ".github/workflows/sub/git-cicd-open.yml"):
+        assert not _vendor_check_allows(other, allowed), other
+
+
+def test_upgrade_from_the_single_workflow_file(tmp_path, project):
+    """An install over an earlier version: the old single file and the old
+    template go, the per-trigger file is written, verify passes."""
+    script = stub_install_sh(tmp_path)
+    (project / LEGACY).parent.mkdir(parents=True)
+    (project / LEGACY).write_text("name: git-cicd\n")
+    old_template = project / INSTALL_DIR / "templates" / "workflow.yml"
+    old_template.parent.mkdir(parents=True)
+    old_template.write_text("old\n")
+    result = run_install(project, script)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not (project / LEGACY).exists()
+    assert not old_template.exists()
+    assert f"removed {LEGACY}" in result.stdout
+    assert (project / WORKFLOW).is_file()
+    verify = subprocess.run(["python3", f"{INSTALL_DIR}/git-cicd", "verify"],
+                            cwd=project, capture_output=True, text=True)
+    assert verify.returncode == 0, verify.stdout
 
 
 def test_no_manifest_without_env(tmp_path, project):

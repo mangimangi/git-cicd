@@ -214,14 +214,14 @@ def test_setup_wrong_type(scripts):
             "job test: setup must be one repository path")
 
 
-def test_unknown_moment(scripts):
+def test_unknown_trigger(scripts):
     refused(scripts, {"jobs": {"test": job(on=["open", "push"])}},
-            "job test: unknown moment 'push' in on")
+            "job test: unknown trigger 'push' in on")
 
 
-def test_duplicate_moment(scripts):
+def test_duplicate_trigger(scripts):
     refused(scripts, {"jobs": {"test": job(on=["open", "open"])}},
-            "job test: moment open listed more than once")
+            "job test: trigger open listed more than once")
 
 
 def test_on_wrong_type(scripts):
@@ -234,7 +234,7 @@ def test_cron_without_expression(scripts):
             "job nightly: on contains cron but no cron expression is given")
 
 
-def test_cron_expression_without_cron_moment(scripts):
+def test_cron_expression_without_cron_trigger(scripts):
     refused(scripts, {"jobs": {"test": job(cron="0 3 * * *")}},
             "job test: cron is set but on does not contain cron")
 
@@ -338,7 +338,7 @@ def test_all_errors_reported_one_per_line(scripts):
     result = refused(scripts, {"jobs": {"a": j, "b": job(bogus=1)},
                                "extra": 1},
                      "job a: missing required field branches",
-                     "job a: unknown moment 'push'",
+                     "job a: unknown trigger 'push'",
                      "job b: unknown field bogus",
                      "config: unknown field extra")
     assert len(result.stderr.strip().splitlines()) == 4
@@ -373,3 +373,63 @@ def test_main_in_process(scripts, capsys):
     scripts.config(STRAWMAN)
     assert git_cicd.main(["validate"]) == 0
     assert "config ok: 2 jobs" in capsys.readouterr().out
+
+
+# ── name (display name) ─────────────────────────────────────────────────────
+
+def test_name_validates(scripts):
+    scripts.config({"jobs": {"test": job(name="Unit Tests")}})
+    result = scripts.run("validate")
+    assert result.returncode == 0, result.stderr
+    config = git_cicd.load_config(str(scripts.path))
+    assert config["jobs"]["test"]["title"] == "Unit Tests"
+    assert config["jobs"]["test"]["name"] == "test"
+
+
+def test_name_defaults_to_job_name_in_title_case(scripts):
+    scripts.config({"jobs": {"test": job(), "unit-tests": job(),
+                             "build_docs-fast": job(), "e2e": job(),
+                             "ci-PyPI": job()}})
+    config = git_cicd.load_config(str(scripts.path))
+    titles = {n: j["title"] for n, j in config["jobs"].items()}
+    assert titles == {"test": "Test", "unit-tests": "Unit Tests",
+                      "build_docs-fast": "Build Docs Fast", "e2e": "E2e",
+                      "ci-PyPI": "Ci PyPI"}
+
+
+@pytest.mark.parametrize("name", ["PyPI", "mypy", "unit tests",
+                                  "Release to npm", "pre-COMMIT"])
+def test_written_name_is_shown_exactly_as_written(scripts, name):
+    """git-cicd never changes the case of a name the repository wrote."""
+    scripts.config({"jobs": {"test": job(name=name)}})
+    config = git_cicd.load_config(str(scripts.path))
+    assert config["jobs"]["test"]["title"] == name
+
+
+def test_default_title():
+    assert git_cicd.default_title("unit-tests") == "Unit Tests"
+    assert git_cicd.default_title("a__b--c") == "A B C"
+    assert git_cicd.default_title("x") == "X"
+    assert git_cicd.default_title("-") == "-"
+
+
+def test_name_with_shell_metacharacters_is_data(scripts):
+    name = "It's \"$(touch pwned)\" `id` $HOME; | &"
+    scripts.config({"jobs": {"test": job(name=name)}})
+    config = git_cicd.load_config(str(scripts.path))
+    assert config["jobs"]["test"]["title"] == name
+
+
+@pytest.mark.parametrize("value,reason", [
+    (42, "name must be a string"),
+    (None, "name must be a string"),
+    (["a"], "name must be a string"),
+    ("", "name is empty"),
+    ("   ", "name is empty"),
+    ("two\nlines", "must be a single line"),
+    ("cr\rhere", "must be a single line"),
+    ("tab\there", "must be a single line"),
+])
+def test_bad_name_refused(scripts, value, reason):
+    refused(scripts, {"jobs": {"test": job(name=value)}},
+            "job test: name", reason)

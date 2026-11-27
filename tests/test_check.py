@@ -188,8 +188,33 @@ def test_token_passthrough(project):
 
 
 def test_stale_workflow_fails_verdict(project):
-    (project.path / ".github/workflows/git-cicd.yml").write_text("stale\n")
+    (project.path / ".github/workflows/git-cicd-open.yml").write_text("stale\n")
     result = check(project)
     assert result.returncode == 1
-    assert "workflow does not match config: run " \
+    assert "workflows do not match config: run " \
         ".vendored/pkg/git-cicd/git-cicd generate" in result.stdout
+
+
+def test_display_name_with_metacharacters_reaches_report_and_runs_nothing(
+        repo, tmp_path):
+    """A display name is data: shown literally, never run."""
+    marker = tmp_path / "pwned"
+    name = (f"It's \"$(touch {marker})\" `touch {marker}` $HOME; "
+            f"touch {marker} | &")
+    repo.script("ci/a.sh")
+    repo.config({"jobs": {"unit": {"name": name, "on": ["open"],
+                                   "branches": ["main"],
+                                   "steps": ["ci/a.sh"]}}})
+    repo.install_tool()
+    assert repo.run("generate").returncode == 0
+    repo.commit("base")
+    repo.git("checkout", "-q", "-b", "feature")
+    repo.write("src/x", "y\n")
+    repo.commit("change")
+    summary = tmp_path / "summary.md"
+    result = repo.run("check", env={"GITHUB_STEP_SUMMARY": str(summary)})
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"  {name} / {repo.path.name}:unit  passed" in result.stdout
+    assert f"    {name} / {repo.path.name}:unit:a.sh  passed" in result.stdout
+    assert not marker.exists()
+    assert "$HOME" in summary.read_text()

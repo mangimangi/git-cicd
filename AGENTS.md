@@ -19,9 +19,10 @@ The checks run with the tool itself, the same way CI runs them:
 `origin/HEAD`, else `main`), runs the needed jobs one after another and exits
 non-zero on a failed verdict. Run a single job with `--job test`.
 
-After changing `.vendored/configs/git-cicd.json` or `templates/workflow.yml`,
-run `./git-cicd generate` and commit `.github/workflows/git-cicd.yml`; the
-verdict fails while they disagree.
+After changing `.vendored/configs/git-cicd.json` or a template under
+`templates/workflows/`, run `./git-cicd generate` and commit the generated
+workflows (`.github/workflows/git-cicd-<trigger>.yml`, one per trigger;
+`git-cicd-open.yml` today); the verdict fails while they disagree.
 
 ## Vendored tools
 
@@ -47,7 +48,7 @@ undo anything it reports.
 ## Layout
 
 - `git-cicd` — the tool (validate, decide, run-job, generate, verify, report, check)
-- `templates/workflow.yml` — the workflow template; `templates/config.json`, `templates/config.schema` — installed config and schema
+- `templates/workflows/<trigger>.yml` — the workflow templates, one per generated trigger (`open.yml`); `templates/config.json`, `templates/config.schema` — installed config and schema
 - `install.sh` — the git-vendored installer
 - `ci/` — this repository's own job scripts; `.vendored/configs/git-cicd.json` — its own config
 - `tests/` — pytest suite
