@@ -298,7 +298,7 @@ Exit codes:
 ## Developing git-cicd
 
 git-cicd checks itself with itself: its own config declares one job, `test`
-(`ci/setup.sh` installs pytest for the Python floor in `pyproject.toml`;
+(`ci/setup.sh` installs pytest for the Python floor, `>=3.11` in `pyproject.toml`;
 `ci/test.sh` runs it), and its workflow runs the root `./git-cicd`, so CI
 tests the code in the pull request.
 

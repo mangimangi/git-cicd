@@ -11,7 +11,7 @@ interface it implements is described in `README.md`.
 The checks run with the tool itself, the same way CI runs them:
 
 ```bash
-./git-cicd check --setup   # the first time: ci/setup.sh installs pytest for the Python floor
+./git-cicd check --setup   # the first time: ci/setup.sh installs pytest for the Python floor (3.11)
 ./git-cicd check           # afterwards
 ```
 

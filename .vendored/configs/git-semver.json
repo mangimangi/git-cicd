@@ -7,5 +7,5 @@
   },
   "version_file": "VERSION",
   "files": ["git-cicd", "install.sh", "templates/workflow.yml", "templates/config.json", "templates/config.schema"],
-  "changelog": true
+  "changelog": {"enabled": true}
 }
