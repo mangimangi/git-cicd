@@ -11,6 +11,7 @@ Python 3 standard library and the git CLI only.
 
 Subcommands:
   validate   load and validate the config
+  decide     decide which jobs a change needs on a moment
 """
 
 import argparse
@@ -337,6 +338,193 @@ def load_config(root, path=None):
     return config
 
 
+# ── Decide ──────────────────────────────────────────────────────────────────
+
+NOT_BUILT = "the {moment} moment is not built yet (git-cicd gcd-e74c builds open only)"
+ALL_MOMENTS = MOMENTS + ("manual",)
+
+
+def check_moment(config, moment):
+    """Raise UsageError for a moment that is not built yet, naming the jobs
+    that declare it. Never silently succeed."""
+    if moment == "open":
+        return
+    if moment == "manual":
+        declaring = [n for n, j in config["jobs"].items() if j["manual"]]
+    else:
+        declaring = [n for n, j in config["jobs"].items() if moment in j["on"]]
+    names = ", ".join(declaring) if declaring else "none"
+    raise UsageError(NOT_BUILT.format(moment=moment)
+                     + f"; jobs declaring it: {names}")
+
+
+def resolve_commit(root, rev):
+    """Resolve a revision to a commit sha, or None. The revision is passed
+    as one argv element after --end-of-options, never through a shell."""
+    if not rev:
+        return None
+    result = git("rev-parse", "--verify", "--quiet", "--end-of-options",
+                 rev + "^{commit}", cwd=root)
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def changed_files(root, base, head):
+    """What the branch changed since it left the base: base...head.
+
+    Return (files, None) or (None, why) when the diff cannot be computed.
+    """
+    base_sha = resolve_commit(root, base)
+    if base_sha is None:
+        return None, f"base {base!r} is not a commit in this repository"
+    head_sha = resolve_commit(root, head)
+    if head_sha is None:
+        return None, f"head {head!r} is not a commit in this repository"
+    result = subprocess.run(
+        ["git", "diff", "--name-only", "--no-renames", "-z",
+         f"{base_sha}...{head_sha}"],
+        cwd=root, capture_output=True)
+    if result.returncode != 0:
+        err = result.stderr.decode("utf-8", "replace").strip()
+        return None, "git diff failed: " + (err.splitlines()[0] if err
+                                              else f"exit {result.returncode}")
+    out = result.stdout.decode("utf-8", "surrogateescape")
+    return [f for f in out.split("\0") if f], None
+
+
+def _norm(path):
+    return os.path.normpath(path).replace(os.sep, "/")
+
+
+def job_scripts(config):
+    """Every file any job names (setup and step files), whatever its
+    moments."""
+    files = set()
+    for job in config["jobs"].values():
+        if job["setup"]:
+            files.add(_norm(job["setup"]))
+        for step in job["steps"]:
+            files.add(_norm(step[0]))
+    return files
+
+
+def config_relpath(config, root):
+    path = config.get("path") or os.path.join(root, CONFIG_PATH)
+    rel = os.path.relpath(os.path.abspath(path), os.path.abspath(root))
+    return _norm(rel)
+
+
+def _name_files(files, limit=5):
+    shown = ", ".join(files[:limit])
+    if len(files) > limit:
+        shown += f" (and {len(files) - limit} more)"
+    return shown
+
+
+def decide(config, root, moment, target, source, base, head, files=None,
+           diff_error=None):
+    """Decide every declared job for the moment, one decision each, with a
+    reason. Return the decision record (what `decide --json` prints)."""
+    check_moment(config, moment)
+    if files is None and diff_error is None:
+        files, diff_error = changed_files(root, base, head)
+
+    needs_nothing = config["needs_nothing"]
+    force = None
+    if files is not None:
+        if not files:
+            force = "no changed files found"
+        else:
+            forcing = job_scripts(config) | {config_relpath(config, root),
+                                             CONFIG_PATH}
+            touched = [f for f in files if _norm(f) in forcing]
+            if touched:
+                force = "config or job script changed: " + _name_files(touched)
+            else:
+                covering = [j["paths"] for j in config["jobs"].values()
+                            if j["paths"] is not None]
+                uncovered = [f for f in files
+                             if not match_any(needs_nothing, f)
+                             and not any(match_any(p, f) for p in covering)]
+                if uncovered:
+                    verb = "is" if len(uncovered) == 1 else "are"
+                    force = (f"{_name_files(uncovered)} {verb} in no job's "
+                             "paths and not in needs_nothing")
+    else:
+        force = f"cannot compute the diff: {diff_error}"
+
+    relevant = [f for f in (files or []) if not match_any(needs_nothing, f)]
+    decisions = []
+    for name, job in config["jobs"].items():
+        if moment not in job["on"]:
+            needed, reason = False, f"not an {moment} job"
+        elif not match_any(job["branches"], target or ""):
+            needed, reason = False, f"target {target} does not match branches"
+        elif force:
+            needed, reason = True, force
+        elif not relevant:
+            needed, reason = False, "only needs_nothing files changed"
+        elif job["paths"] is None:
+            n = len(relevant)
+            needed = True
+            reason = (f"{n} changed file{'' if n == 1 else 's'} outside "
+                      "needs_nothing (the job has no paths)")
+        else:
+            hits = [f for f in relevant if match_any(job["paths"], f)]
+            if hits:
+                n = len(hits)
+                needed = True
+                reason = f"{n} changed file{'' if n == 1 else 's'} match paths"
+            else:
+                needed, reason = False, "no changed file matches paths"
+        decisions.append({"name": name, "needed": needed, "reason": reason,
+                          "blocking": job["blocking"]})
+
+    return {
+        "moment": moment,
+        "target": target,
+        "source": source,
+        "base": base,
+        "head": head,
+        "changed_files": list(files or []),
+        "jobs": decisions,
+        "max_parallel": config["max_parallel"],
+    }
+
+
+def needed_jobs(decision):
+    return [j["name"] for j in decision["jobs"] if j["needed"]]
+
+
+def format_decision(decision):
+    lines = [f"git-cicd decide: moment {decision['moment']}, target "
+             f"{decision['target']}, source {decision['source']}",
+             f"  base {decision['base']}, head {decision['head']}",
+             f"  {len(decision['changed_files'])} changed files"]
+    for j in decision["jobs"]:
+        state = "needed" if j["needed"] else "not needed"
+        lines.append(f"  {j['name']}: {state} ({j['reason']})")
+    return "\n".join(lines)
+
+
+def write_github_output(decision):
+    """Append the outputs the generated workflow reads, when in Actions."""
+    path = os.environ.get("GITHUB_OUTPUT")
+    if not path:
+        return
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(f"jobs={json.dumps(needed_jobs(decision))}\n")
+        f.write(f"any={'true' if needed_jobs(decision) else 'false'}\n")
+        f.write(f"max_parallel={decision['max_parallel']}\n")
+
+
+def write_changed_files(path, files):
+    with open(path, "w", encoding="utf-8", errors="surrogateescape") as f:
+        for name in files:
+            f.write(name + "\n")
+
+
 # ── Commands ────────────────────────────────────────────────────────────────
 
 def cmd_validate(args, root):
@@ -344,6 +532,29 @@ def cmd_validate(args, root):
     n = len(config["jobs"])
     print(f"config ok: {n} jobs")
     return 0
+
+
+def cmd_decide(args, root):
+    config = load_config(root, args.config)
+    decision = decide(config, root, args.moment, args.target, args.source,
+                      args.base, args.head)
+    if args.changed_files_out:
+        write_changed_files(args.changed_files_out, decision["changed_files"])
+    write_github_output(decision)
+    if args.json:
+        print(json.dumps(decision, indent=2))
+    else:
+        print(format_decision(decision))
+    return 0
+
+
+def add_change_args(p):
+    """The facts about a change, as given by the platform or the caller."""
+    p.add_argument("--moment", required=True, choices=ALL_MOMENTS)
+    p.add_argument("--target", required=True, help="target branch")
+    p.add_argument("--source", required=True, help="source branch")
+    p.add_argument("--base", required=True, help="base commit")
+    p.add_argument("--head", required=True, help="head commit")
 
 
 def build_parser():
@@ -362,6 +573,13 @@ def build_parser():
         return p
 
     add("validate", cmd_validate, "load and validate the config")
+
+    p = add("decide", cmd_decide, "decide which jobs a change needs")
+    add_change_args(p)
+    p.add_argument("--json", action="store_true",
+                   help="print the decisions as JSON")
+    p.add_argument("--changed-files-out", metavar="PATH",
+                   help="write the changed files, one per line, to PATH")
     return parser
 
 
