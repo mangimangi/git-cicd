@@ -21,7 +21,7 @@ non-zero on a failed verdict. Run a single job with `--job test`.
 
 After changing `.vendored/configs/git-cicd.json` or a template under
 `templates/workflows/`, run `./git-cicd generate` and commit the generated
-workflows (`.github/workflows/git-cicd-<moment>.yml`, one per moment;
+workflows (`.github/workflows/git-cicd-<trigger>.yml`, one per trigger;
 `git-cicd-open.yml` today); the verdict fails while they disagree.
 
 ## Vendored tools
@@ -48,7 +48,7 @@ undo anything it reports.
 ## Layout
 
 - `git-cicd` — the tool (validate, decide, run-job, generate, verify, report, check)
-- `templates/workflows/<moment>.yml` — the workflow templates, one per generated moment (`open.yml`); `templates/config.json`, `templates/config.schema` — installed config and schema
+- `templates/workflows/<trigger>.yml` — the workflow templates, one per generated trigger (`open.yml`); `templates/config.json`, `templates/config.schema` — installed config and schema
 - `install.sh` — the git-vendored installer
 - `ci/` — this repository's own job scripts; `.vendored/configs/git-cicd.json` — its own config
 - `tests/` — pytest suite

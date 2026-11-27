@@ -183,14 +183,14 @@ def _vendor_check_allows(path, allowed):
     return module.matches_any_pattern(path, allowed)
 
 
-def test_allowed_covers_every_per_moment_workflow():
+def test_allowed_covers_every_per_trigger_workflow():
     """The editable list covers the generated files, those still to come
     included, and nothing else under .github/workflows."""
     allowed = json.loads((ROOT / "templates" / "config.json").read_text())[
         "_vendor"]["allowed"]
-    for moment in ("open", "merge", "cron", "manual"):
-        assert _vendor_check_allows(f".github/workflows/git-cicd-{moment}.yml",
-                                    allowed), moment
+    for trigger in ("open", "merge", "cron", "manual"):
+        assert _vendor_check_allows(f".github/workflows/git-cicd-{trigger}.yml",
+                                    allowed), trigger
     for other in (".github/workflows/version-bump.yml",
                   ".github/workflows/check-vendor.yml",
                   ".github/workflows/sub/git-cicd-open.yml"):
@@ -199,7 +199,7 @@ def test_allowed_covers_every_per_moment_workflow():
 
 def test_upgrade_from_the_single_workflow_file(tmp_path, project):
     """An install over an earlier version: the old single file and the old
-    template go, the per-moment file is written, verify passes."""
+    template go, the per-trigger file is written, verify passes."""
     script = stub_install_sh(tmp_path)
     (project / LEGACY).parent.mkdir(parents=True)
     (project / LEGACY).write_text("name: git-cicd\n")

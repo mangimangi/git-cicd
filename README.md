@@ -13,8 +13,8 @@ It is one Python 3 file with no dependency beyond the standard library and the
 git CLI, vendored by [git-vendored](https://github.com/mangimangi/git-vendored)
 and versioned by [git-semver](https://github.com/mangimangi/git-semver).
 
-What is built today: the whole interface is validated, and the `open` moment
-(pull requests) and local runs execute. The `merge` and `cron` moments and
+What is built today: the whole interface is validated, and the `open` trigger
+(pull requests) and local runs execute. The `merge` and `cron` triggers and
 manual runs validate in a config and are reported as **not built yet** when
 asked to run (exit 2); they are never silently ignored. See
 [Not built yet](#not-built-yet).
@@ -24,7 +24,7 @@ asked to run (exit 2); they are never silently ignored. See
 | Path | Owner | What |
 |---|---|---|
 | `.vendored/configs/git-cicd.json` | the repository | the config: jobs, `needs_nothing`, `max_parallel` |
-| `.github/workflows/git-cicd-<moment>.yml` | generated | the GitHub Actions workflows, one per moment (`git-cicd-open.yml` today); generated, committed |
+| `.github/workflows/git-cicd-<trigger>.yml` | generated | the GitHub Actions workflows, one per trigger (`git-cicd-open.yml` today); generated, committed |
 | your scripts (e.g. `ci/`) | the repository | setup and step scripts, wherever the repository keeps them; git-cicd installs none |
 | `.vendored/pkg/git-cicd/` | git-cicd | the tool and its workflow template, installed by `install.sh` |
 
@@ -64,7 +64,7 @@ in the README.
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `name` | non-empty single-line string | the job name in title case | a short human-readable display name (`"Unit Tests"`); it is data, shown in the job's row and the report, never part of a command |
-| `on` | array of `open`, `merge`, `cron` | `[]` | the moments the job runs at; several allowed, no duplicates; none means manual-only |
+| `on` | array of `open`, `merge`, `cron` | `[]` | the triggers the job runs at; several allowed, no duplicates; none means manual-only |
 | `branches` | non-empty array of patterns | **required** | target branches the job runs for (`main`, `plan/**`, `**`). For a job with `cron` in `on`, literal branch names only (no `*`, `?`, `[`) |
 | `paths` | array of patterns | none | the files that affect the job |
 | `setup` | one repository path | none | the job's own setup script |
@@ -114,7 +114,7 @@ any sequence without `/` (so `*.md` is Markdown at the repository root only),
   change outside `needs_nothing`).
 - A change affects **every** `open` job whose `branches` match when it touches
   the git-cicd config or any script any job names (setup or step, whatever
-  the job's moments); when a changed file is in no job's `paths` and not in
+  the job's triggers); when a changed file is in no job's `paths` and not in
   `needs_nothing`; or when the diff cannot be computed or is empty. So "not
   needed" only happens on purpose. `branches` always binds; forcing overrides
   `paths` only.
@@ -132,7 +132,7 @@ Every decision carries a reason, and the report shows it.
 
 | Variable | Value |
 |---|---|
-| `CICD_MOMENT` | the moment (`open`) |
+| `CICD_TRIGGER` | the trigger (`open`) |
 | `CICD_JOB` | the job name |
 | `CICD_TARGET_BRANCH` | the target branch (the pull request's base) |
 | `CICD_SOURCE_BRANCH` | the source branch (the pull request's head; what `.vendored/check` needs to let install branches through) |
@@ -176,7 +176,7 @@ request they are:
 git-cicd owns its own three; a config job's row has the job's display name
 (its job name in title case when it has none) and `<repo>`, the name of the
 repository the workflow runs in. GitHub shows a check run after its
-workflow's name, which is the moment's (`Open / Unit Tests / medici:unit-tests`,
+workflow's name, which is the trigger's (`Open / Unit Tests / medici:unit-tests`,
 `Open / Decide / git-cicd:decide`); a status has no workflow and shows as
 `Verdict / git-cicd:verdict`. No row or status name carries a version: it is
 what branch protection and anything else that waits on a check refers to, and
@@ -271,21 +271,21 @@ verdict` changes its branch protection to the new name when it upgrades.
 
 ## The generated workflows
 
-git-cicd generates **one workflow per moment**, each its own file with its
-own trigger, its own permissions (at the top level or per job) and its own
-overlap rule, and each named for its moment, so a row reads
+git-cicd generates **one workflow per trigger**, each its own file with its
+own GitHub event, its own permissions (at the top level or per job) and its own
+overlap rule, and each named for its trigger, so a row reads
 `Open / Unit Tests / medici:unit-tests`:
 
-| Moment | Workflow name | File | Generated |
+| Trigger | Workflow name | File | Generated |
 |---|---|---|---|
 | `open` | `Open` | `.github/workflows/git-cicd-open.yml` | yes |
 | `merge` | `Merge` | `.github/workflows/git-cicd-merge.yml` | not yet |
 | `cron` | `Cron` | `.github/workflows/git-cicd-cron.yml` | not yet |
 | manual | `Manual` | `.github/workflows/git-cicd-manual.yml` | not yet |
 
-The names and file names are fixed for good: when the other moments are
-built, they add their files and change none. The names are the moment words
-(not `CI`/`CD`): the config already says `"on": ["open"]`, and a moment is
+The names and file names are fixed for good: when the other triggers are
+built, they add their files and change none. The names are the trigger words
+(not `CI`/`CD`): the config already says `"on": ["open"]`, and a trigger is
 not a kind of job.
 
 `git-cicd generate` writes every generated file. **Every generated file is
@@ -296,7 +296,7 @@ that differ only in jobs that are not `cron` generate the same files.
 
 The `open` workflow (`Open`):
 
-- Trigger: `pull_request` (opened, synchronize, reopened), every target
+- Event: `pull_request` (opened, synchronize, reopened), every target
   branch; `branches` are decided by the tool.
 - Token: `contents: read` at the top level. `Decide / git-cicd:decide` and
   `Report / git-cicd:report` also get `statuses: write`, the one write
@@ -328,7 +328,7 @@ edit.
 ### Migrating from the single `git-cicd.yml`
 
 git-cicd up to 0.0.2 generated one file, `.github/workflows/git-cicd.yml`, for
-every moment. In a repository that still has it, `generate` writes
+every trigger. In a repository that still has it, `generate` writes
 `.github/workflows/git-cicd-open.yml` and **removes the old file**; commit
 the new file and the deletion together. Until then `verify` fails (and so does
 the verdict), naming the command to run. The install pull request of an
@@ -347,7 +347,7 @@ to install or upgrade it.
    `mangimangi/git-cicd` as the vendor (the version defaults to the latest).
 2. The workflow opens the install pull request from the branch
    `chore/install-git-cicd`. That pull request carries the tool, the schema,
-   the config when it is missing, and the regenerated per-moment workflows
+   the config when it is missing, and the regenerated per-trigger workflows
    (`.github/workflows/git-cicd-open.yml`; on the first upgrade from the single
    file, also the deletion of `.github/workflows/git-cicd.yml`). Review and
    merge it like any other.
@@ -376,16 +376,16 @@ What lands where:
 | Path | What | On upgrade |
 |---|---|---|
 | `.vendored/pkg/git-cicd/git-cicd` | the tool | replaced |
-| `.vendored/pkg/git-cicd/templates/workflows/<moment>.yml` | the templates `generate` fills, one per generated moment | replaced |
+| `.vendored/pkg/git-cicd/templates/workflows/<trigger>.yml` | the templates `generate` fills, one per generated trigger | replaced |
 | `.vendored/manifests/git-cicd.schema` | the config schema, for `.vendored/audit` | replaced |
 | `.vendored/configs/git-cicd.json` | your config: the jobs | **created once**, only when missing; never overwritten |
-| `.github/workflows/git-cicd-<moment>.yml` | the generated workflows | **regenerated on every install**, so an upgrade reaches them in the install pull request |
+| `.github/workflows/git-cicd-<trigger>.yml` | the generated workflows | **regenerated on every install**, so an upgrade reaches them in the install pull request |
 
 The default config declares no jobs (`"jobs": {}`, `"needs_nothing": []`), so
 a fresh install validates and needs nothing until you declare jobs. The config
 and the generated workflows are listed as editable (`_vendor.allowed`) for
 git-vendored's check, the workflows as the pattern
-`.github/workflows/git-cicd-*.yml`, which covers the files of moments still to
+`.github/workflows/git-cicd-*.yml`, which covers the files of triggers still to
 come; the tool's own files are protected. (A repository first installed before
 this pattern keeps the editable list it was registered with; its install pull
 requests regenerate the workflows from the install branch, which the check
@@ -411,7 +411,7 @@ variables):
 ./git-cicd check                                 # in git-cicd itself
 ```
 
-`check` decides which jobs the change needs (the `open` moment), runs the
+`check` decides which jobs the change needs (the `open` trigger), runs the
 needed jobs **one after another** (never in parallel locally), then prints the
 same report and verdict as the `Verdict / git-cicd:verdict` status.
 
@@ -451,26 +451,26 @@ Exit codes:
 |---|---|
 | 0 | verdict PASSED |
 | 1 | verdict FAILED (a blocking job failed or could not run, or the generated workflows do not match the config) |
-| 2 | config or usage error, or a moment that is not built yet |
+| 2 | config or usage error, or a trigger that is not built yet |
 
 ## Commands
 
 | Command | What |
 |---|---|
 | `validate [--config PATH]` | load and validate the config: `config ok: N jobs` or every error |
-| `decide --moment open --target B --source B --base SHA --head SHA [--json] [--changed-files-out PATH]` | one decision per declared job, with the reason; in Actions also writes `jobs`, `any`, `max_parallel` to `GITHUB_OUTPUT` |
-| `run-job JOB --moment open --target … --head SHA [--setup] [--result PATH]` | setup when asked, then the steps; result JSON with the times |
+| `decide --trigger open --target B --source B --base SHA --head SHA [--json] [--changed-files-out PATH]` | one decision per declared job, with the reason; in Actions also writes `jobs`, `any`, `max_parallel` to `GITHUB_OUTPUT` |
+| `run-job JOB --trigger open --target … --head SHA [--setup] [--result PATH]` | setup when asked, then the steps; result JSON with the times |
 | `generate` / `verify` | write / check the generated workflows (`.github/workflows/git-cicd-open.yml`); `generate` removes, and `verify` fails on, the old `.github/workflows/git-cicd.yml` |
 | `report --decisions FILE --results DIR [--verdict-out PATH]` | the report and verdict from `decide --json` and `run-job --result` files; `--verdict-out` writes the status state (`success`/`failure`) and description, one per line |
 | `check […]` | the local command above |
 
 ## Not built yet
 
-- The `merge` and `cron` moments and manual runs: they validate, and
-  `decide`/`run-job`/`report` exit 2 with `the <moment> moment is not built
+- The `merge` and `cron` triggers and manual runs: they validate, and
+  `decide`/`run-job`/`report` exit 2 with `the <trigger> trigger is not built
   yet` when asked to run them. Their workflows (`Merge`, `Cron`, `Manual`) are
   not generated yet, so nothing triggers them; when they are built, each adds
-  its own file under the name above, with its own trigger, permissions and
+  its own file under the name above, with its own GitHub event, permissions and
   overlap rule (`merge` queued, never cancelled), and changes no other file.
 - Declared inputs for manual runs.
 - Secrets beyond `GITHUB_TOKEN` and `VENDOR_PAT`.

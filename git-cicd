@@ -11,9 +11,9 @@ Python 3 standard library and the git CLI only.
 
 Subcommands:
   validate   load and validate the config
-  decide     decide which jobs a change needs on a moment
+  decide     decide which jobs a change needs on a trigger
   run-job    run one job: setup when asked, then its steps
-  generate   write the generated workflows (one per moment) from the config
+  generate   write the generated workflows (one per trigger) from the config
   verify     check that the generated workflows match the config
   report     one line per job with times, and one verdict
   check      decide, run and report locally, without GitHub
@@ -31,9 +31,9 @@ import tempfile
 import time
 
 CONFIG_PATH = ".vendored/configs/git-cicd.json"
-# One generated workflow per moment: (workflow name, file). The names and the
+# One generated workflow per trigger: (workflow name, file). The names and the
 # files are fixed for good, so no adopter has to rename a file again. Only the
-# moments in GENERATED_MOMENTS are written; adding one adds its template under
+# triggers in GENERATED_TRIGGERS are written; adding one adds its template under
 # templates/workflows/ and its word here, and changes no other file.
 WORKFLOWS = {
     "open": ("Open", ".github/workflows/git-cicd-open.yml"),
@@ -41,8 +41,8 @@ WORKFLOWS = {
     "cron": ("Cron", ".github/workflows/git-cicd-cron.yml"),
     "manual": ("Manual", ".github/workflows/git-cicd-manual.yml"),
 }
-GENERATED_MOMENTS = ("open",)
-# The single workflow file of git-cicd before the per-moment files; generate
+GENERATED_TRIGGERS = ("open",)
+# The single workflow file of git-cicd before the per-trigger files; generate
 # removes it and verify fails while it is there.
 LEGACY_WORKFLOW_PATH = ".github/workflows/git-cicd.yml"
 TEMPLATE_DIR = os.path.join("templates", "workflows")
@@ -52,7 +52,7 @@ TEMPLATE_DIR = os.path.join("templates", "workflows")
 # `Decide / git-cicd:decide` and `Report / git-cicd:report`).
 VERDICT_STATUS = "Verdict / git-cicd:verdict"
 
-MOMENTS = ("open", "merge", "cron")
+TRIGGERS = ("open", "merge", "cron")
 DEFAULT_MAX_PARALLEL = 3
 
 TOP_LEVEL_FIELDS = ("_vendor", "jobs", "needs_nothing", "max_parallel")
@@ -230,17 +230,17 @@ def _validate_job(root, name, job):
     # on
     on = job.get("on", [])
     if not _is_str_list(on):
-        errors.append(f"{prefix}: on must be an array of moments "
-                      f"({', '.join(MOMENTS)})")
+        errors.append(f"{prefix}: on must be an array of triggers "
+                      f"({', '.join(TRIGGERS)})")
         on = []
     else:
-        for moment in on:
-            if moment not in MOMENTS:
-                errors.append(f"{prefix}: unknown moment {moment!r} in on "
-                              f"(allowed: {', '.join(MOMENTS)})")
+        for trigger in on:
+            if trigger not in TRIGGERS:
+                errors.append(f"{prefix}: unknown trigger {trigger!r} in on "
+                              f"(allowed: {', '.join(TRIGGERS)})")
         dupes = sorted({m for m in on if on.count(m) > 1})
-        for moment in dupes:
-            errors.append(f"{prefix}: moment {moment} listed more than once "
+        for trigger in dupes:
+            errors.append(f"{prefix}: trigger {trigger} listed more than once "
                           "in on")
 
     # branches
@@ -396,21 +396,21 @@ def load_config(root, path=None):
 
 # ── Decide ──────────────────────────────────────────────────────────────────
 
-NOT_BUILT = "the {moment} moment is not built yet (git-cicd gcd-e74c builds open only)"
-ALL_MOMENTS = MOMENTS + ("manual",)
+NOT_BUILT = "the {trigger} trigger is not built yet (git-cicd gcd-e74c builds open only)"
+ALL_TRIGGERS = TRIGGERS + ("manual",)
 
 
-def check_moment(config, moment):
-    """Raise UsageError for a moment that is not built yet, naming the jobs
+def check_trigger(config, trigger):
+    """Raise UsageError for a trigger that is not built yet, naming the jobs
     that declare it. Never silently succeed."""
-    if moment == "open":
+    if trigger == "open":
         return
-    if moment == "manual":
+    if trigger == "manual":
         declaring = [n for n, j in config["jobs"].items() if j["manual"]]
     else:
-        declaring = [n for n, j in config["jobs"].items() if moment in j["on"]]
+        declaring = [n for n, j in config["jobs"].items() if trigger in j["on"]]
     names = ", ".join(declaring) if declaring else "none"
-    raise UsageError(NOT_BUILT.format(moment=moment)
+    raise UsageError(NOT_BUILT.format(trigger=trigger)
                      + f"; jobs declaring it: {names}")
 
 
@@ -455,7 +455,7 @@ def _norm(path):
 
 def job_scripts(config):
     """Every file any job names (setup and step files), whatever its
-    moments."""
+    triggers."""
     files = set()
     for job in config["jobs"].values():
         if job["setup"]:
@@ -478,11 +478,11 @@ def _name_files(files, limit=5):
     return shown
 
 
-def decide(config, root, moment, target, source, base, head, files=None,
+def decide(config, root, trigger, target, source, base, head, files=None,
            diff_error=None):
-    """Decide every declared job for the moment, one decision each, with a
+    """Decide every declared job for the trigger, one decision each, with a
     reason. Return the decision record (what `decide --json` prints)."""
-    check_moment(config, moment)
+    check_trigger(config, trigger)
     if files is None and diff_error is None:
         files, diff_error = changed_files(root, base, head)
 
@@ -513,8 +513,8 @@ def decide(config, root, moment, target, source, base, head, files=None,
     relevant = [f for f in (files or []) if not match_any(needs_nothing, f)]
     decisions = []
     for name, job in config["jobs"].items():
-        if moment not in job["on"]:
-            needed, reason = False, f"not an {moment} job"
+        if trigger not in job["on"]:
+            needed, reason = False, f"not an {trigger} job"
         elif not match_any(job["branches"], target or ""):
             needed, reason = False, f"target {target} does not match branches"
         elif force:
@@ -539,7 +539,7 @@ def decide(config, root, moment, target, source, base, head, files=None,
                           "blocking": job["blocking"]})
 
     return {
-        "moment": moment,
+        "trigger": trigger,
         "target": target,
         "source": source,
         "base": base,
@@ -555,7 +555,7 @@ def needed_jobs(decision):
 
 
 def format_decision(decision):
-    lines = [f"git-cicd decide: moment {decision['moment']}, target "
+    lines = [f"git-cicd decide: trigger {decision['trigger']}, target "
              f"{decision['target']}, source {decision['source']}",
              f"  base {decision['base']}, head {decision['head']}",
              f"  {len(decision['changed_files'])} changed files"]
@@ -595,7 +595,7 @@ def script_env(job_name, facts, changed_files_path):
     """
     env = dict(os.environ)
     env.update({
-        "CICD_MOMENT": facts["moment"],
+        "CICD_TRIGGER": facts["trigger"],
         "CICD_JOB": job_name,
         "CICD_TARGET_BRANCH": facts["target"],
         "CICD_SOURCE_BRANCH": facts["source"],
@@ -625,7 +625,7 @@ def _run_script(argv, root, env, header):
 def run_job(config, root, name, facts, setup=False, files=None):
     """Run a job: setup when asked, then each step in order, stopping at the
     first failing step. Return the result record."""
-    check_moment(config, facts["moment"])
+    check_trigger(config, facts["trigger"])
     job = config["jobs"].get(name)
     if job is None:
         raise UsageError(f"unknown job {name!r} (declared: "
@@ -697,9 +697,9 @@ def tool_path(root):
     return rel
 
 
-def template_text(moment):
+def template_text(trigger):
     path = os.path.join(os.path.dirname(os.path.realpath(
-        os.path.abspath(__file__))), TEMPLATE_DIR, f"{moment}.yml")
+        os.path.abspath(__file__))), TEMPLATE_DIR, f"{trigger}.yml")
     try:
         with open(path, encoding="utf-8") as f:
             return f.read()
@@ -728,18 +728,18 @@ def render_workflow(config, tool, template):
 
 
 def render_workflows(config, tool, templates=None):
-    """{path: text} for every generated workflow, in moment order."""
+    """{path: text} for every generated workflow, in trigger order."""
     out = {}
-    for moment in GENERATED_MOMENTS:
-        template = (templates or {}).get(moment)
+    for trigger in GENERATED_TRIGGERS:
+        template = (templates or {}).get(trigger)
         if template is None:
-            template = template_text(moment)
-        out[WORKFLOWS[moment][1]] = render_workflow(config, tool, template)
+            template = template_text(trigger)
+        out[WORKFLOWS[trigger][1]] = render_workflow(config, tool, template)
     return out
 
 
 def generated_paths():
-    return [WORKFLOWS[m][1] for m in GENERATED_MOMENTS]
+    return [WORKFLOWS[m][1] for m in GENERATED_TRIGGERS]
 
 
 def generate_command(tool):
@@ -1194,7 +1194,7 @@ def check(config, root, target=None, source=None, base=None, head=None,
                                              "ignored)")
     print(format_decision(decision), flush=True)
 
-    facts = {"moment": "open", "target": target, "source": source,
+    facts = {"trigger": "open", "target": target, "source": source,
              "base": base_sha, "head": head_sha}
     results = {}
     for name in needed_jobs(decision):
@@ -1217,7 +1217,7 @@ def cmd_validate(args, root):
 
 def cmd_decide(args, root):
     config = load_config(root, args.config)
-    decision = decide(config, root, args.moment, args.target, args.source,
+    decision = decide(config, root, args.trigger, args.target, args.source,
                       args.base, args.head)
     if args.changed_files_out:
         write_changed_files(args.changed_files_out, decision["changed_files"])
@@ -1230,7 +1230,7 @@ def cmd_decide(args, root):
 
 
 def facts_from_args(args):
-    return {"moment": args.moment, "target": args.target,
+    return {"trigger": args.trigger, "target": args.target,
             "source": args.source, "base": args.base, "head": args.head}
 
 
@@ -1260,7 +1260,7 @@ def cmd_generate(args, root):
     legacy = os.path.join(root, LEGACY_WORKFLOW_PATH)
     if os.path.lexists(legacy):
         os.remove(legacy)
-        print(f"removed {LEGACY_WORKFLOW_PATH} (replaced by the per-moment "
+        print(f"removed {LEGACY_WORKFLOW_PATH} (replaced by the per-trigger "
               "workflows; commit the removal)")
     return 0
 
@@ -1301,7 +1301,7 @@ def write_verdict(path, passed, verdict):
 def cmd_report(args, root):
     try:
         config = load_config(root, args.config)
-        check_moment(config, args.moment)
+        check_trigger(config, args.trigger)
     except UsageError as e:
         summary = os.environ.get("GITHUB_STEP_SUMMARY")
         if summary:
@@ -1329,7 +1329,7 @@ def cmd_check(args, root):
 
 def add_change_args(p):
     """The facts about a change, as given by the platform or the caller."""
-    p.add_argument("--moment", required=True, choices=ALL_MOMENTS)
+    p.add_argument("--trigger", required=True, choices=ALL_TRIGGERS)
     p.add_argument("--target", required=True, help="target branch")
     p.add_argument("--source", required=True, help="source branch")
     p.add_argument("--base", required=True, help="base commit")
@@ -1383,7 +1383,7 @@ def build_parser():
     p.add_argument("--results", required=True, metavar="DIR",
                    help="directory holding run-job --result files (any "
                         "nesting)")
-    p.add_argument("--moment", default="open", choices=ALL_MOMENTS)
+    p.add_argument("--trigger", default="open", choices=ALL_TRIGGERS)
     p.add_argument("--verdict-out", metavar="PATH",
                    help="write the commit status state (success or failure) "
                         "and description, one per line, to PATH")

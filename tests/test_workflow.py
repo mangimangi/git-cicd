@@ -300,7 +300,7 @@ def test_verify_fails_after_hand_edit(tool_repo):
 
 
 def test_generate_removes_the_old_single_file(tool_repo):
-    """A repository from before the per-moment files: generate writes the
+    """A repository from before the per-trigger files: generate writes the
     new file and removes the old one."""
     tool_repo.config(base_config())
     (tool_repo.path / LEGACY).parent.mkdir(parents=True)
@@ -327,8 +327,8 @@ def test_verify_fails_while_the_old_file_is_there(tool_repo):
             f"{LEGACY}") in result.stdout
 
 
-def test_generated_files_are_named_for_their_moments():
-    """One workflow per moment, its name the moment's word and its file
+def test_generated_files_are_named_for_their_triggers():
+    """One workflow per trigger, its name the trigger's word and its file
     fixed for good; only `open` is generated so far."""
     assert git_cicd.WORKFLOWS == {
         "open": ("Open", ".github/workflows/git-cicd-open.yml"),
@@ -336,13 +336,13 @@ def test_generated_files_are_named_for_their_moments():
         "cron": ("Cron", ".github/workflows/git-cicd-cron.yml"),
         "manual": ("Manual", ".github/workflows/git-cicd-manual.yml"),
     }
-    assert git_cicd.GENERATED_MOMENTS == ("open",)
+    assert git_cicd.GENERATED_TRIGGERS == ("open",)
     templates = sorted(p.stem for p in (ROOT / "templates" / "workflows")
                        .glob("*.yml"))
-    assert templates == sorted(git_cicd.GENERATED_MOMENTS)
-    for moment in git_cicd.GENERATED_MOMENTS:
-        name, path = git_cicd.WORKFLOWS[moment]
-        text = (ROOT / "templates" / "workflows" / f"{moment}.yml").read_text()
+    assert templates == sorted(git_cicd.GENERATED_TRIGGERS)
+    for trigger in git_cicd.GENERATED_TRIGGERS:
+        name, path = git_cicd.WORKFLOWS[trigger]
+        text = (ROOT / "templates" / "workflows" / f"{trigger}.yml").read_text()
         assert text.startswith(f"# {path} - GENERATED")
         assert f"\nname: {name}\n" in text
 
@@ -399,11 +399,11 @@ def test_generate_refuses_invalid_config(tool_repo):
     assert not (tool_repo.path / WORKFLOW).exists()
 
 
-def test_template_documents_the_moments():
+def test_template_documents_the_triggers():
     head = TEMPLATE.read_text().split("\nname: Open\n")[0]
-    for moment, (name, path) in git_cicd.WORKFLOWS.items():
-        assert re.search(rf"(?m)^#   {moment} +{name} +{re.escape(path)} ",
-                         head), moment
+    for trigger, (name, path) in git_cicd.WORKFLOWS.items():
+        assert re.search(rf"(?m)^#   {trigger} +{name} +{re.escape(path)} ",
+                         head), trigger
     prose = " ".join(line.lstrip("# ") for line in head.splitlines())
     assert ("Every generated file is fixed text except the cron workflow's "
             "schedule block") in " ".join(prose.split())

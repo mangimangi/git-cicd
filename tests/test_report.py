@@ -34,7 +34,7 @@ def decision(**needed):
         n, reason = needed.get(name, (False, "no changed file matches paths"))
         jobs.append({"name": name, "needed": n, "reason": reason,
                      "blocking": name != "lint"})
-    return {"moment": "open", "target": "main", "source": "f", "base": "b",
+    return {"trigger": "open", "target": "main", "source": "f", "base": "b",
             "head": "h", "changed_files": [], "jobs": jobs, "max_parallel": 3}
 
 
@@ -273,14 +273,14 @@ def test_report_command_missing_decisions(config, repo, tmp_path):
     assert "no decisions" in result.stdout
 
 
-def test_report_cron_moment_not_built(config, repo, tmp_path):
+def test_report_cron_trigger_not_built(config, repo, tmp_path):
     repo.install_tool()
     summary = tmp_path / "summary.md"
-    result = repo.run("report", "--moment", "cron", "--decisions", "x",
+    result = repo.run("report", "--trigger", "cron", "--decisions", "x",
                       "--results", "y",
                       env={"GITHUB_STEP_SUMMARY": str(summary)})
     assert result.returncode == 2
-    assert "the cron moment is not built yet" in result.stderr
+    assert "the cron trigger is not built yet" in result.stderr
     assert "FAILED" in summary.read_text()
 
 
@@ -342,15 +342,15 @@ def test_verdict_out_stale_workflow_fails(config, repo, tmp_path):
     assert out.read_text().splitlines()[0] == "failure"
 
 
-def test_verdict_out_moment_not_built(config, repo, tmp_path):
+def test_verdict_out_trigger_not_built(config, repo, tmp_path):
     repo.install_tool()
     out = tmp_path / "verdict.txt"
-    result = repo.run("report", "--moment", "cron", "--decisions", "x",
+    result = repo.run("report", "--trigger", "cron", "--decisions", "x",
                       "--results", "y", "--verdict-out", str(out))
     assert result.returncode == 2
     state, description = out.read_text().splitlines()
     assert state == "failure"
-    assert "the cron moment is not built yet" in description
+    assert "the cron trigger is not built yet" in description
 
 
 def test_verdict_out_invalid_config(repo, tmp_path):
@@ -410,7 +410,7 @@ def owned_result():
 
 
 def owned_decision():
-    return {"moment": "open", "target": "main", "source": "f", "base": "b",
+    return {"trigger": "open", "target": "main", "source": "f", "base": "b",
             "head": "0123456789abcdef0123", "changed_files": [],
             "jobs": [{"name": "unit", "title": "Unit Tests", "needed": True,
                       "reason": "r", "blocking": True}], "max_parallel": 3}
@@ -529,7 +529,7 @@ def test_rows_and_step_lines_title_case_default_and_written_name(
     }})
     monkeypatch.setenv("GITHUB_REPOSITORY", "someone/medici")
     config = git_cicd.load_config(str(repo.path))
-    dec = {"moment": "open", "target": "main", "source": "f", "base": "b",
+    dec = {"trigger": "open", "target": "main", "source": "f", "base": "b",
            "head": "h", "changed_files": [], "max_parallel": 3,
            "jobs": [{"name": n, "needed": True, "reason": "r",
                      "blocking": True} for n in ("unit-tests", "pypi",

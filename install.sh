@@ -17,14 +17,14 @@
 #
 # Behavior:
 #   - Always updates: git-cicd (the tool) and the workflow templates
-#     (templates/workflows/<moment>.yml) under VENDOR_INSTALL_DIR, and the
+#     (templates/workflows/<trigger>.yml) under VENDOR_INSTALL_DIR, and the
 #     config schema
 #   - Preserves .vendored/configs/git-cicd.json (only creates if missing; a
 #     new config lists .github/workflows/git-cicd-*.yml as allowed, so the
-#     vendor check lets a pull request regenerate every per-moment workflow,
+#     vendor check lets a pull request regenerate every per-trigger workflow,
 #     the ones still to come included)
-#   - Always (re)generates the per-moment workflows
-#     (.github/workflows/git-cicd-<moment>.yml) from the config, so an upgrade
+#   - Always (re)generates the per-trigger workflows
+#     (.github/workflows/git-cicd-<trigger>.yml) from the config, so an upgrade
 #     reaches them in the install pull request, and removes the single
 #     .github/workflows/git-cicd.yml of earlier versions
 #
@@ -36,8 +36,8 @@ REPO="${VENDOR_REPO:-mangimangi/git-cicd}"
 INSTALL_DIR="${VENDOR_INSTALL_DIR:?VENDOR_INSTALL_DIR is required}"
 
 CONFIG=".vendored/configs/git-cicd.json"
-# The moments whose workflow git-cicd generates (see WORKFLOWS in git-cicd).
-MOMENTS=(open)
+# The triggers whose workflow git-cicd generates (see WORKFLOWS in git-cicd).
+TRIGGERS=(open)
 
 # File download helper - uses gh api when GH_TOKEN is set, curl otherwise
 fetch_file() {
@@ -67,10 +67,10 @@ INSTALLED_FILES+=("$INSTALL_DIR/git-cicd")
 
 # Templates of earlier versions, replaced by templates/workflows/
 rm -f "$INSTALL_DIR/templates/workflow.yml"
-for moment in "${MOMENTS[@]}"; do
-    fetch_file "templates/workflows/$moment.yml" \
-        "$INSTALL_DIR/templates/workflows/$moment.yml"
-    INSTALLED_FILES+=("$INSTALL_DIR/templates/workflows/$moment.yml")
+for trigger in "${TRIGGERS[@]}"; do
+    fetch_file "templates/workflows/$trigger.yml" \
+        "$INSTALL_DIR/templates/workflows/$trigger.yml"
+    INSTALLED_FILES+=("$INSTALL_DIR/templates/workflows/$trigger.yml")
 done
 
 # Config - only created if missing (user-owned; not listed in the manifest)
@@ -86,8 +86,8 @@ INSTALLED_FILES+=(".vendored/manifests/git-cicd.schema")
 # Workflows - regenerated on every install from the config (generate also
 # removes the single workflow file of earlier versions)
 python3 "$INSTALL_DIR/git-cicd" generate
-for moment in "${MOMENTS[@]}"; do
-    INSTALLED_FILES+=(".github/workflows/git-cicd-$moment.yml")
+for trigger in "${TRIGGERS[@]}"; do
+    INSTALLED_FILES+=(".github/workflows/git-cicd-$trigger.yml")
 done
 
 # Write manifest when requested by the framework

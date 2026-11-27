@@ -214,14 +214,14 @@ def test_setup_wrong_type(scripts):
             "job test: setup must be one repository path")
 
 
-def test_unknown_moment(scripts):
+def test_unknown_trigger(scripts):
     refused(scripts, {"jobs": {"test": job(on=["open", "push"])}},
-            "job test: unknown moment 'push' in on")
+            "job test: unknown trigger 'push' in on")
 
 
-def test_duplicate_moment(scripts):
+def test_duplicate_trigger(scripts):
     refused(scripts, {"jobs": {"test": job(on=["open", "open"])}},
-            "job test: moment open listed more than once")
+            "job test: trigger open listed more than once")
 
 
 def test_on_wrong_type(scripts):
@@ -234,7 +234,7 @@ def test_cron_without_expression(scripts):
             "job nightly: on contains cron but no cron expression is given")
 
 
-def test_cron_expression_without_cron_moment(scripts):
+def test_cron_expression_without_cron_trigger(scripts):
     refused(scripts, {"jobs": {"test": job(cron="0 3 * * *")}},
             "job test: cron is set but on does not contain cron")
 
@@ -338,7 +338,7 @@ def test_all_errors_reported_one_per_line(scripts):
     result = refused(scripts, {"jobs": {"a": j, "b": job(bogus=1)},
                                "extra": 1},
                      "job a: missing required field branches",
-                     "job a: unknown moment 'push'",
+                     "job a: unknown trigger 'push'",
                      "job b: unknown field bogus",
                      "config: unknown field extra")
     assert len(result.stderr.strip().splitlines()) == 4
