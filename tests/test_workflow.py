@@ -73,7 +73,7 @@ def test_generate_writes_file(tool_repo):
 def test_no_expressions_inside_run_blocks(tool_repo):
     text = generate(tool_repo, base_config())
     blocks = run_blocks(text)
-    assert len(blocks) == 5
+    assert len(blocks) == 7
     for block in blocks:
         assert "${{" not in block, block
 
@@ -92,7 +92,7 @@ def test_workflow_contract(tool_repo):
             "github.event.pull_request.number || github.ref }}") in text
     assert ("cancel-in-progress: ${{ github.event_name == 'pull_request' }}"
             in text)
-    assert "name: git-cicd verdict" in text
+    assert "name: git-cicd report" in text
     assert "if: always()" in text
     assert "max-parallel: ${{ fromJSON(needs.decide.outputs.max_parallel) }}" \
         in text
@@ -102,7 +102,7 @@ def test_workflow_contract(tool_repo):
     assert "VENDOR_PAT: ${{ secrets.VENDOR_PAT }}" in text
     assert "--setup --result=" in text
     assert "name: git-cicd-result-${{ matrix.job }}" in text
-    uses = re.findall(r"uses:\s*(\S+)", text)
+    uses = re.findall(r"(?m)^\s*(?:- )?uses:\s*(\S+)", text)
     assert uses and all(re.fullmatch(
         r"actions/(checkout|upload-artifact|download-artifact)@v\d+", u)
         for u in uses), uses
@@ -113,6 +113,63 @@ def test_workflow_contract(tool_repo):
     assert 'BASE: ${{ github.event.pull_request.base.sha }}' in text
     assert 'HEAD_SHA: ${{ github.event.pull_request.head.sha }}' in text
     assert '--target="$TARGET"' in text and '--source="$SOURCE"' in text
+
+
+def job_blocks(text):
+    """Each job's lines under `jobs:`, by job id."""
+    body = text.split("\njobs:\n", 1)[1]
+    jobs = {}
+    for chunk in re.split(r"(?m)^(?=  [A-Za-z0-9_-]+:$)", body):
+        m = re.match(r"  ([A-Za-z0-9_-]+):\n", chunk)
+        if m:
+            jobs[m.group(1)] = chunk
+    return jobs
+
+
+STATUS_PERMISSIONS = ("    permissions:\n      contents: read\n"
+                      "      statuses: write\n")
+
+
+def test_permissions_status_write_only(tool_repo):
+    """On the pull request trigger the token may write commit statuses, and
+    nothing else: contents stay read-only, and the jobs that run the config's
+    scripts get no write at all."""
+    text = generate(tool_repo, base_config())
+    top = text.split("\njobs:\n", 1)[0]
+    assert "\npermissions:\n  contents: read\n\n" in top
+    jobs = job_blocks(text)
+    assert set(jobs) == {"decide", "run", "verdict"}
+    assert STATUS_PERMISSIONS in jobs["decide"]
+    assert STATUS_PERMISSIONS in jobs["verdict"]
+    assert "permissions:" not in jobs["run"]
+    writes = re.findall(r"^\s*([a-z-]+):\s*write\s*$", text, re.M)
+    assert writes == ["statuses", "statuses"]
+    assert "write-all" not in text
+    assert text.count("permissions:") == 3
+
+
+def test_verdict_status_pending_first_and_final_last(tool_repo):
+    """The `git-cicd verdict` status is set to pending by the first step of
+    the first job and to the verdict by the last step of the report job, which
+    runs whatever happened before it; no job's check run carries the name."""
+    text = generate(tool_repo, base_config())
+    jobs = job_blocks(text)
+    assert "needs:" not in jobs["decide"]
+    decide_steps = jobs["decide"].split("      - name: ")[1:]
+    assert decide_steps[0].startswith(
+        "Set the git-cicd verdict status to pending\n")
+    assert "if: github.event_name == 'pull_request'" in decide_steps[0]
+    assert "-f state=pending" in decide_steps[0]
+    assert '-f context="git-cicd verdict"' in decide_steps[0]
+    report_steps = jobs["verdict"].split("      - name: ")[1:]
+    last = report_steps[-1]
+    assert last.startswith("Set the git-cicd verdict status\n")
+    assert "if: always() && github.event_name == 'pull_request'" in last
+    assert "STATE=failure" in last
+    assert '-f context="git-cicd verdict"' in last
+    assert "--verdict-out=" in report_steps[-2]
+    assert "if: always()" in jobs["verdict"].split("    steps:")[0]
+    assert not re.search(r"(?m)^    name: git-cicd verdict$", text)
 
 
 def test_non_cron_differences_generate_identical_file(tool_repo):
