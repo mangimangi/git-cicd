@@ -15,6 +15,7 @@ Subcommands:
   run-job    run one job: setup when asked, then its steps
   generate   write .github/workflows/git-cicd.yml from the config
   verify     check that the workflow file matches the config
+  report     one line per job with times, and one verdict
 """
 
 import argparse
@@ -706,6 +707,210 @@ def verify_workflow(config, root, tool=None):
                    f"{generate_command(tool)} and commit {WORKFLOW_PATH}")
 
 
+# ── Report ──────────────────────────────────────────────────────────────────
+
+def load_results(directory):
+    """Every run-job result JSON under directory (any nesting), by job."""
+    results = {}
+    if not directory or not os.path.isdir(directory):
+        return results
+    for dirpath, dirnames, filenames in os.walk(directory):
+        dirnames.sort()
+        for filename in sorted(filenames):
+            if not filename.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(dirpath, filename),
+                          encoding="utf-8") as f:
+                    data = json.load(f)
+            except (OSError, ValueError):
+                continue
+            if isinstance(data, dict) and isinstance(data.get("job"), str) \
+                    and "state" in data:
+                results[data["job"]] = data
+    return results
+
+
+def _secs(value):
+    return f"{value:.1f}s" if isinstance(value, (int, float)) else "-"
+
+
+def _exit_text(code, error):
+    return f"error: {error}" if error else f"exit {code}"
+
+
+def job_rows(config, decision, results):
+    """One row per declared job, in config order."""
+    by_name = {j["name"]: j for j in (decision or {}).get("jobs", [])}
+    rows = []
+    for name, job in config["jobs"].items():
+        d = by_name.get(name)
+        row = {"name": name, "blocking": job["blocking"], "seconds": None,
+               "children": [], "setup_skipped": False}
+        if d is None:
+            row.update(state="could not run", detail="no decision")
+        elif not d["needed"]:
+            row.update(state="not needed", detail=d["reason"])
+        else:
+            r = results.get(name)
+            if r is None:
+                row.update(state="could not run", detail="no result")
+            else:
+                row["seconds"] = r.get("seconds")
+                row["setup_skipped"] = bool(r.get("setup_skipped"))
+                setup = r.get("setup")
+                if setup:
+                    row["children"].append(
+                        (f"setup {setup.get('script') or job['setup']}",
+                         setup.get("seconds"),
+                         _exit_text(setup.get("exit_code"),
+                                    setup.get("error"))))
+                for step in r.get("steps", []):
+                    row["children"].append(
+                        (f"step {step.get('step')}", step.get("seconds"),
+                         _exit_text(step.get("exit_code"),
+                                    step.get("error"))))
+                state = r.get("state")
+                if state == "passed":
+                    row.update(state="passed", detail="")
+                elif state == "could not run":
+                    row.update(state="could not run", detail="setup failed")
+                else:
+                    row.update(state="failed", detail=(
+                        f"step {r.get('failed_step')}, "
+                        + _exit_text(r.get("exit_code"), r.get("error"))))
+        rows.append(row)
+    return rows
+
+
+def verdict_line(rows, decision, workflow_ok):
+    total = len(rows)
+    needed = [r for r in rows if r["state"] != "not needed"]
+    counts = {}
+    nonblocking_bad = 0
+    blocking_bad = False
+    for r in needed:
+        counts[r["state"]] = counts.get(r["state"], 0) + 1
+        if r["state"] in ("failed", "could not run"):
+            if r["blocking"]:
+                blocking_bad = True
+            else:
+                nonblocking_bad += 1
+    passed = not blocking_bad and workflow_ok and decision is not None
+    word = "PASSED" if passed else "FAILED"
+    if decision is None:
+        return passed, (f"{word} - no decisions: the decide step failed or "
+                        "did not run (see its log)")
+    if not needed:
+        reasons = []
+        for r in rows:
+            if r["detail"] not in reasons:
+                reasons.append(r["detail"])
+        why = "; ".join(reasons) if reasons else "no jobs are declared"
+        text = f"{word} - 0 of {total} jobs needed: {why}"
+    else:
+        parts = [f"{len(needed)} of {total} jobs needed"]
+        for state in ("passed", "failed", "could not run"):
+            if counts.get(state):
+                parts.append(f"{counts[state]} {state}")
+        text = f"{word} - " + ", ".join(parts)
+        if nonblocking_bad:
+            text += f" ({nonblocking_bad} non-blocking)"
+    if not workflow_ok:
+        text += "; the workflow does not match the config"
+    return passed, text
+
+
+def _state_text(row):
+    text = row["state"]
+    if row["detail"]:
+        text += f" ({row['detail']})"
+    if not row["blocking"]:
+        text += " (non-blocking)"
+    return text
+
+
+def format_report(rows, verdict, workflow_text, setup_note=False):
+    width = max([len(r["name"]) for r in rows] + [4])
+    lines = ["git-cicd report"]
+    for r in rows:
+        time_text = _secs(r["seconds"]) if r["seconds"] is not None else ""
+        lines.append(f"  {r['name']:<{width}}  {_state_text(r)}"
+                     + (f"  {time_text}" if time_text else ""))
+        for label, seconds, exit_text in r["children"]:
+            lines.append(f"  {'':<{width}}    {label}  {_secs(seconds)}  "
+                         f"({exit_text})")
+        if setup_note and r["setup_skipped"]:
+            lines.append(f"  {'':<{width}}    setup skipped (pass --setup to "
+                         "run it)")
+    lines.append(workflow_text)
+    lines.append(verdict)
+    return "\n".join(lines) + "\n"
+
+
+def _md(text):
+    return str(text).replace("|", "\\|").replace("\n", " ")
+
+
+def format_markdown(rows, verdict, workflow_text, setup_note=False):
+    word = verdict.split(" ", 1)[0]
+    lines = [f"## git-cicd verdict: {word}", "", f"**{_md(verdict)}**", "",
+             "| Job | State | Time | Detail |", "|---|---|---|---|"]
+    for r in rows:
+        state = r["state"] + ("" if r["blocking"] else " (non-blocking)")
+        time_text = _secs(r["seconds"]) if r["seconds"] is not None else ""
+        lines.append(f"| {_md(r['name'])} | {_md(state)} | {time_text} | "
+                     f"{_md(r['detail'])} |")
+        for label, seconds, exit_text in r["children"]:
+            lines.append(f"| &nbsp;&nbsp;↳ `{_md(label)}` | {_md(exit_text)} "
+                         f"| {_secs(seconds)} | |")
+        if setup_note and r["setup_skipped"]:
+            lines.append("| &nbsp;&nbsp;↳ setup | skipped | | pass --setup "
+                         "to run it |")
+    lines += ["", f"Workflow: {_md(workflow_text)}", ""]
+    return "\n".join(lines)
+
+
+def report(config, root, decision, results, workflow=None, setup_note=False,
+           out=None):
+    """Print the report, append it to GITHUB_STEP_SUMMARY when set, and
+    return (passed, verdict line)."""
+    out = out or sys.stdout
+    if workflow is None:
+        workflow = verify_workflow(config, root)
+    workflow_ok = workflow[0]
+    if workflow_ok:
+        workflow_text = "workflow matches config"
+    else:
+        try:
+            tool = tool_path(root)
+        except UsageError:
+            tool = "git-cicd"
+        workflow_text = ("workflow does not match config: run "
+                         f"{generate_command(tool)}")
+    rows = job_rows(config, decision, results)
+    passed, verdict = verdict_line(rows, decision, workflow_ok)
+    out.write(format_report(rows, verdict, workflow_text, setup_note))
+    out.flush()
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with open(summary, "a", encoding="utf-8") as f:
+            f.write(format_markdown(rows, verdict, workflow_text,
+                                    setup_note))
+    return passed, verdict
+
+
+def load_decisions(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("jobs"), list):
+        return None
+    return data
+
+
 # ── Commands ────────────────────────────────────────────────────────────────
 
 def cmd_validate(args, root):
@@ -767,6 +972,21 @@ def cmd_verify(args, root):
     return 0 if ok else 1
 
 
+def cmd_report(args, root):
+    config = load_config(root, args.config)
+    try:
+        check_moment(config, args.moment)
+    except UsageError as e:
+        summary = os.environ.get("GITHUB_STEP_SUMMARY")
+        if summary:
+            with open(summary, "a", encoding="utf-8") as f:
+                f.write(f"## git-cicd verdict: FAILED\n\n{e}\n")
+        raise
+    decision = load_decisions(args.decisions)
+    passed, _ = report(config, root, decision, load_results(args.results))
+    return 0 if passed else 1
+
+
 def add_change_args(p):
     """The facts about a change, as given by the platform or the caller."""
     p.add_argument("--moment", required=True, choices=ALL_MOMENTS)
@@ -813,6 +1033,15 @@ def build_parser():
         f"write {WORKFLOW_PATH} from the config")
     add("verify", cmd_verify,
         f"check that {WORKFLOW_PATH} matches what the config generates")
+
+    p = add("report", cmd_report, "one line per job with times, and one "
+            "verdict")
+    p.add_argument("--decisions", required=True, metavar="FILE",
+                   help="the JSON written by decide --json")
+    p.add_argument("--results", required=True, metavar="DIR",
+                   help="directory holding run-job --result files (any "
+                        "nesting)")
+    p.add_argument("--moment", default="open", choices=ALL_MOMENTS)
     return parser
 
 
