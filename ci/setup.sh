@@ -1,8 +1,9 @@
 #!/bin/bash
 # ci/setup.sh - setup for git-cicd's own `test` job.
 #
-# Reads the Python floor from requires-python in pyproject.toml, uses (or
-# installs) that Python, and installs the test-only dependencies into a
+# Reads the Python floor from requires-python in pyproject.toml, uses that
+# Python if present (python3.X, the runner tool cache) or installs it with uv
+# (itself installed into a small venv when missing), and installs the test-only dependencies into a
 # virtualenv the test step finds on disk. No Python version is written in the
 # workflow or the config: this script is the only place that decides it.
 set -euo pipefail
@@ -12,7 +13,9 @@ if [ -z "$FLOOR" ]; then
     echo "ci/setup.sh: cannot read requires-python (\">=X.Y\") from pyproject.toml" >&2
     exit 1
 fi
-VENV="${XDG_CACHE_HOME:-$HOME/.cache}/git-cicd/venv-$FLOOR"
+CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/git-cicd"
+VENV="$CACHE/venv-$FLOOR"
+TOOLS="$CACHE/tools"   # holds uv when it has to be installed
 
 find_floor() {
     local candidate
@@ -22,8 +25,14 @@ find_floor() {
             return 0
         fi
     done
-    if command -v uv >/dev/null 2>&1; then
-        uv python install "$FLOOR" >&2 && uv python find "$FLOOR" && return 0
+    local uv
+    uv="$(command -v uv 2>/dev/null || true)"
+    if [ -z "$uv" ] && python3 -m venv "$TOOLS" >&2 \
+            && "$TOOLS/bin/python" -m pip install --quiet uv >&2; then
+        uv="$TOOLS/bin/uv"
+    fi
+    if [ -n "$uv" ]; then
+        "$uv" python install "$FLOOR" >&2 && "$uv" python find "$FLOOR" && return 0
     fi
     return 1
 }
@@ -34,7 +43,7 @@ elif [ -z "${CI:-}" ] && python3 -c "import sys; sys.exit(sys.version_info < tup
     PYTHON="$(command -v python3)"
     echo "ci/setup.sh: Python $FLOOR not found; using $("$PYTHON" --version) locally (CI runs the floor)"
 else
-    echo "ci/setup.sh: Python $FLOOR not found (looked for python$FLOOR, the runner tool cache and uv)" >&2
+    echo "ci/setup.sh: Python $FLOOR not found (looked for python$FLOOR and the runner tool cache; uv could not install it)" >&2
     exit 1
 fi
 
