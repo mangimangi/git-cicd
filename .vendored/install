@@ -1,0 +1,1464 @@
+#!/usr/bin/env python3
+"""Unified vendor install command.
+
+Idempotent: handles both first-time add and update flows. If the vendor is not
+registered, pre-validates the repo and post-validates the config entry. If
+already registered, resolves the target version and skips if already current.
+
+Usage:
+    python3 .vendored/install <owner/repo|vendor|all> [--version <version>]
+                              [--force] [--pr] [--name <name>]
+
+Output (key=value lines for workflow consumption):
+    vendor=<name>
+    old_version=<version>
+    new_version=<version>
+    changed=true|false
+
+Environment:
+    GITHUB_TOKEN - Auth for public repos
+    VENDOR_PAT   - Auth for private repos (vendor.private: true)
+    GH_TOKEN     - Fallback auth token
+"""
+
+import argparse
+import base64
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import tempfile
+
+
+CONFIG_PATH = ".vendored/config.json"
+CONFIGS_DIR = ".vendored/configs"
+MANIFESTS_DIR = ".vendored/manifests"
+
+# Registry fields managed by the framework (stored under _vendor key)
+REGISTRY_FIELDS = {"repo", "install_branch", "protected", "allowed",
+                   "private", "automerge", "dogfood", "dependency_mode",
+                   "support"}
+
+
+# ── Config helpers ────────────────────────────────────────────────────────
+
+def read_registry(vendor_name):
+    """Read vendor registry from .vendored/manifests/<vendor>.registry.
+
+    Returns parsed dict or None if no .registry file exists.
+    """
+    registry_path = os.path.join(MANIFESTS_DIR, f"{vendor_name}.registry")
+    if not os.path.isfile(registry_path):
+        return None
+    with open(registry_path) as f:
+        return json.load(f)
+
+
+def _extract_vendor_registry(raw, vendor_name=None):
+    """Extract registry fields from a per-vendor config file's contents.
+
+    Prefers .registry file in manifests/ (new path). Falls back to _vendor
+    key in config, then treats all top-level keys as registry fields
+    (backwards compat with pre-_vendor configs).
+    """
+    if vendor_name:
+        registry = read_registry(vendor_name)
+        if registry is not None:
+            return registry
+    if "_vendor" in raw:
+        return dict(raw["_vendor"])
+    return dict(raw)
+
+
+def load_config(config_path=CONFIG_PATH):
+    """Load and return the vendored config.
+
+    Scans .vendored/configs/ for per-vendor <vendor>.json files first.
+    Falls back to monolithic config.json if configs/ dir doesn't exist
+    or has no .json files.
+
+    Return format: {"vendors": {"name": {...}, ...}}
+
+    Registry fields are read from .vendored/manifests/<vendor>.registry
+    when available, falling back to _vendor key in the config file.
+    """
+    # Try per-vendor configs first
+    if os.path.isdir(CONFIGS_DIR):
+        json_files = [f for f in os.listdir(CONFIGS_DIR) if f.endswith(".json")]
+        if json_files:
+            vendors = {}
+            for filename in sorted(json_files):
+                vendor_name = filename[:-5]  # strip .json
+                filepath = os.path.join(CONFIGS_DIR, filename)
+                with open(filepath) as f:
+                    raw = json.load(f)
+                vendors[vendor_name] = _extract_vendor_registry(raw, vendor_name)
+            return {"vendors": vendors}
+
+    # Fallback to monolithic config.json
+    if not os.path.isfile(config_path):
+        print(f"::error::Config not found: {config_path}")
+        sys.exit(1)
+    with open(config_path) as f:
+        return json.load(f)
+
+
+def write_registry(vendor_name, registry):
+    """Write vendor registry metadata to .vendored/manifests/<vendor>.registry."""
+    os.makedirs(MANIFESTS_DIR, exist_ok=True)
+    registry_path = os.path.join(MANIFESTS_DIR, f"{vendor_name}.registry")
+    with open(registry_path, "w") as f:
+        json.dump(registry, f, indent=2)
+        f.write("\n")
+
+
+def save_vendor_config(vendor_name, vendor_config):
+    """Write a single vendor's config to configs/<vendor>.json and registry.
+
+    Registry fields are written to .vendored/manifests/<vendor>.registry.
+    The config file retains only project config (no _vendor key).
+    For backwards compatibility, _vendor is also kept in the config file
+    until all consumers have migrated.
+    """
+    os.makedirs(CONFIGS_DIR, exist_ok=True)
+    filepath = os.path.join(CONFIGS_DIR, f"{vendor_name}.json")
+
+    # Read existing file to preserve project config keys
+    existing = {}
+    if os.path.isfile(filepath):
+        with open(filepath) as f:
+            existing = json.load(f)
+
+    # Build registry dict from the vendor_config
+    registry = {k: v for k, v in vendor_config.items() if k in REGISTRY_FIELDS}
+
+    # Write registry to dedicated .registry file
+    write_registry(vendor_name, registry)
+
+    # Start with existing top-level keys (project config), excluding _vendor
+    merged = {k: v for k, v in existing.items() if k != "_vendor"}
+    # Remove any registry fields that leaked to top level (from flat configs)
+    for key in REGISTRY_FIELDS:
+        merged.pop(key, None)
+
+    # Strip _vendor from config (registry now lives in .registry file)
+    # Config file becomes purely user-owned project config
+
+    with open(filepath, "w") as f:
+        json.dump(merged, f, indent=2)
+        f.write("\n")
+
+
+def delete_vendor_config(vendor_name):
+    """Delete a vendor's config file from configs/."""
+    filepath = os.path.join(CONFIGS_DIR, f"{vendor_name}.json")
+    if os.path.isfile(filepath):
+        os.remove(filepath)
+
+
+def save_config(config):
+    """Write config back to disk.
+
+    If per-vendor configs/ is in use, writes individual files.
+    Otherwise writes monolithic config.json.
+    """
+    if os.path.isdir(CONFIGS_DIR):
+        json_files = [f for f in os.listdir(CONFIGS_DIR) if f.endswith(".json")]
+        if json_files:
+            for vendor_name, vendor_config in config.get("vendors", {}).items():
+                save_vendor_config(vendor_name, vendor_config)
+            return
+
+    with open(CONFIG_PATH, "w") as f:
+        json.dump(config, f, indent=2)
+        f.write("\n")
+
+
+# ── Auth helpers ──────────────────────────────────────────────────────────
+
+def get_auth_token(vendor_config=None, private=False):
+    """Get the appropriate auth token for a vendor."""
+    if private or (vendor_config and vendor_config.get("private")):
+        token = os.environ.get("VENDOR_PAT", "")
+        if not token:
+            print("::error::VENDOR_PAT required for private vendor repos")
+            sys.exit(1)
+        return token
+    return os.environ.get("GITHUB_TOKEN", os.environ.get("GH_TOKEN", ""))
+
+
+def _gh_env(token):
+    """Build environment dict with GH_TOKEN set."""
+    env = os.environ.copy()
+    if token:
+        env["GH_TOKEN"] = token
+    return env
+
+
+# ── Pre-validation (add path) ────────────────────────────────────────────
+
+def check_repo_exists(repo, token):
+    """Check that the GitHub repo exists and is accessible."""
+    env = _gh_env(token)
+    result = subprocess.run(
+        ["gh", "api", f"repos/{repo}", "--jq", ".full_name"],
+        capture_output=True, text=True, env=env
+    )
+    if result.returncode != 0:
+        print(f"::error::Cannot access repo: {repo}")
+        print("Ensure the repo exists and your GH_TOKEN has access.")
+        sys.exit(1)
+
+
+def check_install_sh(repo, token):
+    """Verify the repo has an install.sh at its root."""
+    env = _gh_env(token)
+    result = subprocess.run(
+        ["gh", "api", f"repos/{repo}/contents/install.sh", "--jq", ".name"],
+        capture_output=True, text=True, env=env
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        print(f"::error::Repo does not implement git-vendored: {repo}")
+        print("Expected install.sh at repository root.")
+        sys.exit(1)
+
+
+# ── Version resolution ────────────────────────────────────────────────────
+
+def resolve_version(vendor_name, repo, requested_version, token):
+    """Resolve the target version for a vendor.
+
+    Strategy:
+    1. If a specific version is given (not 'latest'), use it
+    2. Try GitHub releases API for latest release tag
+    3. Fall back to reading VERSION file from default branch
+    """
+    if requested_version and requested_version != "latest":
+        return requested_version
+
+    version = _resolve_from_releases(repo, token)
+    if version:
+        return version
+
+    version = _resolve_from_version_file(repo, token)
+    if version:
+        return version
+
+    print(f"::error::Could not resolve version for {vendor_name} from {repo}")
+    sys.exit(1)
+
+
+def _resolve_from_releases(repo, token):
+    """Try to get latest version from GitHub releases."""
+    env = _gh_env(token)
+    result = subprocess.run(
+        ["gh", "api", f"repos/{repo}/releases/latest", "--jq", ".tag_name"],
+        capture_output=True, text=True, env=env
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout.strip().lstrip("v")
+    return None
+
+
+def _resolve_from_version_file(repo, token):
+    """Fallback: read VERSION file from repo default branch."""
+    env = _gh_env(token)
+    result = subprocess.run(
+        ["gh", "api", f"repos/{repo}/contents/VERSION", "--jq", ".content"],
+        capture_output=True, text=True, env=env
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        try:
+            content = base64.b64decode(result.stdout.strip()).decode().strip()
+            return content
+        except Exception:
+            pass
+    return None
+
+
+# ── Manifest helpers ──────────────────────────────────────────────────────
+
+def read_manifest(vendor_name):
+    """Read a vendor's manifest file. Returns list of paths, or None if missing."""
+    manifest_path = os.path.join(MANIFESTS_DIR, f"{vendor_name}.files")
+    if not os.path.isfile(manifest_path):
+        return None
+    with open(manifest_path) as f:
+        return [line.strip() for line in f if line.strip()]
+
+
+def write_manifest(vendor_name, files):
+    """Write a vendor's manifest file (one path per line)."""
+    os.makedirs(MANIFESTS_DIR, exist_ok=True)
+    manifest_path = os.path.join(MANIFESTS_DIR, f"{vendor_name}.files")
+    with open(manifest_path, "w") as f:
+        for path in sorted(files):
+            f.write(f"{path}\n")
+
+
+def read_manifest_version(vendor_name):
+    """Read a vendor's version from manifest storage."""
+    version_path = os.path.join(MANIFESTS_DIR, f"{vendor_name}.version")
+    if os.path.isfile(version_path):
+        return open(version_path).read().strip()
+    return None
+
+
+def write_manifest_version(vendor_name, version):
+    """Write a vendor's version to manifest storage."""
+    os.makedirs(MANIFESTS_DIR, exist_ok=True)
+    version_path = os.path.join(MANIFESTS_DIR, f"{vendor_name}.version")
+    with open(version_path, "w") as f:
+        f.write(f"{version}\n")
+
+
+def validate_manifest(files):
+    """Validate that all files listed in manifest exist on disk."""
+    missing = [f for f in files if not os.path.isfile(f)]
+    if missing:
+        print("::error::Manifest lists files that don't exist on disk:")
+        for f in missing:
+            print(f"  - {f}")
+        sys.exit(1)
+
+
+# ── Dependency helpers ────────────────────────────────────────────────────
+
+def write_deps(vendor_name, dep_names):
+    """Write a vendor's resolved deps to .vendored/manifests/<vendor>.deps."""
+    os.makedirs(MANIFESTS_DIR, exist_ok=True)
+    deps_path = os.path.join(MANIFESTS_DIR, f"{vendor_name}.deps")
+    with open(deps_path, "w") as f:
+        for name in sorted(dep_names):
+            f.write(f"{name}\n")
+
+
+def read_deps(vendor_name):
+    """Read a vendor's cached deps. Returns list of dep names, or None."""
+    deps_path = os.path.join(MANIFESTS_DIR, f"{vendor_name}.deps")
+    if not os.path.isfile(deps_path):
+        return None
+    with open(deps_path) as f:
+        return [line.strip() for line in f if line.strip()]
+
+
+def download_deps(repo, ref, token):
+    """Download deps.json from a vendor repo at the given ref.
+
+    Returns parsed dict or None if no deps.json exists.
+    """
+    env = _gh_env(token)
+    result = subprocess.run(
+        ["gh", "api", f"repos/{repo}/contents/deps.json?ref={ref}",
+         "--jq", ".content"],
+        capture_output=True, text=True, env=env
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    try:
+        content = base64.b64decode(result.stdout.strip()).decode()
+        return json.loads(content)
+    except Exception:
+        return None
+
+
+def download_schema(repo, ref, token):
+    """Download templates/config.schema from a vendor repo at the given ref.
+
+    Returns parsed dict or None if no schema exists (404 is expected).
+    """
+    env = _gh_env(token)
+    result = subprocess.run(
+        ["gh", "api", f"repos/{repo}/contents/templates/config.schema?ref={ref}",
+         "--jq", ".content"],
+        capture_output=True, text=True, env=env
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    try:
+        content = base64.b64decode(result.stdout.strip()).decode()
+        return json.loads(content)
+    except Exception:
+        return None
+
+
+def write_schema(vendor_name, schema):
+    """Write a vendor's config schema to .vendored/manifests/<vendor>.schema."""
+    os.makedirs(MANIFESTS_DIR, exist_ok=True)
+    schema_path = os.path.join(MANIFESTS_DIR, f"{vendor_name}.schema")
+    with open(schema_path, "w") as f:
+        json.dump(schema, f, indent=2)
+        f.write("\n")
+
+
+def check_deps(deps):
+    """Check which declared deps are satisfied.
+
+    For each dep, checks if the vendor is installed by file existence:
+    .vendored/configs/<dep_name>.json or .vendored/manifests/<dep_name>.version.
+
+    Returns (satisfied, missing) where each is a list of (dep_name, dep_info).
+    """
+    satisfied = []
+    missing = []
+    for dep_name, dep_info in deps.items():
+        config_exists = os.path.isfile(
+            os.path.join(CONFIGS_DIR, f"{dep_name}.json")
+        )
+        version_exists = os.path.isfile(
+            os.path.join(MANIFESTS_DIR, f"{dep_name}.version")
+        )
+        if config_exists or version_exists:
+            satisfied.append((dep_name, dep_info))
+        else:
+            missing.append((dep_name, dep_info))
+    return satisfied, missing
+
+
+def resolve_deps(deps, token, mode, installing_set=None, private=False):
+    """Apply dependency mode for resolved deps.
+
+    Modes:
+      - "error": exit if any deps missing (default)
+      - "warn": print warning for missing deps, continue
+      - "skip": no-op
+      - "install": auto-install missing deps (with cycle detection)
+    """
+    if mode == "skip":
+        return
+    if deps is None:
+        return
+
+    satisfied, missing = check_deps(deps)
+
+    if not missing:
+        return
+
+    if mode == "warn":
+        print("  Warning: missing dependencies:")
+        for dep_name, dep_info in missing:
+            repo = dep_info.get("repo", "unknown")
+            print(f"    - {dep_name} ({repo})")
+        return
+
+    if mode == "install":
+        if installing_set is None:
+            installing_set = []
+        for dep_name, dep_info in missing:
+            dep_repo = dep_info.get("repo")
+            if not dep_repo:
+                print(f"::error::Dependency '{dep_name}' has no repo field")
+                sys.exit(1)
+            # Per-dep private field in deps.json, falling back to parent's flag
+            dep_private = dep_info.get("private", private)
+            dep_token = get_auth_token(private=dep_private) if dep_private != private else token
+            print(f"  {dep_name}: not installed, auto-installing...")
+            result = install_new_vendor(dep_repo, "latest", dep_token,
+                                        name=dep_name,
+                                        deps_mode="install",
+                                        installing_set=installing_set,
+                                        private=dep_private)
+            print(f"  Added vendor: {dep_name}")
+        return
+
+    # mode == "error" (default)
+    print("::error::Missing vendor dependencies:")
+    for dep_name, dep_info in missing:
+        repo = dep_info.get("repo", "unknown")
+        print(f"  - {dep_name} ({repo})")
+        print(f"    Install with: python3 .vendored/install {repo}")
+    sys.exit(1)
+
+
+def _get_dep_mode(args_deps, vendor_config):
+    """Resolve dependency mode: CLI flag > per-vendor config > default 'error'."""
+    if args_deps is not None:
+        return args_deps
+    if vendor_config:
+        return vendor_config.get("dependency_mode", "error")
+    return "error"
+
+
+def topological_sort(vendors):
+    """Sort vendors by dependency graph (deps first).
+
+    Reads cached .vendored/manifests/<vendor>.deps for each vendor.
+    Returns sorted list of vendor names.
+    Falls back to alphabetical order if no deps exist.
+    Detects cycles and exits with error.
+    """
+    vendor_names = sorted(vendors.keys())
+
+    # Build adjacency: edges from dep -> dependent
+    # in_degree[v] = number of deps v has among installed vendors
+    in_degree = {name: 0 for name in vendor_names}
+    dependents = {name: [] for name in vendor_names}  # dep -> list of dependents
+    vendor_set = set(vendor_names)
+
+    for name in vendor_names:
+        deps = read_deps(name)
+        if not deps:
+            continue
+        for dep_name in deps:
+            if dep_name in vendor_set:
+                in_degree[name] += 1
+                dependents[dep_name].append(name)
+
+    # Kahn's algorithm
+    queue = sorted([n for n in vendor_names if in_degree[n] == 0])
+    result = []
+
+    while queue:
+        node = queue.pop(0)
+        result.append(node)
+        for dependent in sorted(dependents[node]):
+            in_degree[dependent] -= 1
+            if in_degree[dependent] == 0:
+                queue.append(dependent)
+                queue.sort()  # maintain alphabetical order among peers
+
+    if len(result) != len(vendor_names):
+        # Cycle detected — find the cycle members
+        cycle = [n for n in vendor_names if n not in result]
+        print(f"::error::Circular dependency detected among vendors: {', '.join(cycle)}")
+        sys.exit(1)
+
+    return result
+
+
+# ── Version detection ─────────────────────────────────────────────────────
+
+def get_current_version(vendor_name, vendor_config=None):
+    """Read the currently installed version for a vendor.
+
+    Checks manifest storage first, then falls back to legacy detection.
+    """
+    # Check manifest storage first
+    version = read_manifest_version(vendor_name)
+    if version:
+        return version
+
+    # Legacy fallback: scan config patterns
+    if not vendor_config:
+        return None
+
+    candidates = []
+
+    for pattern in vendor_config.get("allowed", []):
+        if ".version" in pattern or "prl-version" in pattern:
+            if "*" not in pattern and "?" not in pattern:
+                candidates.append(pattern)
+
+    for pattern in vendor_config.get("protected", []):
+        if pattern.endswith("/**"):
+            base_dir = pattern[:-3]
+            candidates.append(f"{base_dir}/.version")
+            break
+
+    for path in candidates:
+        if os.path.isfile(path):
+            return open(path).read().strip()
+
+    return None
+
+
+# ── Install execution ─────────────────────────────────────────────────────
+
+def download_and_run_install(repo, version, token, vendor_name=None, vendor_config=None):
+    """Download the vendor's install.sh and run it.
+
+    Sets VENDOR_REPO, VENDOR_REF, VENDOR_MANIFEST, and VENDOR_INSTALL_DIR
+    env vars for v2 contract. Still passes version as positional arg for
+    v1 backwards compat.
+
+    VENDOR_INSTALL_DIR is set to .vendored/pkg/<vendor>/ unless the vendor
+    has dogfood: true (dogfood vendors install into framework paths).
+
+    Returns: list of manifest files if install.sh wrote a manifest, else None.
+    """
+    env = _gh_env(token)
+
+    ref = f"v{version}"
+    result = subprocess.run(
+        ["gh", "api", f"repos/{repo}/contents/install.sh?ref={ref}",
+         "--jq", ".content"],
+        capture_output=True, text=True, env=env
+    )
+
+    if result.returncode != 0 or not result.stdout.strip():
+        result = subprocess.run(
+            ["gh", "api", f"repos/{repo}/contents/install.sh?ref={version}",
+             "--jq", ".content"],
+            capture_output=True, text=True, env=env
+        )
+
+    if result.returncode != 0 or not result.stdout.strip():
+        print(f"::error::Failed to download install.sh from {repo} at {ref}")
+        sys.exit(1)
+
+    install_script = base64.b64decode(result.stdout.strip()).decode()
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False) as f:
+        f.write(install_script)
+        script_path = f.name
+
+    # Create a temp file for the manifest
+    manifest_fd, manifest_path = tempfile.mkstemp(suffix=".manifest")
+    os.close(manifest_fd)
+
+    # Determine install dir (skip for dogfood vendors)
+    install_dir = None
+    is_dogfood = vendor_config.get("dogfood", False) if vendor_config else False
+    if vendor_name and not is_dogfood:
+        install_dir = f".vendored/pkg/{vendor_name}"
+        os.makedirs(install_dir, exist_ok=True)
+
+    try:
+        run_env = env.copy()
+        run_env["GH_TOKEN"] = token if token else run_env.get("GH_TOKEN", "")
+        # v2 contract env vars
+        run_env["VENDOR_REPO"] = repo
+        run_env["VENDOR_REF"] = ref
+        run_env["VENDOR_MANIFEST"] = manifest_path
+        if install_dir:
+            run_env["VENDOR_INSTALL_DIR"] = install_dir
+        # Provide vendor helper library path
+        lib_path = os.path.abspath(".vendored/lib/vendor-helpers.sh")
+        if os.path.isfile(lib_path):
+            run_env["VENDOR_LIB"] = lib_path
+
+        run_result = subprocess.run(
+            ["bash", script_path, version],
+            capture_output=True, text=True, env=run_env
+        )
+        if run_result.stdout:
+            print(run_result.stdout, end="")
+        if run_result.stderr:
+            print(run_result.stderr, end="", file=sys.stderr)
+        if run_result.returncode != 0:
+            print(f"::error::install.sh failed for {repo} (exit {run_result.returncode})")
+            sys.exit(1)
+
+        # Read manifest if install.sh wrote one
+        manifest_files = None
+        if os.path.isfile(manifest_path) and os.path.getsize(manifest_path) > 0:
+            with open(manifest_path) as mf:
+                manifest_files = [line.strip() for line in mf if line.strip()]
+
+        return manifest_files
+    finally:
+        os.unlink(script_path)
+        if os.path.isfile(manifest_path):
+            os.unlink(manifest_path)
+
+
+# ── Post-install hooks ─────────────────────────────────────────────────────
+
+def run_post_install_hook(vendor_name, install_dir, version):
+    """Run post-install.sh if it exists and .git/ is present.
+
+    After install.sh completes, checks for hooks/post-install.sh in the
+    vendor's install directory. Runs it with VENDOR_NAME, VENDOR_PKG_DIR,
+    and PROJECT_DIR set. Writes a version stamp to manifests.
+
+    Skipped for dogfood vendors (no install_dir) or non-git contexts.
+    """
+    if not install_dir:
+        return
+
+    hook_path = os.path.join(install_dir, "hooks", "post-install.sh")
+    if not os.path.isfile(hook_path):
+        return
+
+    if not os.path.isdir(".git"):
+        return
+
+    project_dir = os.path.abspath(".")
+    pkg_dir = os.path.abspath(install_dir)
+
+    env = os.environ.copy()
+    env["VENDOR_NAME"] = vendor_name
+    env["VENDOR_PKG_DIR"] = pkg_dir
+    env["PROJECT_DIR"] = project_dir
+
+    print(f"  Running post-install hook for {vendor_name}...")
+    result = subprocess.run(
+        ["bash", hook_path],
+        capture_output=True, text=True, env=env,
+        cwd=project_dir,
+    )
+    if result.stdout:
+        print(result.stdout, end="")
+    if result.stderr:
+        print(result.stderr, end="", file=sys.stderr)
+    if result.returncode != 0:
+        print(f"::error::post-install.sh failed for {vendor_name} "
+              f"(exit {result.returncode})")
+        sys.exit(1)
+
+    # Write version stamp
+    os.makedirs(MANIFESTS_DIR, exist_ok=True)
+    stamp_path = os.path.join(MANIFESTS_DIR, f"{vendor_name}.post-installed")
+    with open(stamp_path, "w") as f:
+        f.write(f"{version}\n")
+
+
+# ── Post-validation (add path) ────────────────────────────────────────────
+
+def find_new_entry(before_vendors, after_vendors):
+    """Find the vendor key that was added between before and after configs."""
+    new_keys = set(after_vendors.keys()) - set(before_vendors.keys())
+    if not new_keys:
+        return None, None
+    key = next(iter(new_keys))
+    return key, after_vendors[key]
+
+
+def validate_entry(vendor_name, entry):
+    """Validate that a new vendor entry has all required fields."""
+    required = ["repo", "protected", "install_branch"]
+    missing = [f for f in required if f not in entry]
+    if missing:
+        print(f"::error::Vendor '{vendor_name}' missing required fields: {', '.join(missing)}")
+        print("install.sh must self-register with: repo, protected, install_branch")
+        sys.exit(1)
+
+
+# ── Core install logic ────────────────────────────────────────────────────
+
+def install_new_vendor(repo, version, token, name=None, deps_mode=None,
+                       installing_set=None, private=False):
+    """First-time add: pre-validate, run install.sh, post-validate."""
+    if not name:
+        name = repo.split("/")[-1]
+    if installing_set is None:
+        installing_set = []
+    if repo in installing_set:
+        chain = " -> ".join(installing_set) + " -> " + repo
+        print(f"::error::Circular dependency detected: {chain}")
+        sys.exit(1)
+    installing_set.append(repo)
+
+    # Pre-validate
+    check_repo_exists(repo, token)
+    check_install_sh(repo, token)
+    resolved_version = resolve_version(repo, repo, version, token)
+
+    # Check dependencies
+    ref = f"v{resolved_version}"
+    deps = download_deps(repo, ref, token)
+    if deps:
+        mode = deps_mode if deps_mode is not None else "error"
+        resolve_deps(deps, token, mode, installing_set, private=private)
+
+    config = load_config()
+    vendors = config.get("vendors", {})
+
+    # Check not already registered
+    if name in vendors:
+        print(f"::error::Vendor '{name}' is already registered.")
+        print("Use .vendored/install <vendor> to update existing vendors.")
+        sys.exit(1)
+
+    for vname, vcfg in vendors.items():
+        if vcfg.get("repo") == repo:
+            print(f"::error::Vendor '{vname}' already registered for {repo}.")
+            print("Use .vendored/install <vendor> to update existing vendors.")
+            sys.exit(1)
+
+    # Snapshot config before
+    before_vendors = dict(vendors)
+
+    # Run install.sh (no vendor_config for new vendors — they don't have one yet)
+    print(f"Adding {repo} v{resolved_version}...")
+    manifest_files = download_and_run_install(repo, resolved_version, token,
+                                              vendor_name=name)
+
+    # Post-validate: reload config and find new entry
+    after_config = load_config()
+    after_vendors = after_config.get("vendors", {})
+
+    new_key, new_entry = find_new_entry(before_vendors, after_vendors)
+
+    # install.sh writes to config.json (monolithic), but load_config() may be
+    # reading from configs/ (per-vendor). Check config.json directly as fallback.
+    if new_key is None and os.path.isfile(CONFIG_PATH):
+        with open(CONFIG_PATH) as f:
+            raw_config = json.load(f)
+        raw_vendors = raw_config.get("vendors", {})
+        new_key, new_entry = find_new_entry(before_vendors, raw_vendors)
+        if new_key and new_entry:
+            # Migrate the new entry into per-vendor config
+            save_vendor_config(new_key, new_entry)
+            # Clean up from config.json
+            del raw_config["vendors"][new_key]
+            if not raw_config["vendors"]:
+                del raw_config["vendors"]
+            with open(CONFIG_PATH, "w") as f:
+                json.dump(raw_config, f, indent=2)
+                f.write("\n")
+
+    # Auto-register: if install.sh didn't write a config or wrote one without
+    # _vendor fields, the framework generates the registry entry from what it
+    # already knows (repo, manifest files, vendor name).
+    if new_key is None:
+        # install.sh wrote no config — derive vendor name from repo
+        new_key = name if name else repo.split("/")[-1]
+        new_entry = {}
+
+    # Fill in missing registry fields
+    if "repo" not in new_entry:
+        new_entry["repo"] = repo
+    if "install_branch" not in new_entry:
+        new_entry["install_branch"] = f"chore/install-{new_key}"
+    if "protected" not in new_entry:
+        # Derive from manifest: collect unique directory prefixes
+        protected = set()
+        if manifest_files:
+            for f in manifest_files:
+                # Use the top-level directory as a glob pattern
+                parts = f.split("/")
+                if len(parts) > 1:
+                    protected.add(f"{parts[0]}/**")
+                else:
+                    protected.add(f)
+        if not protected:
+            protected = {f".vendored/pkg/{new_key}/**"}
+        new_entry["protected"] = sorted(protected)
+
+    save_vendor_config(new_key, new_entry)
+
+    # Process manifest if install.sh wrote one
+    if manifest_files:
+        validate_manifest(manifest_files)
+        write_manifest(new_key, manifest_files)
+        write_manifest_version(new_key, resolved_version)
+
+    # Cache resolved deps
+    if deps:
+        write_deps(new_key, list(deps.keys()))
+
+    # Download and install schema if vendor provides one
+    schema = download_schema(repo, ref, token)
+    if schema:
+        write_schema(new_key, schema)
+
+    # Run post-install hook
+    install_dir = f".vendored/pkg/{new_key}" if not new_entry.get("dogfood") else None
+    run_post_install_hook(new_key, install_dir, resolved_version)
+
+    print(f"\nAdded vendor: {new_key}")
+    print(f"  repo: {new_entry['repo']}")
+    print(f"  version: {resolved_version}")
+    if manifest_files:
+        print(f"  manifest: {len(manifest_files)} files")
+    print(f"  protected: {', '.join(new_entry.get('protected', []))}")
+    if new_entry.get("allowed"):
+        print(f"  allowed: {', '.join(new_entry['allowed'])}")
+
+    return {
+        "vendor": new_key,
+        "old_version": "none",
+        "new_version": resolved_version,
+        "changed": True,
+    }
+
+
+def install_existing_vendor(vendor_name, vendor_config, requested_version,
+                            force=False, deps_mode=None, installing_set=None,
+                            post_install_only=False):
+    """Update path: resolve version, skip if current, run install.sh."""
+    if installing_set is None:
+        installing_set = []
+    repo = vendor_config["repo"]
+    if repo in installing_set:
+        chain = " -> ".join(installing_set) + " -> " + repo
+        print(f"::error::Circular dependency detected: {chain}")
+        sys.exit(1)
+    installing_set.append(repo)
+
+    token = get_auth_token(vendor_config)
+    target_version = resolve_version(vendor_name, repo, requested_version, token)
+    current_version = get_current_version(vendor_name, vendor_config)
+
+    if current_version == target_version and not force:
+        print(f"{vendor_name}: already at v{target_version}, skipping")
+        return {
+            "vendor": vendor_name,
+            "old_version": current_version or "none",
+            "new_version": target_version,
+            "changed": False,
+        }
+
+    # Check dependencies for the target version
+    ref = f"v{target_version}"
+    deps = download_deps(repo, ref, token)
+    if deps:
+        mode = _get_dep_mode(deps_mode, vendor_config)
+        resolve_deps(deps, token, mode, installing_set)
+
+    print(f"{vendor_name}: {current_version or 'none'} -> {target_version}")
+    manifest_files = download_and_run_install(repo, target_version, token,
+                                              vendor_name=vendor_name,
+                                              vendor_config=vendor_config)
+
+    # Self-bootstrap: if install.sh updated the coordinator on disk,
+    # re-exec so post-install steps use the new code.
+    if not post_install_only:
+        _maybe_reexec()
+
+    # Process manifest if install.sh wrote one
+    if manifest_files:
+        validate_manifest(manifest_files)
+        write_manifest(vendor_name, manifest_files)
+        write_manifest_version(vendor_name, target_version)
+
+    # Cache resolved deps
+    if deps:
+        write_deps(vendor_name, list(deps.keys()))
+
+    # Download and install schema if vendor provides one
+    schema = download_schema(repo, ref, token)
+    if schema:
+        write_schema(vendor_name, schema)
+
+    # Run post-install hook
+    is_dogfood = vendor_config.get("dogfood", False)
+    install_dir = f".vendored/pkg/{vendor_name}" if not is_dogfood else None
+    run_post_install_hook(vendor_name, install_dir, target_version)
+
+    return {
+        "vendor": vendor_name,
+        "old_version": current_version or "none",
+        "new_version": target_version,
+        "changed": True,
+    }
+
+
+# ── Output ────────────────────────────────────────────────────────────────
+
+def write_github_output(pairs):
+    """Write key=value pairs to $GITHUB_OUTPUT file if env var is set."""
+    output_file = os.environ.get("GITHUB_OUTPUT")
+    if not output_file:
+        return
+    with open(output_file, "a") as f:
+        for key, value in pairs.items():
+            f.write(f"{key}={value}\n")
+
+
+def output_result(result):
+    """Output a single vendor result as key=value lines."""
+    print(f"vendor={result['vendor']}")
+    print(f"old_version={result['old_version']}")
+    print(f"new_version={result['new_version']}")
+    print(f"changed={str(result['changed']).lower()}")
+
+    config = load_config()
+    vendor_config = config.get("vendors", {}).get(result["vendor"], {})
+    install_branch = vendor_config.get("install_branch", f"chore/install-{result['vendor']}")
+
+    write_github_output({
+        "vendor": result["vendor"],
+        "old_version": result["old_version"],
+        "new_version": result["new_version"],
+        "changed": str(result["changed"]).lower(),
+        "install_branch": install_branch,
+    })
+
+
+def output_results(results):
+    """Output results. For single vendor, key=value. For multiple, JSON."""
+    changed = [r for r in results if r["changed"]]
+    if len(results) == 1:
+        output_result(results[0])
+    else:
+        print(f"results={json.dumps(changed)}")
+        print(f"changed_count={len(changed)}")
+
+        write_github_output({
+            "changed_vendors": json.dumps(changed),
+            "changed_count": str(len(changed)),
+            "changed": str(len(changed) > 0).lower(),
+        })
+
+
+# ── PR creation ───────────────────────────────────────────────────────────
+
+def get_pr_metadata(results):
+    """Determine PR branch, title, and body from install results."""
+    changed = [r for r in results if r["changed"]]
+    if not changed:
+        return None
+
+    config = load_config()
+    vendors = config.get("vendors", {})
+
+    if len(results) == 1:
+        r = changed[0]
+        vendor_config = vendors.get(r["vendor"], {})
+        install_branch = vendor_config.get(
+            "install_branch", f"chore/install-{r['vendor']}"
+        )
+        return {
+            "branch": f"{install_branch}-v{r['new_version']}",
+            "title": f"chore: install {r['vendor']} v{r['new_version']}",
+            "body": (
+                f"Automated vendor update for **{r['vendor']}**.\n\n"
+                f"**Version:** `{r['old_version']}` \u2192 `{r['new_version']}`"
+            ),
+            "automerge": vendor_config.get("automerge", False),
+        }
+    else:
+        vendor_versions = ", ".join(
+            f"{r['vendor']} v{r['new_version']}" for r in changed
+        )
+        return {
+            "branch": "chore/install-vendors",
+            "title": f"chore: install {vendor_versions}",
+            "body": f"Automated vendor updates.\n\n**Updated:** {vendor_versions}",
+            "automerge": False,
+        }
+
+
+def create_pull_request(results):
+    """Create a PR with vendor install changes."""
+    meta = get_pr_metadata(results)
+    if meta is None:
+        print("No vendor changes to create PR for")
+        return
+
+    branch = meta["branch"]
+    title = meta["title"]
+    body = meta["body"]
+
+    gh_env = os.environ.copy()
+    github_token = os.environ.get("GITHUB_TOKEN", "")
+    if github_token:
+        gh_env["GH_TOKEN"] = github_token
+
+    subprocess.run(
+        ["git", "config", "user.name", "github-actions[bot]"],
+        check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email",
+         "github-actions[bot]@users.noreply.github.com"],
+        check=True, capture_output=True,
+    )
+
+    subprocess.run(
+        ["git", "checkout", "-b", branch],
+        check=True, capture_output=True,
+    )
+    subprocess.run(["git", "add", "-A"], check=True, capture_output=True)
+
+    # Unstage workflow files: the GITHUB_TOKEN used by CI lacks the
+    # `workflows` permission, so pushing commits that touch
+    # .github/workflows/ would be rejected.  Workflow templates are
+    # written to disk by install.sh for initial bootstrap; they should
+    # not be re-committed in automated update PRs.
+    subprocess.run(
+        ["git", "reset", "HEAD", "--", ".github/workflows/"],
+        capture_output=True,
+    )
+
+    diff_result = subprocess.run(["git", "diff", "--cached", "--quiet"])
+    if diff_result.returncode == 0:
+        print("No changes to commit")
+        return
+
+    # Skip git hooks: the install script is the authorized mechanism
+    # for modifying vendor files. The check guard rejects manual edits,
+    # not automated installs (and multi-vendor branches like
+    # "chore/install-vendors" don't match any single vendor's
+    # install_branch prefix, so the check would reject the commit).
+    subprocess.run(
+        ["git", "commit", "--no-verify", "-m", title],
+        check=True, capture_output=True,
+    )
+    # Fetch the remote branch (if it exists) so --force-with-lease has a
+    # valid baseline.  On a fresh CI clone the remote ref is unknown,
+    # causing --force-with-lease to reject the push with "stale info".
+    subprocess.run(
+        ["git", "fetch", "origin", branch],
+        capture_output=True,
+    )
+    # --force-with-lease: these install branches are ephemeral automation
+    # artifacts; a stale remote ref from a prior run must not block the push.
+    push_result = subprocess.run(
+        ["git", "push", "--force-with-lease", "-u", "origin", branch],
+        capture_output=True, text=True,
+    )
+    if push_result.returncode != 0:
+        print(f"git push failed (exit {push_result.returncode}):")
+        print(f"  stdout: {push_result.stdout.strip()}")
+        print(f"  stderr: {push_result.stderr.strip()}")
+        sys.exit(1)
+
+    pr_result = subprocess.run(
+        ["gh", "pr", "create", "--title", title, "--body", body,
+         "--head", branch, "--base", "main"],
+        capture_output=True, text=True, env=gh_env,
+    )
+
+    if pr_result.returncode != 0:
+        output = pr_result.stdout + pr_result.stderr
+        if "already exists" in output:
+            print(f"PR already exists for {branch}")
+            return
+        print(f"Failed to create PR: {output}")
+        sys.exit(1)
+
+    pr_url = pr_result.stdout.strip()
+    print(f"Created PR: {pr_url}")
+
+    if meta["automerge"]:
+        subprocess.run(
+            ["gh", "pr", "merge", pr_url, "--auto", "--squash"],
+            capture_output=True, env=gh_env,
+        )
+
+    return pr_url
+
+
+# ── Config migration ──────────────────────────────────────────────────────
+
+def migrate_config(raw_config):
+    """Split monolithic config.json vendors into individual configs/<vendor>.json.
+
+    Called when config.json has a 'vendors' key and configs/ has no .json files.
+    Writes configs with _vendor namespace key.
+    Idempotent: running twice doesn't duplicate or corrupt data.
+    """
+    vendors = raw_config.get("vendors", {})
+    if not vendors:
+        return
+
+    os.makedirs(CONFIGS_DIR, exist_ok=True)
+    for vendor_name, vendor_config in vendors.items():
+        filepath = os.path.join(CONFIGS_DIR, f"{vendor_name}.json")
+        # Extract registry fields and write to .registry file
+        registry = {k: v for k, v in vendor_config.items() if k in REGISTRY_FIELDS}
+        write_registry(vendor_name, registry)
+        # Config file gets only non-registry fields (empty for pure-registry configs)
+        project_keys = {k: v for k, v in vendor_config.items() if k not in REGISTRY_FIELDS}
+        with open(filepath, "w") as f:
+            json.dump(project_keys, f, indent=2)
+            f.write("\n")
+        print(f"  Migrated config: {vendor_name} -> {filepath}", file=sys.stderr)
+
+    # Remove vendors key from config.json (file remains for framework-level use)
+    del raw_config["vendors"]
+    with open(CONFIG_PATH, "w") as f:
+        json.dump(raw_config, f, indent=2)
+        f.write("\n")
+
+    print(f"Config migration complete: {len(vendors)} vendor(s) split into {CONFIGS_DIR}/",
+          file=sys.stderr)
+
+
+def _should_migrate_config():
+    """Check if config migration is needed."""
+    if not os.path.isfile(CONFIG_PATH):
+        return False
+    # Check if configs/ already has .json files
+    if os.path.isdir(CONFIGS_DIR):
+        json_files = [f for f in os.listdir(CONFIGS_DIR) if f.endswith(".json")]
+        if json_files:
+            return False
+    # Check if monolithic config has vendors
+    with open(CONFIG_PATH) as f:
+        raw = json.load(f)
+    return "vendors" in raw and bool(raw["vendors"])
+
+
+def migrate_project_configs():
+    """Merge legacy per-vendor project configs into configs/<vendor>.json.
+
+    For each vendor with a per-vendor config file, checks if a legacy project
+    config exists at .<vendor-name>/config.json. If found, merges its contents
+    into the top level of configs/<vendor>.json (never overwrites _vendor key).
+    Removes the old config file after successful merge.
+
+    Idempotent: if top-level project keys already exist and legacy file is gone,
+    this is a no-op.
+    """
+    if not os.path.isdir(CONFIGS_DIR):
+        return
+
+    json_files = [f for f in os.listdir(CONFIGS_DIR) if f.endswith(".json")]
+    if not json_files:
+        return
+
+    for filename in sorted(json_files):
+        vendor_name = filename[:-5]  # strip .json
+        # Look for legacy project config at .<vendor>/config.json
+        legacy_path = os.path.join(f".{vendor_name}", "config.json")
+        if not os.path.isfile(legacy_path):
+            continue
+
+        # Read legacy project config
+        with open(legacy_path) as f:
+            try:
+                project_config = json.load(f)
+            except json.JSONDecodeError:
+                print(f"  Warning: could not parse {legacy_path}, skipping",
+                      file=sys.stderr)
+                continue
+
+        # Read current vendor config
+        vendor_filepath = os.path.join(CONFIGS_DIR, filename)
+        with open(vendor_filepath) as f:
+            vendor_data = json.load(f)
+
+        # Merge: project config keys go to top level, never overwrite _vendor
+        for key, value in project_config.items():
+            if key != "_vendor":
+                vendor_data[key] = value
+
+        # Write merged config back
+        with open(vendor_filepath, "w") as f:
+            json.dump(vendor_data, f, indent=2)
+            f.write("\n")
+
+        # Remove legacy config file
+        os.remove(legacy_path)
+        print(f"  Merged project config: {legacy_path} -> {vendor_filepath}",
+              file=sys.stderr)
+
+        # Clean up empty dot-directory.
+        # After code migrates to pkg/<vendor>/ and config merges into
+        # configs/<vendor>.json, the dot-directory may still contain vendor
+        # data files (e.g. .pearls/issues.jsonl, .semver/.version) and git
+        # infrastructure (.gitattributes, .gitignore). These stay in the
+        # dot-directory — data files are vendor-owned, not framework-managed.
+        # Only remove the directory if it's truly empty.
+        dotdir = os.path.dirname(legacy_path)
+        try:
+            os.rmdir(dotdir)
+            print(f"  Removed empty directory: {dotdir}", file=sys.stderr)
+        except OSError:
+            pass  # Directory has data files — retained as vendor data zone
+
+
+def _should_migrate_project_configs():
+    """Check if any legacy project configs need migrating."""
+    if not os.path.isdir(CONFIGS_DIR):
+        return False
+    json_files = [f for f in os.listdir(CONFIGS_DIR) if f.endswith(".json")]
+    for filename in json_files:
+        vendor_name = filename[:-5]
+        legacy_path = os.path.join(f".{vendor_name}", "config.json")
+        if os.path.isfile(legacy_path):
+            return True
+    return False
+
+
+# ── Self-bootstrap ────────────────────────────────────────────────────────
+
+def _file_hash(path):
+    """Return SHA-256 hex digest of a file's contents."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _maybe_reexec():
+    """Re-exec with the new on-disk coordinator if it changed.
+
+    After install.sh writes a new .vendored/install, the in-memory
+    coordinator is stale.  Re-exec so post-install steps (PR creation,
+    output) run using the new code.
+
+    Only called when --post-install-only is NOT already set (guards
+    against infinite re-exec).
+    """
+    install_on_disk = ".vendored/install"
+    if not os.path.isfile(install_on_disk):
+        return
+
+    running_script = os.path.abspath(__file__)
+    on_disk_abs = os.path.abspath(install_on_disk)
+
+    # If we ARE the on-disk file (e.g. during tests or local dev), skip
+    if running_script == on_disk_abs:
+        return
+
+    if _file_hash(running_script) == _file_hash(on_disk_abs):
+        return
+
+    # Coordinator changed — re-exec with --post-install-only
+    new_argv = [sys.executable, on_disk_abs]
+    # Forward original args, add --post-install-only
+    for arg in sys.argv[1:]:
+        new_argv.append(arg)
+    new_argv.append("--post-install-only")
+
+    print("Coordinator updated on disk, re-executing with new version...")
+    os.execv(sys.executable, new_argv)
+
+
+# ── CLI ───────────────────────────────────────────────────────────────────
+
+def _is_repo_spec(arg):
+    """Check if an argument looks like owner/repo."""
+    return "/" in arg and not arg.startswith("-")
+
+
+def list_vendors():
+    """List installed vendors in dependency order, one per line.
+
+    Scans .vendored/manifests/ for .version files to find installed vendors,
+    then topologically sorts by dependency order.
+    """
+    if not os.path.isdir(MANIFESTS_DIR):
+        return
+
+    vendor_names = []
+    for filename in os.listdir(MANIFESTS_DIR):
+        if filename.endswith(".version"):
+            vendor_names.append(filename[:-8])  # strip .version
+
+    if not vendor_names:
+        return
+
+    # Build a minimal vendors dict for topological_sort
+    vendors = {name: {} for name in vendor_names}
+    for name in topological_sort(vendors):
+        print(name)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Install or update vendored tools"
+    )
+    parser.add_argument(
+        "target", nargs="?", default=None,
+        help='owner/repo (new vendor), vendor name, or "all"'
+    )
+    parser.add_argument(
+        "--version", default="latest",
+        help="Version to install (default: latest)"
+    )
+    parser.add_argument(
+        "--force", action="store_true",
+        help="Force reinstall even if already at target version"
+    )
+    parser.add_argument(
+        "--pr", action="store_true",
+        help="Create a PR with the changes (for CI use)"
+    )
+    parser.add_argument(
+        "--name", default=None,
+        help="Override the vendor key name (new vendor only)"
+    )
+    parser.add_argument(
+        "--deps", default=None,
+        choices=["error", "warn", "install", "skip"],
+        help="Dependency handling mode (default: from config or 'error')"
+    )
+    parser.add_argument(
+        "--post-install-only", action="store_true",
+        help="Skip install, only run post-install steps (used by self-bootstrap)"
+    )
+    parser.add_argument(
+        "--list", action="store_true", dest="list_vendors",
+        help="List installed vendors in dependency order"
+    )
+    parser.add_argument(
+        "--private", action="store_true",
+        help="Treat vendor as private (use VENDOR_PAT for auth)"
+    )
+    args = parser.parse_args()
+
+    # Query commands: --list doesn't need a target
+    if args.list_vendors:
+        list_vendors()
+        return
+
+    if not args.target:
+        parser.error("target is required (unless using --list)")
+
+    # Migrate monolithic config.json to per-vendor configs/ if needed
+    if _should_migrate_config():
+        with open(CONFIG_PATH) as f:
+            raw = json.load(f)
+        migrate_config(raw)
+
+    # Merge legacy project configs (.<vendor>/config.json) into configs/
+    if _should_migrate_project_configs():
+        migrate_project_configs()
+
+    config = load_config()
+    vendors = config.get("vendors", {})
+
+    if args.post_install_only:
+        # Self-bootstrap re-exec: install already happened, just do
+        # post-install steps (output, PR creation) with the new coordinator.
+        # Build results for ALL vendors with manifest versions — the initial
+        # install may have written deps to disk before re-exec triggered.
+        results = []
+        for vname in vendors:
+            ver = read_manifest_version(vname)
+            if ver:
+                r = {
+                    "vendor": vname,
+                    "old_version": "unknown",
+                    "new_version": ver,
+                    "changed": True,
+                }
+                output_result(r)
+                results.append(r)
+        if not results:
+            print(f"::error::No manifest versions found for post-install")
+            sys.exit(1)
+        if args.pr:
+            create_pull_request(results)
+        return
+
+    if args.target == "all":
+        # Update all registered vendors
+        if not vendors:
+            print("No vendors configured in .vendored/config.json")
+            sys.exit(0)
+        sorted_names = topological_sort(vendors)
+        results = []
+        for name in sorted_names:
+            vcfg = vendors[name]
+            results.append(
+                install_existing_vendor(name, vcfg, args.version, args.force,
+                                        deps_mode=args.deps)
+            )
+        output_results(results)
+    elif _is_repo_spec(args.target):
+        # New vendor (owner/repo format) — add path
+        token = get_auth_token(private=args.private)
+        result = install_new_vendor(args.target, args.version, token, args.name,
+                                    deps_mode=args.deps,
+                                    private=args.private)
+        output_result(result)
+        results = [result]
+    elif args.target in vendors:
+        # Existing vendor by name — update path
+        result = install_existing_vendor(
+            args.target, vendors[args.target], args.version, args.force,
+            deps_mode=args.deps
+        )
+        output_result(result)
+        results = [result]
+    else:
+        print(f"::error::Unknown vendor: {args.target}")
+        print(f"Registered vendors: {', '.join(sorted(vendors.keys()))}")
+        print("To add a new vendor, use: .vendored/install owner/repo")
+        sys.exit(1)
+
+    if args.pr:
+        create_pull_request(results)
+
+
+if __name__ == "__main__":
+    main()

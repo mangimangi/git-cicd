@@ -1,0 +1,11 @@
+{
+  "_vendor": {
+    "repo": "mangimangi/git-semver",
+    "install_branch": "chore/install-git-semver",
+    "protected": [".vendored/pkg/git-semver/**", ".github/workflows/version-bump.yml"],
+    "allowed": [".vendored/configs/git-semver.json"]
+  },
+  "version_file": "VERSION",
+  "files": ["git-cicd", "install.sh", "templates/workflow.yml", "templates/config.json", "templates/config.schema"],
+  "changelog": true
+}
