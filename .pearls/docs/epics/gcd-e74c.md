@@ -113,6 +113,7 @@ Consequences that are not gaps: no marketplace actions, so checking out other re
 ## What ships
 
 - The config is loaded and validated against the interface
+  - issue: gcd-e74c.1
   - vehicle: type: issue
   - source repo: git-cicd
   - affected surface: the tool script (new, at the repository root, installed to `.vendored/pkg/git-cicd/`); `templates/config.schema`; `templates/` default config; tests
@@ -120,6 +121,7 @@ Consequences that are not gaps: no marketplace actions, so checking out other re
   - shape: Read `.vendored/configs/git-cicd.json`, ignoring the `_vendor` key. Accept every field of "A job declares", the "needs nothing" list and the parallel limit. Refuse, with the job and the reason: a job without `branches`; a step that is not a file plus fixed arguments; an unknown moment in `on`; `on` containing `cron` without a `cron` expression; a `cron` job whose branches are patterns; an unknown field. A job naming `merge` or `cron`, and `manual`, validate; the tool states that those moments are not built yet when asked to run them.
 
 - The tool decides which jobs a change needs on `open`
+  - issue: gcd-e74c.2
   - vehicle: type: issue
   - source repo: git-cicd
   - affected surface: the tool script; tests
@@ -127,6 +129,7 @@ Consequences that are not gaps: no marketplace actions, so checking out other re
   - shape: Given the target branch, the source branch, a base commit and a head commit, list the changed files (what the branch changed since it left the base) and decide each `open` job as needed or not needed, with the reason, exactly as "When a job runs" says: base matches `branches` and a changed file matches `paths`; every job when the config or any script a job names changed; every job when a changed file is in no job's `paths` and not in the "needs nothing" list; every job when the diff cannot be computed. Patterns support `*`, `**` and `?`.
 
 - The tool runs a job: setup, then steps, with the change's facts as environment variables
+  - issue: gcd-e74c.3
   - vehicle: type: issue
   - source repo: git-cicd
   - affected surface: the tool script; tests
@@ -134,6 +137,7 @@ Consequences that are not gaps: no marketplace actions, so checking out other re
   - shape: Run the job's setup when asked, then each step in order, each as a file plus fixed arguments executed directly without a shell, from the repository root. Stop at the first failing step. Give every script the `CICD_`-prefixed variables of "What a script is given" (moment, job name, target branch, source branch, base commit, head commit, path of the changed-files file) and pass `GITHUB_TOKEN` and `VENDOR_PAT` through unchanged; git-cicd itself never reads them. A setup that fails is "could not run", distinct from a failed step. Record the time each setup and step took.
 
 - The report: one line per job, the times, and one verdict
+  - issue: gcd-e74c.5
   - vehicle: type: issue
   - source repo: git-cicd
   - affected surface: the tool script; tests
@@ -141,6 +145,7 @@ Consequences that are not gaps: no marketplace actions, so checking out other re
   - shape: For the moment, one line per declared job: passed, failed (naming the step), could not run, or not needed (with the reason), with the time of each job and step. One verdict: failed when a blocking job failed or could not run, or when the workflow does not match the config; otherwise passed, and when no job was needed its text says so and why (for example "0 of 3 jobs needed"). A failing non-blocking job is reported and does not fail the verdict. The report is readable in a terminal and is written to the platform's summary when one exists.
 
 - The same jobs run locally and in a session with one command
+  - issue: gcd-e74c.6
   - vehicle: type: issue
   - source repo: git-cicd
   - affected surface: the tool script (its command line); `README.md`; tests
@@ -148,6 +153,7 @@ Consequences that are not gaps: no marketplace actions, so checking out other re
   - shape: One command, given a base and a head (with sensible defaults for a branch against its target), decides, runs the needed jobs one after another and prints the report, exiting non-zero on a failed verdict. Setup runs only when asked. A single job can be named. This is what a pipeline session and a person use; it must not need GitHub.
 
 - The GitHub Actions workflow is generated from the config and verified
+  - issue: gcd-e74c.4
   - vehicle: type: issue
   - source repo: git-cicd
   - affected surface: the tool script (generate and verify commands); the workflow template under `templates/`; tests
@@ -155,6 +161,7 @@ Consequences that are not gaps: no marketplace actions, so checking out other re
   - shape: Generate one workflow file whose only varying part is the cron block. It turns a pull request event into moment, target branch, source branch, base and head and calls the tool; jobs are decided when it runs, each needed job on its own runner, at most three at once by default (the config can change the number); one always-present check with a fixed name carries the verdict. Token permissions are read-only on `open`. A newer push to the same pull request supersedes a running `open` run. Every fact about the change reaches the tool as an environment variable, never spliced into a command. The verify step regenerates, compares the whole file, and fails naming the generate command when they differ. Two configs that differ only in jobs that are not `cron` generate the same file. `merge`, `cron` and manual triggers are not executed in this epic; where the generated file must already carry something for them to keep "only the cron block varies" true later, say so under `## Refinement decisions`.
 
 - git-cicd installs through git-vendored
+  - issue: gcd-e74c.7
   - vehicle: type: issue
   - source repo: git-cicd
   - affected surface: `install.sh`; `templates/config.schema`; the default config template; tests
@@ -162,6 +169,7 @@ Consequences that are not gaps: no marketplace actions, so checking out other re
   - shape: `install.sh` follows the vendor contract as git-semver's does: `VENDOR_REF` (or `$1`), `VENDOR_REPO`, `VENDOR_INSTALL_DIR`, `VENDOR_MANIFEST`, `GH_TOKEN` when set. It always updates the code under `VENDOR_INSTALL_DIR`; creates `.vendored/configs/git-cicd.json` only when missing, with a `_vendor` block that lists the config and the generated workflow as editable; installs the schema to `.vendored/manifests/git-cicd.schema`; generates the workflow; writes the manifest. `python3 .vendored/install mangimangi/git-cicd` in a scratch repository that has git-vendored works.
 
 - git-cicd uses itself, and can release
+  - issue: gcd-e74c.8
   - vehicle: type: issue
   - source repo: git-cicd
   - affected surface: `.vendored/` (git-vendored and git-semver installed, `configs/git-semver.json`, `configs/git-cicd.json`); `VERSION`; `.github/workflows/`; `README.md`; `AGENTS.md`; `pyproject.toml` for the tests
@@ -196,3 +204,50 @@ Consequences that are not gaps: no marketplace actions, so checking out other re
 - Any change to git-vendored or git-semver. If one turns out to be needed, stop and say so.
 - Installing git-cicd into medici, madreperla, pearls or any other repository (unit 2 of the plan does medici).
 - Fixing the generated `AGENTS.md` scaffold's errors beyond rewriting `AGENTS.md` for this repository as the last entry asks.
+
+## Issues
+
+Build order (each is blocked by the ones it lists):
+
+| Issue | Scope | Blocked by |
+|---|---|---|
+| gcd-e74c.1 | `git-cicd validate`: config loader, every refusal, shared `*`/`**`/`?` matcher, `pyproject.toml` + `tests/` scaffold | — |
+| gcd-e74c.2 | `git-cicd decide --moment open`: changed files, per-job decision with reason, GITHUB_OUTPUT; merge/cron/manual report not built yet | .1 |
+| gcd-e74c.3 | `git-cicd run-job`: setup when asked, steps without a shell, `CICD_` variables, token pass-through, timings, result JSON, injection test | .1, .2 |
+| gcd-e74c.4 | `git-cicd generate` / `verify`, `templates/workflow.yml`, `.github/workflows/git-cicd.yml` layout, verdict check `git-cicd verdict` | .1 |
+| gcd-e74c.5 | `git-cicd report`: one line per job, times, verdict, `GITHUB_STEP_SUMMARY` | .2, .3, .4 |
+| gcd-e74c.6 | `git-cicd check`: the one local command; README section | .2–.5 |
+| gcd-e74c.7 | `install.sh`, `templates/config.json`, `templates/config.schema`; README Installing section | .1, .4 |
+| gcd-e74c.8 | Self-use (git-vendored, git-semver, own config and workflow), `VERSION`, README interface, `AGENTS.md`; verdict seen on the PR into `plan/mdci-dev-6692` | .4–.7 |
+
+Upstream references re-checked on 2026-11-27 against `mangimangi/git-vendored`, `mangimangi/git-semver` and `mangimangi/medici-dev` main: `templates/check` reads `GITHUB_HEAD_REF` at lines 129-131; `templates/github/workflows/install-vendored.yml` passes `github.token`/`secrets.VENDOR_PAT` at lines 64-65 and writes `${{ inputs.vendor }}` into its script at line 68; git-semver's `install.sh` installs `version-bump.yml` on first install only; `.github/scripts/tests-needed.sh` diffs `BASE...HEAD` and runs when in doubt. All still accurate.
+
+## Refinement decisions
+
+- Non-blocking job field is `blocking` (boolean, default `true`) — gcd-e74c.1 — mirrors `manual: false`: a default-on flag switched off.
+- "Needs nothing" list field is `needs_nothing` — gcd-e74c.1 — the doc's own phrase, snake_case like git-semver's `version_file`.
+- Parallel limit field is `max_parallel` (default 3) — gcd-e74c.1, gcd-e74c.4 — it feeds GitHub's `strategy.max-parallel`.
+- A step is a string (file) or an array (file + fixed args); a string containing whitespace is refused — gcd-e74c.1 — the interface forbids shell strings.
+- Step and setup files must exist and be executable at validation — gcd-e74c.1 — "a step that is not a file" is a config error, and running without a shell needs the executable bit.
+- `_comment_*` keys are refused as unknown fields — gcd-e74c.1 — the interface refuses unknown fields; comments live in the README.
+- The tool is a single executable Python file `git-cicd` at the repo root with subcommands `validate`, `decide`, `run-job`, `generate`, `verify`, `report`, `check`; exit 0 pass, 1 fail, 2 config/usage error or unbuilt moment — gcd-e74c.1–.6 — follows git-semver's layout; one contract the workflow and the local command share.
+- Changed files are `git diff --name-only --no-renames BASE...HEAD` — gcd-e74c.2 — "what the branch changed since it left the base", as tests-needed.sh does.
+- An empty diff forces every job, like an uncomputable one — gcd-e74c.2 — "not needed" only on purpose (tests-needed.sh precedent).
+- `branches` still binds when a config/script change or the fallback forces every job; forcing overrides `paths` only — gcd-e74c.2 — matches the manual rule ("branches still binds") and the AC that a base matching no job reports that.
+- A job without `paths` is affected by any change outside `needs_nothing` and does not count toward the "in no job's paths" fallback — gcd-e74c.2 — `paths` is optional in the interface.
+- Jobs not declared for `open` get a "not an open job" line — gcd-e74c.2, gcd-e74c.5 — one line per declared job.
+- `merge`, `cron`, manual requests exit 2 with "the <moment> moment is not built yet" — gcd-e74c.2, gcd-e74c.3 — never silently ignored.
+- Script variables are `CICD_MOMENT`, `CICD_JOB`, `CICD_TARGET_BRANCH`, `CICD_SOURCE_BRANCH`, `CICD_BASE`, `CICD_HEAD`, `CICD_CHANGED_FILES` (path of a one-path-per-line file) — gcd-e74c.3 — the doc locks the prefix and the facts; these name them plainly.
+- Scripts inherit the parent environment and their output is streamed — gcd-e74c.3 — setup's on-disk installs must stay visible; logs stay readable.
+- Workflow file is `.github/workflows/git-cicd.yml` — gcd-e74c.4 — the session's working name, matches the vendor name.
+- Verdict check is job `verdict` named `git-cicd verdict` — gcd-e74c.4 — a fixed name branch protection can require.
+- The job matrix and `max-parallel` come from the `decide` job's outputs; results pass between runners as `git-cicd-result-<job>` artifacts — gcd-e74c.4, gcd-e74c.5 — keeps the file free of non-cron config.
+- The generated file substitutes the tool's own path relative to the repo root (only other non-cron variable, install-dependent not config-dependent) — gcd-e74c.4, gcd-e74c.8 — like git-semver's `__INSTALL_DIR__`; lets git-cicd's own CI run the code under test.
+- Only first-party `actions/checkout`, `actions/upload-artifact`, `actions/download-artifact` are used — gcd-e74c.4 — the workflow needs a checkout and cross-runner results; no marketplace actions.
+- For later moments the file must carry, as fixed text, an unfiltered `push` trigger (merge) and `workflow_dispatch` with one free-text `job` input (manual), with write permissions on separate jobs gated by `github.event_name`; this epic ships only `pull_request` (+ `schedule` when cron jobs exist) and documents the reservation in the template — gcd-e74c.4 — a branch filter or per-moment permissions would make the file vary with config, breaking "only the cron block varies".
+- A scheduled run reports "the cron moment is not built yet" and fails — gcd-e74c.4 — "nothing ran" is never read as passed.
+- A needed job with no result file is "could not run (no result)"; jobs are listed in config order — gcd-e74c.5 — a lost runner never reads as passed; stable output.
+- The local command is `git-cicd check`; target defaults to upstream → `origin/HEAD` → `main`, base to the target ref; `--job` stays bound by `branches` and the decision, `--force` overrides `paths` — gcd-e74c.6 — "a branch against its target" with no arguments; mirrors the manual rule.
+- Editable files are listed under `_vendor.allowed`; the default config is `jobs: {}`, `needs_nothing: []`; the workflow template is installed to `$VENDOR_INSTALL_DIR/templates/workflow.yml`; install regenerates the workflow every time — gcd-e74c.7 — git-vendored's field for user-editable files; a fresh install validates; generate needs the template at run time; upgrades must reach the workflow.
+- git-cicd's own repo is not installed into its own `.vendored/pkg/`; `requires-python = ">=3.10"`; `.vendored/**` and `.github/**` are not in its `needs_nothing` — gcd-e74c.8 — CI tests the code in the PR; floor of the next adopters (medici, madreperla); vendored/workflow changes should force the tests.
+
