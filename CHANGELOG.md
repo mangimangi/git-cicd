@@ -2,6 +2,11 @@
 
 Releases of git-cicd, written by git-semver on each merge to `main`.
 
+## [0.0.3] - 2026-11-27
+
+### Changed
+- gcd-2809: moments are called triggers (CICD_TRIGGER, --trigger, docs) (#10)
+
 ## [0.0.2] - 2026-11-27
 
 ### Changed
