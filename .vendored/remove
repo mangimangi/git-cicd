@@ -1,0 +1,260 @@
+#!/usr/bin/env python3
+"""Vendor removal command.
+
+Removes a vendored tool by deleting its files and config entry.
+
+Requires a manifest at .vendored/manifests/<vendor>.files for exact file
+tracking. Errors if no manifest exists — pattern-based removal is too risky.
+
+Usage:
+    python3 .vendored/remove <vendor> [--force]
+
+Options:
+    --force     Skip confirmation prompt (for CI use)
+"""
+
+import argparse
+import json
+import os
+import sys
+
+
+CONFIG_PATH = ".vendored/config.json"
+CONFIGS_DIR = ".vendored/configs"
+MANIFESTS_DIR = ".vendored/manifests"
+
+
+def _read_registry(vendor_name):
+    """Read vendor registry from .vendored/manifests/<vendor>.registry.
+
+    Returns parsed dict or None if no .registry file exists.
+    """
+    registry_path = os.path.join(MANIFESTS_DIR, f"{vendor_name}.registry")
+    if not os.path.isfile(registry_path):
+        return None
+    with open(registry_path) as f:
+        return json.load(f)
+
+
+def _extract_vendor_registry(raw, vendor_name=None):
+    """Extract registry fields from a per-vendor config file's contents.
+
+    Prefers .registry file in manifests/ (new path). Falls back to _vendor
+    key in config, then treats all top-level keys as registry fields.
+    """
+    if vendor_name:
+        registry = _read_registry(vendor_name)
+        if registry is not None:
+            return registry
+    if "_vendor" in raw:
+        return dict(raw["_vendor"])
+    return dict(raw)
+
+
+def load_config(config_path=CONFIG_PATH):
+    """Load and return the vendored config.
+
+    Scans .vendored/configs/ for per-vendor <vendor>.json files first.
+    Falls back to monolithic config.json if configs/ dir doesn't exist
+    or has no .json files.
+
+    Registry fields are read from .vendored/manifests/<vendor>.registry
+    when available, falling back to _vendor key in the config file.
+    """
+    # Try per-vendor configs first
+    if os.path.isdir(CONFIGS_DIR):
+        json_files = [f for f in os.listdir(CONFIGS_DIR) if f.endswith(".json")]
+        if json_files:
+            vendors = {}
+            for filename in sorted(json_files):
+                vendor_name = filename[:-5]  # strip .json
+                filepath = os.path.join(CONFIGS_DIR, filename)
+                with open(filepath) as f:
+                    raw = json.load(f)
+                vendors[vendor_name] = _extract_vendor_registry(raw, vendor_name)
+            return {"vendors": vendors}
+
+    # Fallback to monolithic config.json
+    if not os.path.isfile(config_path):
+        print(f"::error::Config not found: {config_path}")
+        sys.exit(1)
+    with open(config_path) as f:
+        return json.load(f)
+
+
+def delete_vendor_config(vendor_name):
+    """Delete a vendor's config file from configs/."""
+    filepath = os.path.join(CONFIGS_DIR, f"{vendor_name}.json")
+    if os.path.isfile(filepath):
+        os.remove(filepath)
+
+
+def save_config(config):
+    """Write config back to disk.
+
+    If per-vendor configs/ is in use, deletes removed vendors' config
+    files (remaining vendors are left as-is on disk to preserve their
+    _vendor structure and project config). Otherwise writes monolithic
+    config.json.
+    """
+    if os.path.isdir(CONFIGS_DIR):
+        json_files = [f for f in os.listdir(CONFIGS_DIR) if f.endswith(".json")]
+        if json_files:
+            vendors = config.get("vendors", {})
+            # Delete configs for vendors that were removed
+            for filename in json_files:
+                vendor_name = filename[:-5]
+                if vendor_name not in vendors:
+                    os.remove(os.path.join(CONFIGS_DIR, filename))
+            return
+
+    with open(CONFIG_PATH, "w") as f:
+        json.dump(config, f, indent=2)
+        f.write("\n")
+
+
+def read_manifest(vendor_name):
+    """Read a vendor's manifest file. Returns list of paths, or None if missing."""
+    manifest_path = os.path.join(MANIFESTS_DIR, f"{vendor_name}.files")
+    if not os.path.isfile(manifest_path):
+        return None
+    with open(manifest_path) as f:
+        return [line.strip() for line in f if line.strip()]
+
+
+def check_reverse_deps(vendor_name):
+    """Check if any installed vendors depend on the given vendor.
+
+    Scans .vendored/manifests/*.deps files for references.
+    Returns list of vendor names that depend on the given vendor.
+    """
+    dependents = []
+    if not os.path.isdir(MANIFESTS_DIR):
+        return dependents
+    for filename in os.listdir(MANIFESTS_DIR):
+        if not filename.endswith(".deps"):
+            continue
+        dep_vendor = filename[:-5]  # strip .deps
+        if dep_vendor == vendor_name:
+            continue  # skip self
+        filepath = os.path.join(MANIFESTS_DIR, filename)
+        with open(filepath) as f:
+            deps = [line.strip() for line in f if line.strip()]
+        if vendor_name in deps:
+            dependents.append(dep_vendor)
+    return dependents
+
+
+def get_files_to_remove(vendor_name):
+    """Determine which files to remove for a vendor.
+
+    Requires a manifest. Returns list of files to delete.
+    Exits with error if no manifest exists.
+    """
+    manifest_files = read_manifest(vendor_name)
+    if manifest_files is None:
+        print(f"::error::No manifest found for vendor '{vendor_name}'")
+        print(f"Expected: {MANIFESTS_DIR}/{vendor_name}.files")
+        print("Cannot safely remove without a manifest. "
+              "Re-install the vendor first to generate a manifest, then remove.")
+        sys.exit(1)
+
+    # Also include the manifest files themselves
+    extra = [
+        os.path.join(MANIFESTS_DIR, f"{vendor_name}.files"),
+        os.path.join(MANIFESTS_DIR, f"{vendor_name}.version"),
+        os.path.join(MANIFESTS_DIR, f"{vendor_name}.deps"),
+        os.path.join(MANIFESTS_DIR, f"{vendor_name}.schema"),
+        os.path.join(MANIFESTS_DIR, f"{vendor_name}.registry"),
+    ]
+    return manifest_files + [f for f in extra if os.path.isfile(f)]
+
+
+def remove_files(files):
+    """Delete the given files from disk. Returns count of files removed."""
+    removed = 0
+    for filepath in files:
+        if os.path.isfile(filepath):
+            os.remove(filepath)
+            removed += 1
+    return removed
+
+
+def cleanup_empty_dirs(files):
+    """Remove empty parent directories after file deletion."""
+    dirs = set()
+    for filepath in files:
+        parent = os.path.dirname(filepath)
+        while parent and parent != ".":
+            dirs.add(parent)
+            parent = os.path.dirname(parent)
+
+    # Sort deepest first so we can prune bottom-up
+    for d in sorted(dirs, key=lambda x: x.count("/"), reverse=True):
+        if os.path.isdir(d) and not os.listdir(d):
+            os.rmdir(d)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Remove a vendored tool"
+    )
+    parser.add_argument("vendor", help="Vendor name to remove")
+    parser.add_argument(
+        "--force", action="store_true",
+        help="Skip confirmation prompt"
+    )
+    args = parser.parse_args()
+
+    config = load_config()
+    vendors = config.get("vendors", {})
+
+    if args.vendor not in vendors:
+        print(f"::error::Unknown vendor: {args.vendor}")
+        print(f"Registered vendors: {', '.join(sorted(vendors.keys()))}")
+        sys.exit(1)
+
+    # Check if other vendors depend on this one
+    dependents = check_reverse_deps(args.vendor)
+    if dependents:
+        print(f"Warning: The following vendors depend on {args.vendor}:")
+        for d in dependents:
+            print(f"  - {d}")
+        if not args.force:
+            try:
+                answer = input(f"\nRemove anyway? [y/N] ")
+            except EOFError:
+                answer = ""
+            if answer.lower() not in ("y", "yes"):
+                print("Aborted.")
+                sys.exit(0)
+
+    files = get_files_to_remove(args.vendor)
+
+    print(f"Files to remove for '{args.vendor}':")
+    for f in files:
+        exists = os.path.isfile(f)
+        print(f"  {'  ' if exists else '? '}{f}")
+
+    if not args.force:
+        try:
+            answer = input(f"\nRemove {len(files)} files and unregister '{args.vendor}'? [y/N] ")
+        except EOFError:
+            answer = ""
+        if answer.lower() not in ("y", "yes"):
+            print("Aborted.")
+            sys.exit(0)
+
+    removed = remove_files(files)
+    cleanup_empty_dirs(files)
+
+    # Remove config entry
+    del vendors[args.vendor]
+    config["vendors"] = vendors
+    save_config(config)
+
+    print(f"\nRemoved vendor: {args.vendor} ({removed} files deleted)")
+
+
+if __name__ == "__main__":
+    main()
