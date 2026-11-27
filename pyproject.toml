@@ -1,3 +1,10 @@
+[project]
+name = "git-cicd"
+description = "Decide which jobs a change needs, run them, and report"
+requires-python = ">=3.10"
+dependencies = []
+dynamic = ["version"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 

@@ -1,10 +1,196 @@
 # git-cicd
-git platform hooks for managing cicd
+
+git platform hooks for managing cicd.
+
+git-cicd defines an **interface between a repository's checks and the
+platform that runs them**. It ships no checks. A repository declares *jobs* in
+a config file, each job a setup script and ordered steps, every one a plain
+script the repository owns. git-cicd decides from a change which jobs are
+needed, runs them, and reports every decision, so that "nothing ran" is never
+read as "passed".
+
+It is one Python 3 file with no dependency beyond the standard library and the
+git CLI, vendored by [git-vendored](https://github.com/mangimangi/git-vendored)
+and versioned by [git-semver](https://github.com/mangimangi/git-semver).
+
+What is built today: the whole interface is validated, and the `open` moment
+(pull requests) and local runs execute. The `merge` and `cron` moments and
+manual runs validate in a config and are reported as **not built yet** when
+asked to run (exit 2); they are never silently ignored. See
+[Not built yet](#not-built-yet).
+
+## Files
+
+| Path | Owner | What |
+|---|---|---|
+| `.vendored/configs/git-cicd.json` | the repository | the config: jobs, `needs_nothing`, `max_parallel` |
+| `.github/workflows/git-cicd.yml` | generated | the GitHub Actions workflow; generated from the config, committed |
+| your scripts (e.g. `ci/`) | the repository | setup and step scripts, wherever the repository keeps them; git-cicd installs none |
+| `.vendored/pkg/git-cicd/` | git-cicd | the tool and its workflow template, installed by `install.sh` |
+
+## The config
+
+```json
+{
+  "jobs": {
+    "test": {
+      "on": ["open"],
+      "branches": ["**"],
+      "paths": ["src/**", "tests/**"],
+      "setup": "ci/setup.sh",
+      "steps": ["ci/test.sh", ["ci/coverage.sh", "--min", "80"]]
+    },
+    "release": {"on": ["merge"], "branches": ["main"], "steps": ["ci/bump.sh", "ci/publish.sh"]}
+  },
+  "needs_nothing": [".pearls/**", "*.md", "docs/**"],
+  "max_parallel": 3
+}
+```
+
+Top level:
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `jobs` | object | required | job name → job. Names: letters, digits, `-`, `_` (they become runner and artifact names) |
+| `needs_nothing` | array of patterns | `[]` | files that need no job: documents, tracker records |
+| `max_parallel` | positive integer | `3` | how many job runners run at once |
+| `_vendor` | anything | | git-vendored's registry key; ignored by git-cicd |
+
+Any other key is refused, including `_comment_*` keys: comments belong here,
+in the README.
+
+### A job declares
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `on` | array of `open`, `merge`, `cron` | `[]` | the moments the job runs at; several allowed, no duplicates; none means manual-only |
+| `branches` | non-empty array of patterns | **required** | target branches the job runs for (`main`, `plan/**`, `**`). For a job with `cron` in `on`, literal branch names only (no `*`, `?`, `[`) |
+| `paths` | array of patterns | none | the files that affect the job |
+| `setup` | one repository path | none | the job's own setup script |
+| `steps` | non-empty ordered array | **required** | each step is a file (`"ci/test.sh"`) or a file plus fixed arguments (`["ci/test.sh", "--fast"]`), run directly, never through a shell |
+| `cron` | five-field cron expression | | required when `on` contains `cron`, refused otherwise |
+| `manual` | boolean | `true` | the job can be run by hand |
+| `blocking` | boolean | `true` | `false` makes the job non-blocking: its failure is reported and does not fail the verdict |
+
+A setup or step file must be a relative path to an **executable** regular file
+in the repository, without `..` segments. A string step containing whitespace
+is refused (it looks like a shell command line): use the array form.
+
+There is no ordering between jobs. If order matters, it is steps in one job.
+Steps share a machine, run in order and stop at the first failure.
+
+`git-cicd validate` checks the config and prints every error, one per line,
+naming the job and the reason (for example `job test: missing required field
+branches`), and exits 2. Every other command refuses an invalid config the same
+way.
+
+### Patterns
+
+`branches`, `paths` and `needs_nothing` use one matcher: `**` matches any
+sequence including `/` (`dir/**` is everything under `dir`; a `**/` segment
+may also match no directory, so `**/*.md` matches `README.md`), `*` matches
+any sequence without `/` (so `*.md` is Markdown at the repository root only),
+`?` matches one character other than `/`. Everything else is literal.
+
+## When a job runs
+
+- **`open`**: a pull request is opened or updated, its base (target) branch
+  matches `branches`, and the change affects the job: a changed file outside
+  `needs_nothing` matches its `paths` (a job without `paths` is affected by any
+  change outside `needs_nothing`).
+- A change affects **every** `open` job whose `branches` match when it touches
+  the git-cicd config or any script any job names (setup or step, whatever
+  the job's moments); when a changed file is in no job's `paths` and not in
+  `needs_nothing`; or when the diff cannot be computed or is empty. So "not
+  needed" only happens on purpose. `branches` always binds; forcing overrides
+  `paths` only.
+- The changed files are `git diff --name-only --no-renames BASE...HEAD`: what
+  the branch changed since it left the base (both paths of a rename count).
+- A file in `needs_nothing` never makes a job needed, unless it is the config
+  or a job script.
+
+Every decision carries a reason, and the report shows it.
+
+## What a script is given
+
+- The repository at the commit, as the working directory.
+- The inherited environment plus:
+
+| Variable | Value |
+|---|---|
+| `CICD_MOMENT` | the moment (`open`) |
+| `CICD_JOB` | the job name |
+| `CICD_TARGET_BRANCH` | the target branch (the pull request's base) |
+| `CICD_SOURCE_BRANCH` | the source branch (the pull request's head; what `.vendored/check` needs to let install branches through) |
+| `CICD_BASE` | the base commit |
+| `CICD_HEAD` | the head commit |
+| `CICD_CHANGED_FILES` | absolute path of a file listing the changed files, one per line |
+
+- `GITHUB_TOKEN` and `VENDOR_PAT`, passed through unchanged. git-cicd itself
+  never reads or logs them.
+- Exit 0 passes. Anything else fails the job and stops its remaining steps.
+- Setup runs first, on the same machine. What it installs on disk is its only
+  channel to the steps; nothing else is passed between setup and steps or
+  between steps. A failing setup is **could not run**, distinct from a failed
+  step.
+
+## No accidental injection
+
+- A step is a file plus fixed arguments, run as a list argv, never a shell
+  string; nothing is assembled into a command line.
+- Facts about the change (branch names, commits, the changed files) reach a
+  script only as environment variables or a file. The generated workflow
+  follows the same rule: every fact is an `env:` entry, referenced in `run:`
+  only as a quoted shell variable, never `${{ }}` inside `run:`.
+- A change to the config or to a job's scripts makes every job run, and the
+  report says so.
+
+## The report and the `git-cicd verdict` check
+
+One line per declared job, in config order: `passed`, `failed (step <step>,
+exit <code>)`, `could not run (setup failed)` (or `(no result)` when a runner
+was lost), or `not needed (<reason>)`; non-blocking jobs are marked. Under each
+job that ran: the time of setup and of each step, so cost is visible in every
+pull request. Then whether the workflow matches the config, then one verdict:
+
+- **FAILED** when a blocking job failed or could not run, or the workflow does
+  not match the config;
+- **PASSED** otherwise, e.g. `PASSED - 2 of 3 jobs needed, 2 passed`. A change
+  that needs nothing is green with the explanation:
+  `PASSED - 0 of 3 jobs needed: only needs_nothing files changed`.
+
+In GitHub Actions the report is also written to the job summary, and it is the
+one always-present check with the fixed name **`git-cicd verdict`**: require
+that check in branch protection.
+
+## The generated workflow
+
+`git-cicd generate` writes `.github/workflows/git-cicd.yml`. Only the cron
+block depends on the config (and the tool path on where git-cicd is
+installed); jobs are decided when the workflow runs, so two configs that
+differ only in jobs that are not `cron` generate the same file.
+
+- Trigger: `pull_request` (opened, synchronize, reopened), every target
+  branch; `branches` are decided by the tool.
+- Token: `contents: read`.
+- A newer push to the same pull request cancels the running one.
+- `decide` works out the needed jobs; `run` gives each needed job its own
+  runner (`ubuntu-latest`), at most `max_parallel` at once, always with setup;
+  `verdict` (`git-cicd verdict`) collects the results, verifies the workflow
+  and reports.
+- Only GitHub's own `actions/checkout`, `actions/upload-artifact` and
+  `actions/download-artifact`; no Python version is written anywhere: setup
+  scripts install the Python they need (for example from `requires-python`).
+
+**The generate/verify rule.** The platform's token cannot push workflow files,
+so CI never regenerates. Whoever changes the config runs `generate` and commits
+the workflow in the same pull request. `git-cicd verify` regenerates in memory,
+compares the whole file, and fails naming the command to run when they differ;
+that catches a stale file and any hand edit.
 
 ## Installing
 
-git-cicd is vendored into a repository by
-[git-vendored](https://github.com/mangimangi/git-vendored):
+git-cicd is vendored into a repository by git-vendored:
 
 ```bash
 python3 .vendored/install mangimangi/git-cicd
@@ -14,7 +200,7 @@ What lands where:
 
 | Path | What | On upgrade |
 |---|---|---|
-| `.vendored/pkg/git-cicd/git-cicd` | the tool (one Python 3 file; Python 3 and git only) | replaced |
+| `.vendored/pkg/git-cicd/git-cicd` | the tool | replaced |
 | `.vendored/pkg/git-cicd/templates/workflow.yml` | the template `generate` fills | replaced |
 | `.vendored/manifests/git-cicd.schema` | the config schema, for `.vendored/audit` | replaced |
 | `.vendored/configs/git-cicd.json` | your config: the jobs | **created once**, only when missing; never overwritten |
@@ -31,10 +217,7 @@ git-vendored's check; the tool's own files are protected.
 .vendored/pkg/git-cicd/git-cicd generate
 ```
 
-**and commits `.github/workflows/git-cicd.yml` in the same pull request.** The
-platform's token cannot push workflow files, so CI never regenerates: it
-verifies, and the `git-cicd verdict` check fails with that command when the
-committed file differs from what the config generates.
+**and commits `.github/workflows/git-cicd.yml` in the same pull request.**
 
 ## Running the checks locally
 
@@ -88,3 +271,38 @@ Exit codes:
 | 0 | verdict PASSED |
 | 1 | verdict FAILED (a blocking job failed or could not run, or the workflow does not match the config) |
 | 2 | config or usage error, or a moment that is not built yet |
+
+## Commands
+
+| Command | What |
+|---|---|
+| `validate [--config PATH]` | load and validate the config: `config ok: N jobs` or every error |
+| `decide --moment open --target B --source B --base SHA --head SHA [--json] [--changed-files-out PATH]` | one decision per declared job, with the reason; in Actions also writes `jobs`, `any`, `max_parallel` to `GITHUB_OUTPUT` |
+| `run-job JOB --moment open --target … --head SHA [--setup] [--result PATH]` | setup when asked, then the steps; result JSON with the times |
+| `generate` / `verify` | write / check `.github/workflows/git-cicd.yml` |
+| `report --decisions FILE --results DIR` | the report and verdict from `decide --json` and `run-job --result` files |
+| `check […]` | the local command above |
+
+## Not built yet
+
+- The `merge` and `cron` moments and manual runs: they validate, and
+  `decide`/`run-job`/`report` exit 2 with `the <moment> moment is not built
+  yet` when asked to run them. A scheduled run of the generated workflow fails
+  the verdict for the same reason. When they are built, the workflow gains
+  fixed text (an unfiltered `push` trigger, `workflow_dispatch` with one `job`
+  input, write permissions on jobs gated by event), never per-config text.
+- Declared inputs for manual runs.
+- Secrets beyond `GITHUB_TOKEN` and `VENDOR_PAT`.
+- An image or runtime per job.
+
+## Developing git-cicd
+
+git-cicd checks itself with itself: its own config declares one job, `test`
+(`ci/setup.sh` installs pytest for the Python floor in `pyproject.toml`;
+`ci/test.sh` runs it), and its workflow runs the root `./git-cicd`, so CI
+tests the code in the pull request.
+
+```bash
+./git-cicd check --setup     # the first time
+./git-cicd check
+```
