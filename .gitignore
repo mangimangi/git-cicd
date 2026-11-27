@@ -4,3 +4,6 @@ __pycache__/
 # Written by `medici configure` in every session container; not this repository's content
 .claude/skills/
 /commands/
+/modes/
+# Written by medici at run time (daemon log, walker state)
+/.medici/
