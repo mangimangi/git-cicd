@@ -1,0 +1,27 @@
+org: mangimangi
+description: 'git platform hooks for managing cicd'
+mission: 'A vendored framework that decides which checks run on a change, runs them, and owns what happens after a merge'
+image: ghcr.io/mangimangi/medici-claude-base:latest
+
+# tools:
+#   pearls: { version: v0.2.60 }
+#   madreperla: { version: v0.0.59 }
+#   medici: { version: v0.1.57 }
+
+validation:
+  commands:
+    refine: "prl validate refine {epic} --at origin/{branch}"
+    estimate: "prl validate estimate {epic} --at origin/{branch}"
+    implement: "prl validate implement {epic} --at origin/{branch}"
+    eval: "prl validate eval {epic} --at origin/{branch}"
+    cleanup: "prl validate cleanup {epic} --at origin/{branch}"
+
+defaults:
+  session_graph: [refine, estimate, implement, eval, cleanup]
+  pearls:
+    eval:
+      threshold: 80
+  madreperla:
+    description: "a software project configured for AI-driven development"
+    docs: [README.md, AGENTS.md, docs/]
+    providers: {issues: pearls, docs: pearls}
