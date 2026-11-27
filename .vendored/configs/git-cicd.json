@@ -1,7 +1,7 @@
 {
   "jobs": {
     "test": {
-      "name": "Unit tests",
+      "name": "Unit Tests",
       "on": ["open"],
       "branches": ["**"],
       "paths": ["git-cicd", "install.sh", "templates/**", "tests/**", "pyproject.toml", "ci/**"],

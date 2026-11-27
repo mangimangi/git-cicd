@@ -332,7 +332,7 @@ def test_github_output_written(repo, tmp_path):
     assert result.returncode == 0, result.stderr
     lines = out.read_text().splitlines()
     assert lines == ["previous=1", 'jobs=["test"]',
-                     'names={"test": "test", "lint": "lint", "release": "release"}',
+                     'names={"test": "Test", "lint": "Lint", "release": "Release"}',
                      "any=true", "max_parallel=2"]
 
 
@@ -346,8 +346,29 @@ def test_github_output_none_needed(repo, tmp_path):
                       env={"GITHUB_OUTPUT": str(out)})
     assert result.returncode == 0
     assert out.read_text().splitlines() == [
-        "jobs=[]", 'names={"test": "test", "lint": "lint", "release": "release"}',
+        "jobs=[]", 'names={"test": "Test", "lint": "Lint", "release": "Release"}',
         "any=false", "max_parallel=3"]
+
+
+def test_github_output_names_title_case_default_and_written(repo, tmp_path):
+    """The row names the workflow reads: the job name in title case without
+    `name`, a written `name` exactly as written."""
+    repo.script("ci/t.sh")
+    repo.config({"jobs": {
+        "unit-tests": {"on": ["open"], "branches": ["**"],
+                       "steps": ["ci/t.sh"]},
+        "pypi": {"name": "PyPI", "on": ["open"], "branches": ["**"],
+                 "steps": ["ci/t.sh"]}}})
+    base = repo.commit("base")
+    repo.write("x", "1\n")
+    head = repo.commit("x")
+    out = tmp_path / "github_output"
+    result = repo.run("decide", "--moment", "open", "--target", "main",
+                      "--source", "feature", "--base", base, "--head", head,
+                      env={"GITHUB_OUTPUT": str(out)})
+    assert result.returncode == 0, result.stderr
+    assert 'names={"unit-tests": "Unit Tests", "pypi": "PyPI"}' in \
+        out.read_text().splitlines()
 
 
 def test_changed_files_out_and_human_output(repo, tmp_path):
@@ -373,7 +394,8 @@ def test_json_shape(repo):
                          "changed_files", "jobs", "max_parallel"}
     assert set(data["jobs"][0]) == {"name", "title", "needed", "reason",
                                     "blocking"}
-    assert data["jobs"][0]["title"] == data["jobs"][0]["name"]
+    assert data["jobs"][0]["title"] == \
+        git_cicd.default_title(data["jobs"][0]["name"])
 
 
 def test_invalid_config_refused(repo):

@@ -74,13 +74,12 @@ class Repo:
         return git(self.path, *args)
 
     def install_tool(self, rel=".vendored/pkg/git-cicd"):
-        """Copy the script and its template into the repository, as the
+        """Copy the script and its templates into the repository, as the
         installer does. Return the tool path relative to the root."""
         dest = self.path / rel
-        (dest / "templates").mkdir(parents=True, exist_ok=True)
+        shutil.copytree(ROOT / "templates" / "workflows",
+                        dest / "templates" / "workflows", dirs_exist_ok=True)
         shutil.copy2(SCRIPT, dest / "git-cicd")
-        shutil.copy2(ROOT / "templates" / "workflow.yml",
-                     dest / "templates" / "workflow.yml")
         self.tool = dest / "git-cicd"
         return f"{rel}/git-cicd"
 

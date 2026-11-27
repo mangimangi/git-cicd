@@ -7,7 +7,7 @@ import pytest
 
 from tests.conftest import git_cicd
 
-MATCH = (True, "workflow matches config")
+MATCH = (True, "workflows match config")
 MISMATCH = (False, "diff")
 
 
@@ -73,17 +73,17 @@ def test_all_passed(config, repo):
     assert ok
     assert verdict == "PASSED - 3 of 3 jobs needed, 3 passed"
     assert text.splitlines()[-1] == verdict
-    assert "workflow matches config" in text
-    assert "passed  6.2s" in line_for(text, "test")
+    assert "workflows match config" in text
+    assert "passed  6.2s" in line_for(text, "Test /")
 
 
 def test_times_present_for_every_job_and_step(config, repo):
     dec = decision(test=(True, "r"))
     ok, _, text = run_report(config, repo, dec, {"test": passed_result("test")})
     assert ok
-    assert "test / repo:test:setup.sh  passed  1.2s" in text
-    assert text.count("test / repo:test:test.sh  passed  2.5s") == 1
-    assert text.count("test / repo:test:cov.sh  passed  2.5s") == 1
+    assert "Test / repo:test:setup.sh  passed  1.2s" in text
+    assert text.count("Test / repo:test:test.sh  passed  2.5s") == 1
+    assert text.count("Test / repo:test:cov.sh  passed  2.5s") == 1
 
 
 def test_one_line_per_declared_job_in_config_order(config, repo):
@@ -91,11 +91,11 @@ def test_one_line_per_declared_job_in_config_order(config, repo):
     _, _, text = run_report(config, repo, dec, {"test": passed_result("test")})
     names = [l.split()[0] for l in text.splitlines()
              if l.startswith("  ") and not l.startswith("    ")
-             and l.split()[0] in ("test", "lint", "docs")]
-    assert names == ["test", "lint", "docs"]
-    assert "  test / repo:test  passed" in text
+             and l.split()[0] in ("Test", "Lint", "Docs")]
+    assert names == ["Test", "Lint", "Docs"]
+    assert "  Test / repo:test  passed" in text
     assert "not needed (no changed file matches paths) (non-blocking)" in \
-        line_for(text, "lint")
+        line_for(text, "Lint /")
 
 
 def test_failed_step_named(config, repo):
@@ -105,7 +105,7 @@ def test_failed_step_named(config, repo):
     ok, verdict, text = run_report(config, repo, decision(test=(True, "r")),
                                    {"test": r})
     assert not ok
-    assert "failed (step ci/cov.sh, exit 4)" in line_for(text, "test")
+    assert "failed (step ci/cov.sh, exit 4)" in line_for(text, "Test /")
     assert verdict == "FAILED - 1 of 3 jobs needed, 1 failed"
 
 
@@ -126,7 +126,7 @@ def test_setup_failed_is_could_not_run(config, repo):
     ok, verdict, text = run_report(config, repo, decision(test=(True, "r")),
                                    {"test": r})
     assert not ok
-    assert "could not run (setup failed)" in line_for(text, "test")
+    assert "could not run (setup failed)" in line_for(text, "Test /")
     assert "failed (step" not in text
     assert verdict == "FAILED - 1 of 3 jobs needed, 1 could not run"
 
@@ -140,7 +140,7 @@ def test_non_blocking_failure_passes(config, repo):
                                     "lint": lint})
     assert ok
     assert "failed (step ci/lint.sh, exit 1) (non-blocking)" in \
-        line_for(text, "lint")
+        line_for(text, "Lint /")
     assert verdict == ("PASSED - 2 of 3 jobs needed, 1 passed, 1 failed "
                        "(1 non-blocking)")
 
@@ -149,7 +149,7 @@ def test_non_blocking_could_not_run_passes(config, repo):
     dec = decision(lint=(True, "r"))
     ok, _, text = run_report(config, repo, dec, {})
     assert ok
-    assert "could not run (no result) (non-blocking)" in line_for(text, "lint")
+    assert "could not run (no result) (non-blocking)" in line_for(text, "Lint /")
 
 
 def test_none_needed(config, repo):
@@ -161,7 +161,7 @@ def test_none_needed(config, repo):
     assert verdict == ("PASSED - 0 of 3 jobs needed: only needs_nothing files "
                        "changed")
     assert "not needed (only needs_nothing files changed)" in \
-        line_for(text, "test")
+        line_for(text, "Test /")
 
 
 def test_base_matches_no_branches(config, repo):
@@ -170,7 +170,7 @@ def test_base_matches_no_branches(config, repo):
     ok, verdict, text = run_report(config, repo, dec, {})
     assert ok
     for name in ("test", "lint", "docs"):
-        assert "does not match branches" in line_for(text, name)
+        assert "does not match branches" in line_for(text, name.capitalize() + " /")
     assert verdict == ("PASSED - 0 of 3 jobs needed: target plan/x does not "
                        "match branches")
 
@@ -179,7 +179,7 @@ def test_missing_result_is_could_not_run(config, repo):
     ok, verdict, text = run_report(config, repo, decision(test=(True, "r")),
                                    {})
     assert not ok
-    assert "could not run (no result)" in line_for(text, "test")
+    assert "could not run (no result)" in line_for(text, "Test /")
     assert verdict.startswith("FAILED")
 
 
@@ -188,8 +188,8 @@ def test_workflow_mismatch_fails(config, repo):
                                    workflow=MISMATCH)
     assert not ok
     assert verdict.startswith("FAILED - 0 of 3 jobs needed")
-    assert verdict.endswith("; the workflow does not match the config")
-    assert "workflow does not match config: run git-cicd generate" in text
+    assert verdict.endswith("; the workflows do not match the config")
+    assert "workflows do not match config: run git-cicd generate" in text
 
 
 def test_no_decisions_fails(config, repo):
@@ -205,13 +205,13 @@ def test_summary_written_when_set(config, repo, tmp_path, monkeypatch):
     r.update(state="failed", failed_step="ci/cov.sh", exit_code=4)
     run_report(config, repo, decision(test=(True, "r")), {"test": r})
     md = summary.read_text()
-    assert md.startswith("## git-cicd verdict: FAILED")
+    assert md.startswith("## Verdict / git-cicd:verdict: FAILED")
     assert "| Job | State | Time | Detail |" in md
-    assert "| `test / repo:test` | failed | 6.2s | step ci/cov.sh, exit 4 |" \
+    assert "| `Test / repo:test` | failed | 6.2s | step ci/cov.sh, exit 4 |" \
         in md
-    assert "↳ `test / repo:test:setup.sh` | passed | 1.2s" in md
-    assert "↳ `test / repo:test:cov.sh`" in md
-    assert "| `lint / repo:lint` | not needed (non-blocking) |" in md
+    assert "↳ `Test / repo:test:setup.sh` | passed | 1.2s" in md
+    assert "↳ `Test / repo:test:cov.sh`" in md
+    assert "| `Lint / repo:lint` | not needed (non-blocking) |" in md
     assert "git-cicd report: repo at h" in md
 
 
@@ -250,7 +250,7 @@ def test_report_command(config, repo, tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.splitlines()[-1] == \
         "PASSED - 1 of 3 jobs needed, 1 passed"
-    assert "workflow matches config" in result.stdout
+    assert "workflows match config" in result.stdout
     assert "PASSED" in summary.read_text()
 
 
@@ -260,7 +260,7 @@ def test_report_command_fails_on_stale_workflow(config, repo, tmp_path):
     result = repo.run("report", "--decisions", str(tmp_path / "d.json"),
                       "--results", str(tmp_path / "none"))
     assert result.returncode == 1
-    assert ("workflow does not match config: run "
+    assert ("workflows do not match config: run "
             ".vendored/pkg/git-cicd/git-cicd generate") in result.stdout
 
 
@@ -294,7 +294,8 @@ def test_load_results_ignores_other_json(tmp_path):
     assert list(git_cicd.load_results(str(tmp_path))) == ["x"]
 
 
-# ── --verdict-out: what the workflow sets the `git-cicd verdict` status to ──
+# ── --verdict-out: what the workflow sets the `Verdict / git-cicd:verdict`
+# status to ──
 
 def test_verdict_out_passed(config, repo, tmp_path):
     repo.install_tool()
@@ -381,7 +382,7 @@ def owned(repo):
     repo.script(".vendored/pkg/tool/check.sh")
     repo.script(".vendored/pkg/bare/lint.sh")
     repo.config({"jobs": {
-        "unit": {"name": "Unit tests", "on": ["open"], "branches": ["**"],
+        "unit": {"name": "Unit Tests", "on": ["open"], "branches": ["**"],
                  "setup": "ci/setup.sh",
                  "steps": ["ci/test.sh", ".vendored/pkg/tool/check.sh",
                            [".vendored/pkg/bare/lint.sh", "--x"]]},
@@ -411,7 +412,7 @@ def owned_result():
 def owned_decision():
     return {"moment": "open", "target": "main", "source": "f", "base": "b",
             "head": "0123456789abcdef0123", "changed_files": [],
-            "jobs": [{"name": "unit", "title": "Unit tests", "needed": True,
+            "jobs": [{"name": "unit", "title": "Unit Tests", "needed": True,
                       "reason": "r", "blocking": True}], "max_parallel": 3}
 
 
@@ -427,19 +428,19 @@ def test_step_lines_vendored_with_manifest_and_repo_with_version(
     owned.write(".vendored/manifests/tool.version", "1.4.2\n")
     owned.write("VERSION", "0.3.0\n")
     text = owned_report(owned, monkeypatch)
-    assert "  Unit tests / medici:unit  failed" not in text
-    assert "  Unit tests / medici:unit  passed  10.0s" in text
-    assert "    Unit tests / medici@0.3.0:unit:setup.sh  passed  1.0s" in text
-    assert "    Unit tests / medici@0.3.0:unit:test.sh  passed  2.0s" in text
-    assert "    Unit tests / tool@1.4.2:unit:check.sh  passed  3.0s" in text
+    assert "  Unit Tests / medici:unit  failed" not in text
+    assert "  Unit Tests / medici:unit  passed  10.0s" in text
+    assert "    Unit Tests / medici@0.3.0:unit:setup.sh  passed  1.0s" in text
+    assert "    Unit Tests / medici@0.3.0:unit:test.sh  passed  2.0s" in text
+    assert "    Unit Tests / tool@1.4.2:unit:check.sh  passed  3.0s" in text
     # a vendor with no manifest version: no @, never a guessed version
-    assert "    Unit tests / bare:unit:lint.sh  failed (exit 2)  4.0s" in text
+    assert "    Unit Tests / bare:unit:lint.sh  failed (exit 2)  4.0s" in text
 
 
 def test_step_lines_repo_without_version(owned, monkeypatch):
     text = owned_report(owned, monkeypatch)
-    assert "    Unit tests / medici:unit:test.sh  passed" in text
-    assert "    Unit tests / tool:unit:check.sh  passed" in text
+    assert "    Unit Tests / medici:unit:test.sh  passed" in text
+    assert "    Unit Tests / tool:unit:check.sh  passed" in text
     assert "@" not in text
 
 
@@ -449,7 +450,7 @@ def test_repo_version_file_from_git_semver_config(owned, monkeypatch):
     owned.write("VERSION", "9.9.9\n")
     owned.write("meta/version.txt", "2.0.1\n")
     text = owned_report(owned, monkeypatch)
-    assert "Unit tests / medici@2.0.1:unit:test.sh" in text
+    assert "Unit Tests / medici@2.0.1:unit:test.sh" in text
     assert "9.9.9" not in text
 
 
@@ -508,3 +509,40 @@ def test_markdown_shows_names_literally(owned, monkeypatch, tmp_path):
     owned_report(owned, monkeypatch)
     md = summary.read_text()
     assert "| ``a `b` \\| c / medici:unit`` | passed |" in md
+
+
+# ── title case: by default, never by rewriting ──────────────────────────────
+
+def test_rows_and_step_lines_title_case_default_and_written_name(
+        repo, monkeypatch):
+    """A job without `name` shows its job name in title case; a written
+    `name` shows exactly as written, mixed case included."""
+    repo.script("ci/test.sh")
+    repo.script("ci/up.sh")
+    repo.config({"jobs": {
+        "unit-tests": {"on": ["open"], "branches": ["**"],
+                       "steps": ["ci/test.sh"]},
+        "pypi": {"name": "PyPI upload", "on": ["open"], "branches": ["**"],
+                 "steps": ["ci/up.sh"]},
+        "types": {"name": "mypy", "on": ["open"], "branches": ["**"],
+                  "steps": ["ci/test.sh"]},
+    }})
+    monkeypatch.setenv("GITHUB_REPOSITORY", "someone/medici")
+    config = git_cicd.load_config(str(repo.path))
+    dec = {"moment": "open", "target": "main", "source": "f", "base": "b",
+           "head": "h", "changed_files": [], "max_parallel": 3,
+           "jobs": [{"name": n, "needed": True, "reason": "r",
+                     "blocking": True} for n in ("unit-tests", "pypi",
+                                                 "types")]}
+    results = {
+        "unit-tests": passed_result("unit-tests", ("ci/test.sh",), False),
+        "pypi": passed_result("pypi", ("ci/up.sh",), False),
+        "types": passed_result("types", ("ci/test.sh",), False)}
+    text = run_report(config, repo, dec, results)[2]
+    assert "  Unit Tests / medici:unit-tests  passed" in text
+    assert "    Unit Tests / medici:unit-tests:test.sh  passed" in text
+    assert "  PyPI upload / medici:pypi " in text
+    assert "    PyPI upload / medici:pypi:up.sh  passed" in text
+    assert "  mypy / medici:types " in text
+    assert "Mypy" not in text and "Pypi" not in text and "unit-tests /" \
+        not in text

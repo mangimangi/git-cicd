@@ -378,18 +378,39 @@ def test_main_in_process(scripts, capsys):
 # ── name (display name) ─────────────────────────────────────────────────────
 
 def test_name_validates(scripts):
-    scripts.config({"jobs": {"test": job(name="Unit tests")}})
+    scripts.config({"jobs": {"test": job(name="Unit Tests")}})
     result = scripts.run("validate")
     assert result.returncode == 0, result.stderr
     config = git_cicd.load_config(str(scripts.path))
-    assert config["jobs"]["test"]["title"] == "Unit tests"
+    assert config["jobs"]["test"]["title"] == "Unit Tests"
     assert config["jobs"]["test"]["name"] == "test"
 
 
-def test_name_defaults_to_job_name(scripts):
-    scripts.config({"jobs": {"test": job()}})
+def test_name_defaults_to_job_name_in_title_case(scripts):
+    scripts.config({"jobs": {"test": job(), "unit-tests": job(),
+                             "build_docs-fast": job(), "e2e": job(),
+                             "ci-PyPI": job()}})
     config = git_cicd.load_config(str(scripts.path))
-    assert config["jobs"]["test"]["title"] == "test"
+    titles = {n: j["title"] for n, j in config["jobs"].items()}
+    assert titles == {"test": "Test", "unit-tests": "Unit Tests",
+                      "build_docs-fast": "Build Docs Fast", "e2e": "E2e",
+                      "ci-PyPI": "Ci PyPI"}
+
+
+@pytest.mark.parametrize("name", ["PyPI", "mypy", "unit tests",
+                                  "Release to npm", "pre-COMMIT"])
+def test_written_name_is_shown_exactly_as_written(scripts, name):
+    """git-cicd never changes the case of a name the repository wrote."""
+    scripts.config({"jobs": {"test": job(name=name)}})
+    config = git_cicd.load_config(str(scripts.path))
+    assert config["jobs"]["test"]["title"] == name
+
+
+def test_default_title():
+    assert git_cicd.default_title("unit-tests") == "Unit Tests"
+    assert git_cicd.default_title("a__b--c") == "A B C"
+    assert git_cicd.default_title("x") == "X"
+    assert git_cicd.default_title("-") == "-"
 
 
 def test_name_with_shell_metacharacters_is_data(scripts):

@@ -188,10 +188,10 @@ def test_token_passthrough(project):
 
 
 def test_stale_workflow_fails_verdict(project):
-    (project.path / ".github/workflows/git-cicd.yml").write_text("stale\n")
+    (project.path / ".github/workflows/git-cicd-open.yml").write_text("stale\n")
     result = check(project)
     assert result.returncode == 1
-    assert "workflow does not match config: run " \
+    assert "workflows do not match config: run " \
         ".vendored/pkg/git-cicd/git-cicd generate" in result.stdout
 
 

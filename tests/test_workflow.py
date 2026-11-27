@@ -1,4 +1,4 @@
-"""Tests for generating and verifying the GitHub Actions workflow."""
+"""Tests for generating and verifying the GitHub Actions workflows."""
 
 import re
 
@@ -6,7 +6,9 @@ import pytest
 
 from tests.conftest import ROOT, git_cicd
 
-WORKFLOW = ".github/workflows/git-cicd.yml"
+WORKFLOW = ".github/workflows/git-cicd-open.yml"
+LEGACY = ".github/workflows/git-cicd.yml"
+TEMPLATE = ROOT / "templates" / "workflows" / "open.yml"
 TOOL = ".vendored/pkg/git-cicd/git-cicd"
 
 
@@ -63,8 +65,8 @@ def run_blocks(text):
 
 def test_generate_writes_file(tool_repo):
     text = generate(tool_repo, base_config())
-    assert text.startswith("# .github/workflows/git-cicd.yml - GENERATED")
-    assert "name: git-cicd\n" in text
+    assert text.startswith(f"# {WORKFLOW} - GENERATED")
+    assert "\nname: Open\n" in text
     assert f"python3 {TOOL} decide" in text
     assert "__TOOL__" not in text and "__SCHEDULE__" not in text
     assert "schedule:" not in text
@@ -79,7 +81,7 @@ def test_no_expressions_inside_run_blocks(tool_repo):
 
 
 def test_template_run_blocks_have_no_expressions():
-    text = (ROOT / "templates" / "workflow.yml").read_text()
+    text = TEMPLATE.read_text()
     for block in run_blocks(text):
         assert "${{" not in block
 
@@ -88,8 +90,10 @@ def test_workflow_contract(tool_repo):
     text = generate(tool_repo, base_config())
     assert "  pull_request:\n    types: [opened, synchronize, reopened]\n" in text
     assert "permissions:\n  contents: read\n" in text
-    assert "name: git-cicd report" in text
+    assert "name: Report / git-cicd:report" in text
     assert "if: always()" in text
+    assert "schedule" not in text.split("\nname: Open\n", 1)[1]
+    assert "github.event_name" not in text
     assert "max-parallel: ${{ fromJSON(needs.decide.outputs.max_parallel) }}" \
         in text
     assert "job: ${{ fromJSON(needs.decide.outputs.jobs) }}" in text
@@ -127,9 +131,10 @@ STATUS_PERMISSIONS = ("    permissions:\n      contents: read\n"
 
 
 def test_permissions_status_write_only(tool_repo):
-    """On the pull request trigger the token may write commit statuses, and
-    nothing else: contents stay read-only, and the jobs that run the config's
-    scripts get no write at all."""
+    """In the `open` workflow the token may write commit statuses, and
+    nothing else: contents stay read-only, the two jobs that post the status
+    get `statuses: write`, and the job that runs the config's scripts gets no
+    permission of its own (only the read-only top level)."""
     text = generate(tool_repo, base_config())
     top = text.split("\njobs:\n", 1)[0]
     assert top.endswith("\npermissions:\n  contents: read\n")
@@ -146,9 +151,9 @@ def test_permissions_status_write_only(tool_repo):
 
 RUN_CONCURRENCY = (
     "    concurrency:\n"
-    "      group: git-cicd-${{ github.workflow }}-${{ "
-    "github.event.pull_request.number || github.ref }}-${{ matrix.job }}\n"
-    "      cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n")
+    "      group: git-cicd-open-${{ github.event.pull_request.number }}-"
+    "${{ matrix.job }}\n"
+    "      cancel-in-progress: true\n")
 
 
 def test_concurrency_only_on_the_script_running_job(tool_repo):
@@ -177,14 +182,14 @@ def test_superseded_run_stops_after_deciding(tool_repo):
     assert names.index("Stop if a newer push superseded this run") == \
         names.index("Decide which jobs the change needs") + 1
     guard = steps[names.index("Stop if a newer push superseded this run")]
-    assert "if: github.event_name == 'pull_request'" in guard
     assert "PR_NUMBER: ${{ github.event.pull_request.number }}" in guard
     assert 'git ls-remote origin "refs/pull/$PR_NUMBER/head"' in guard
     assert '"$LATEST" != "$HEAD_SHA"' in guard and "exit 1" in guard
 
 
 def test_verdict_status_pending_first_and_final_last(tool_repo):
-    """The `git-cicd verdict` status is set to pending by the first step of
+    """The `Verdict / git-cicd:verdict` status is set to pending by the first
+    step of
     the first job and to the verdict by the last step of the report job, which
     runs whatever happened before it; no job's check run carries the name."""
     text = generate(tool_repo, base_config())
@@ -192,34 +197,63 @@ def test_verdict_status_pending_first_and_final_last(tool_repo):
     assert "needs:" not in jobs["decide"]
     decide_steps = jobs["decide"].split("      - name: ")[1:]
     assert decide_steps[0].startswith(
-        "Set the git-cicd verdict status to pending\n")
-    assert "if: github.event_name == 'pull_request'" in decide_steps[0]
+        "Set the Verdict / git-cicd:verdict status to pending\n")
+    assert "if:" not in decide_steps[0]
     assert "-f state=pending" in decide_steps[0]
-    assert '-f context="git-cicd verdict"' in decide_steps[0]
+    assert '-f context="Verdict / git-cicd:verdict"' in decide_steps[0]
     report_steps = jobs["verdict"].split("      - name: ")[1:]
     last = report_steps[-1]
-    assert last.startswith("Set the git-cicd verdict status\n")
-    assert "if: always() && github.event_name == 'pull_request'" in last
+    assert last.startswith("Set the Verdict / git-cicd:verdict status\n")
+    assert "        if: always()\n" in last
     assert "STATE=failure" in last
-    assert '-f context="git-cicd verdict"' in last
+    assert '-f context="Verdict / git-cicd:verdict"' in last
     assert "--verdict-out=" in report_steps[-2]
     assert "if: always()" in jobs["verdict"].split("    steps:")[0]
-    assert not re.search(r"(?m)^    name: git-cicd verdict$", text)
+    assert not re.search(r"(?m)^    name: .*[Vv]erdict", text)
+    assert text.count('context="Verdict / git-cicd:verdict"') == 2
+    assert git_cicd.VERDICT_STATUS == "Verdict / git-cicd:verdict"
+    # the old names are gone from the file
+    for old in ("name: git-cicd\n", "name: git-cicd decide",
+                "name: git-cicd report", "context=\"git-cicd", "git-cicd verdict",
+                "`git-cicd decide`", "`git-cicd report`"):
+        assert old not in text, old
 
 
-def test_non_cron_differences_generate_identical_file(tool_repo):
-    a = generate(tool_repo, base_config())
+def generated_files(repo):
+    return {p.name: p.read_text()
+            for p in (repo.path / ".github" / "workflows").glob("*.yml")}
+
+
+def test_non_cron_differences_generate_identical_files(tool_repo):
+    generate(tool_repo, base_config())
+    files_a = generated_files(tool_repo)
     b_config = {"jobs": {
         "other": {"on": ["open", "merge"], "branches": ["plan/**", "main"],
                   "paths": ["lib/**"], "steps": [["ci/other.sh", "-x"]],
                   "blocking": False, "manual": False},
     }, "needs_nothing": [".pearls/**", "*.md"], "max_parallel": 7}
-    b = generate(tool_repo, b_config)
-    assert a == b
+    generate(tool_repo, b_config)
+    assert generated_files(tool_repo) == files_a
+    assert list(files_a) == ["git-cicd-open.yml"]
 
 
-def test_cron_job_changes_only_schedule_block(tool_repo):
+def test_cron_jobs_do_not_change_the_open_file(tool_repo):
+    """Every generated file is fixed text except the cron workflow's
+    schedule block: cron jobs leave the `open` file as it is."""
     a = generate(tool_repo, base_config())
+    config = base_config()
+    config["jobs"]["nightly"] = {"on": ["cron"], "branches": ["main"],
+                                 "cron": "0 3 * * *", "steps": ["ci/test.sh"]}
+    b = generate(tool_repo, config)
+    assert a == b
+    assert "schedule" not in b.split("\nname: Open\n", 1)[1]
+
+
+def test_schedule_block_fills_only_a_cron_template(tool_repo):
+    """The schedule block, one entry per distinct cron expression, is what
+    the cron workflow's template will hold (`__SCHEDULE__`); a template
+    without the marker, like `open`'s, is unchanged by the config."""
+    tool_repo.config(base_config())
     config = base_config()
     config["jobs"]["nightly"] = {"on": ["cron"], "branches": ["main"],
                                  "cron": "0 3 * * *", "steps": ["ci/test.sh"]}
@@ -227,11 +261,15 @@ def test_cron_job_changes_only_schedule_block(tool_repo):
                                 "cron": "0 9 * * 1", "steps": ["ci/test.sh"]}
     config["jobs"]["again"] = {"on": ["cron"], "branches": ["dev"],
                                "cron": "0 3 * * *", "steps": ["ci/test.sh"]}
-    b = generate(tool_repo, config)
-    block = ('  schedule:\n    - cron: "0 3 * * *"\n'
-             '    - cron: "0 9 * * 1"\n')
-    assert block in b
-    assert b.replace(block, "") == a
+    tool_repo.config(config)
+    loaded = git_cicd.load_config(str(tool_repo.path))
+    cron = "name: Cron\non:\n__SCHEDULE__\njobs: {}\n"
+    assert git_cicd.render_workflow(loaded, TOOL, cron) == (
+        'name: Cron\non:\n  schedule:\n    - cron: "0 3 * * *"\n'
+        '    - cron: "0 9 * * 1"\njobs: {}\n')
+    open_text = TEMPLATE.read_text()
+    assert git_cicd.render_workflow(loaded, TOOL, open_text) == \
+        open_text.replace("__TOOL__", TOOL)
 
 
 def test_generate_is_deterministic(tool_repo):
@@ -244,7 +282,7 @@ def test_verify_passes_after_generate(tool_repo):
     generate(tool_repo, base_config())
     result = tool_repo.run("verify")
     assert result.returncode == 0, result.stdout
-    assert "workflow matches config" in result.stdout
+    assert "workflows match config" in result.stdout
 
 
 def test_verify_fails_after_hand_edit(tool_repo):
@@ -256,20 +294,64 @@ def test_verify_fails_after_hand_edit(tool_repo):
     assert result.returncode == 1
     assert "-      fail-fast: true" in result.stdout
     assert "+      fail-fast: false" in result.stdout
-    assert (f"the workflow does not match the config; run: {TOOL} generate "
+    assert (f"the workflows do not match the config; run: {TOOL} generate "
             f"and commit {WORKFLOW}") in result.stdout
+    assert LEGACY not in result.stdout
 
 
-def test_verify_fails_after_config_cron_change(tool_repo):
+def test_generate_removes_the_old_single_file(tool_repo):
+    """A repository from before the per-moment files: generate writes the
+    new file and removes the old one."""
+    tool_repo.config(base_config())
+    (tool_repo.path / LEGACY).parent.mkdir(parents=True)
+    (tool_repo.path / LEGACY).write_text("name: git-cicd\n")
+    result = tool_repo.run("generate")
+    assert result.returncode == 0, result.stderr
+    assert f"wrote {WORKFLOW}" in result.stdout
+    assert f"removed {LEGACY}" in result.stdout
+    assert not (tool_repo.path / LEGACY).exists()
+    assert (tool_repo.path / WORKFLOW).is_file()
+    assert tool_repo.run("verify").returncode == 0
+    # with nothing to remove, generate says nothing about it
+    result = tool_repo.run("generate")
+    assert "removed" not in result.stdout
+
+
+def test_verify_fails_while_the_old_file_is_there(tool_repo):
     generate(tool_repo, base_config())
-    config = base_config()
-    config["jobs"]["nightly"] = {"on": ["cron"], "branches": ["main"],
-                                 "cron": "0 3 * * *", "steps": ["ci/test.sh"]}
-    tool_repo.config(config)
+    (tool_repo.path / LEGACY).write_text("name: git-cicd\n")
     result = tool_repo.run("verify")
     assert result.returncode == 1
-    assert '+    - cron: "0 3 * * *"' in result.stdout
-    assert f"run: {TOOL} generate" in result.stdout
+    assert f"{LEGACY} is still there" in result.stdout
+    assert (f"run: {TOOL} generate and commit {WORKFLOW} and the removal of "
+            f"{LEGACY}") in result.stdout
+
+
+def test_generated_files_are_named_for_their_moments():
+    """One workflow per moment, its name the moment's word and its file
+    fixed for good; only `open` is generated so far."""
+    assert git_cicd.WORKFLOWS == {
+        "open": ("Open", ".github/workflows/git-cicd-open.yml"),
+        "merge": ("Merge", ".github/workflows/git-cicd-merge.yml"),
+        "cron": ("Cron", ".github/workflows/git-cicd-cron.yml"),
+        "manual": ("Manual", ".github/workflows/git-cicd-manual.yml"),
+    }
+    assert git_cicd.GENERATED_MOMENTS == ("open",)
+    templates = sorted(p.stem for p in (ROOT / "templates" / "workflows")
+                       .glob("*.yml"))
+    assert templates == sorted(git_cicd.GENERATED_MOMENTS)
+    for moment in git_cicd.GENERATED_MOMENTS:
+        name, path = git_cicd.WORKFLOWS[moment]
+        text = (ROOT / "templates" / "workflows" / f"{moment}.yml").read_text()
+        assert text.startswith(f"# {path} - GENERATED")
+        assert f"\nname: {name}\n" in text
+
+
+def test_this_repository_is_migrated():
+    assert not (ROOT / LEGACY).exists()
+    config = git_cicd.load_config(str(ROOT))
+    assert (ROOT / WORKFLOW).read_text() == \
+        git_cicd.render_workflows(config, "git-cicd")[WORKFLOW]
 
 
 def test_verify_missing_file(tool_repo):
@@ -285,7 +367,7 @@ def test_verify_function(tool_repo):
     config = git_cicd.load_config(str(tool_repo.path))
     ok, message = git_cicd.verify_workflow(config, str(tool_repo.path),
                                            tool=TOOL)
-    assert ok and message == "workflow matches config"
+    assert ok and message == "workflows match config"
     ok, message = git_cicd.verify_workflow(config, str(tool_repo.path),
                                            tool="elsewhere/git-cicd")
     assert not ok and "run: elsewhere/git-cicd generate" in message
@@ -317,14 +399,15 @@ def test_generate_refuses_invalid_config(tool_repo):
     assert not (tool_repo.path / WORKFLOW).exists()
 
 
-def test_template_documents_reserved_triggers():
-    text = (ROOT / "templates" / "workflow.yml").read_text()
-    head = text.split("\nname: git-cicd\n")[0]
-    assert "Reserved for later moments" in head
-    assert "`push` with NO branch filter" in head
-    assert "`workflow_dispatch` with one free-text `job` input" in head
-    assert "`permissions` cannot be expressions" in head
-    assert "cron moment is not built yet" in head
+def test_template_documents_the_moments():
+    head = TEMPLATE.read_text().split("\nname: Open\n")[0]
+    for moment, (name, path) in git_cicd.WORKFLOWS.items():
+        assert re.search(rf"(?m)^#   {moment} +{name} +{re.escape(path)} ",
+                         head), moment
+    prose = " ".join(line.lstrip("# ") for line in head.splitlines())
+    assert ("Every generated file is fixed text except the cron workflow's "
+            "schedule block") in " ".join(prose.split())
+    assert "Overlap rule for `open`: a newer push supersedes" in head
 
 
 ROW_NAME = ("    name: ${{ fromJSON(needs.decide.outputs.names)[matrix.job] }}"
@@ -338,16 +421,16 @@ def test_run_row_is_display_name_repo_and_job(tool_repo):
     jobs = job_blocks(text)
     assert ROW_NAME in jobs["run"]
     assert "      names: ${{ steps.decide.outputs.names }}\n" in jobs["decide"]
-    assert "    name: git-cicd decide\n" in jobs["decide"]
-    assert "    name: git-cicd report\n" in jobs["verdict"]
+    assert "    name: Decide / git-cicd:decide\n" in jobs["decide"]
+    assert "    name: Report / git-cicd:report\n" in jobs["verdict"]
     assert "version" not in ROW_NAME
 
 
 def test_display_names_do_not_change_the_file(tool_repo):
     a = generate(tool_repo, base_config())
     config = base_config()
-    config["jobs"]["test"]["name"] = "Unit tests"
+    config["jobs"]["test"]["name"] = "Unit Tests"
     config["jobs"]["release"]["name"] = "Release `$(x)` \"q\""
     b = generate(tool_repo, config)
     assert a == b
-    assert "Unit tests" not in b
+    assert "Unit Tests" not in b
