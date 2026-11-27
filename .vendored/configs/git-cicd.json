@@ -1,0 +1,12 @@
+{
+  "jobs": {
+    "test": {
+      "on": ["open"],
+      "branches": ["**"],
+      "paths": ["git-cicd", "install.sh", "templates/**", "tests/**", "pyproject.toml", "ci/**"],
+      "setup": "ci/setup.sh",
+      "steps": ["ci/test.sh"]
+    }
+  },
+  "needs_nothing": [".pearls/**", ".madreperla/**", "*.md", "LICENSE", "docs/**"]
+}

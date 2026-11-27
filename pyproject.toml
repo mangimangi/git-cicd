@@ -1,0 +1,16 @@
+[project]
+name = "git-cicd"
+description = "Decide which jobs a change needs, run them, and report"
+requires-python = ">=3.11"
+dependencies = []
+dynamic = ["version"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+include = ["git-cicd"]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
