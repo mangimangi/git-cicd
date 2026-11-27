@@ -21,6 +21,25 @@
 #     because `permissions` cannot be expressions.
 # A scheduled run fails with "the cron moment is not built yet", so a run in
 # which nothing ran is never read as passed.
+#
+# The `git-cicd verdict` a reader waits on is a COMMIT STATUS on the pull
+# request's head commit, not a job: a job's check run appears only when the job
+# is queued, and the job that reports is queued last. The first step of the
+# first job sets the status to pending; the last step of the report job sets it
+# to success or failure, and to failure when the report did not run to the end.
+# Until that first step runs, the `git-cicd decide` check is queued, so the
+# commit never shows only green checks while the verdict is to come. A run that
+# is cancelled or dies leaves the status pending or failed, never green. This
+# is why the two status-writing jobs get `statuses: write` (the one write
+# permission on `open`); the jobs that run the config's scripts get none.
+#
+# There is no workflow-level `concurrency`: a run waiting on one would have no
+# job, so no check and no status, until the run it supersedes had finished
+# cancelling. The group is on the `run` job alone (one per pull request and
+# job), so a newer push cancels the older run's script-running jobs while its
+# own `decide` posts pending at once. `decide` fails when the pull request's
+# head has moved on, so a superseded run queues no `run` job that could cancel
+# the newer run's, and its report is FAILED for every job it needed.
 
 name: git-cicd
 
@@ -31,19 +50,30 @@ __SCHEDULE__
 permissions:
   contents: read
 
-concurrency:
-  group: git-cicd-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 jobs:
   decide:
     name: git-cicd decide
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      statuses: write
     outputs:
       jobs: ${{ steps.decide.outputs.jobs }}
       any: ${{ steps.decide.outputs.any }}
       max_parallel: ${{ steps.decide.outputs.max_parallel }}
     steps:
+      - name: Set the git-cicd verdict status to pending
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+            -f state=pending -f context="git-cicd verdict" \
+            -f description="waiting for the verdict" \
+            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --silent
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -67,6 +97,18 @@ jobs:
             --json > "$RUNNER_TEMP/git-cicd/decisions.json"
           cat "$RUNNER_TEMP/git-cicd/decisions.json"
 
+      - name: Stop if a newer push superseded this run
+        if: github.event_name == 'pull_request'
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          LATEST="$(git ls-remote origin "refs/pull/$PR_NUMBER/head" | cut -f1)"
+          if [ -n "$LATEST" ] && [ "$LATEST" != "$HEAD_SHA" ]; then
+            echo "::error::superseded: the pull request's head is now $LATEST"
+            exit 1
+          fi
+
       - name: Upload decisions
         if: always()
         uses: actions/upload-artifact@v4
@@ -80,6 +122,9 @@ jobs:
     needs: decide
     if: needs.decide.outputs.any == 'true'
     runs-on: ubuntu-latest
+    concurrency:
+      group: git-cicd-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ matrix.job }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     strategy:
       fail-fast: false
       max-parallel: ${{ fromJSON(needs.decide.outputs.max_parallel) }}
@@ -116,10 +161,13 @@ jobs:
           if-no-files-found: ignore
 
   verdict:
-    name: git-cicd verdict
+    name: git-cicd report
     needs: [decide, run]
     if: always()
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      statuses: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -146,4 +194,23 @@ jobs:
           mkdir -p "$DIR"
           python3 __TOOL__ report --moment="$MOMENT" \
             --decisions="$DIR/git-cicd-decisions/decisions.json" \
-            --results="$DIR"
+            --results="$DIR" --verdict-out="$RUNNER_TEMP/git-cicd/verdict.txt"
+
+      - name: Set the git-cicd verdict status
+        if: always() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          VERDICT="$RUNNER_TEMP/git-cicd/verdict.txt"
+          STATE=failure
+          DESCRIPTION="FAILED - the report did not run to the end (see the git-cicd report job)"
+          if [ -s "$VERDICT" ]; then
+            STATE="$(sed -n 1p "$VERDICT")"
+            DESCRIPTION="$(sed -n 2p "$VERDICT")"
+          fi
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+            -f state="$STATE" -f context="git-cicd verdict" \
+            -f description="$DESCRIPTION" \
+            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --silent

@@ -159,9 +159,45 @@ pull request. Then whether the workflow matches the config, then one verdict:
   that needs nothing is green with the explanation:
   `PASSED - 0 of 3 jobs needed: only needs_nothing files changed`.
 
-In GitHub Actions the report is also written to the job summary, and it is the
-one always-present check with the fixed name **`git-cicd verdict`**: require
-that check in branch protection.
+In GitHub Actions the report is also written to the job summary of the
+`git-cicd report` job, and the verdict is the one always-present check with
+the fixed name **`git-cicd verdict`**.
+
+**`git-cicd verdict` is pending from the start of the run.** It is a *commit
+status* on the pull request's head commit, not a job: GitHub creates a job's
+check run only when the job is queued, and the job that reports is queued
+after every other job, so a job could not be present from the start. The
+first step of the first job (`git-cicd decide`) sets the status to
+**pending**; the last step of `git-cicd report` sets it to **success** or
+**failure** with the verdict line as its description (for example
+`PASSED - 0 of 3 jobs needed: only needs_nothing files changed`), and to
+failure when the report did not run to the end.
+
+What a reader can rely on, and from when:
+
+- From the moment GitHub creates the run for a push, the head commit has a
+  `git-cicd decide` check (queued, then in progress), and a few seconds later,
+  when that job's first step runs, the pending `git-cicd verdict` status.
+  This holds when the push supersedes an older run too: nothing in the
+  workflow waits for another run, so the newer run's `decide` starts at once
+  instead of after the older run has finished cancelling.
+- Before GitHub has created the run (usually seconds after the push), the
+  commit may have no git-cicd check or status at all; that gap is the
+  platform's. A reader should treat an absent `git-cicd verdict` like a
+  pending one.
+- A run that is cancelled, superseded or dies leaves its commit's status
+  pending or failed, never green without a verdict. A superseded run fails
+  its `decide` job once it sees that the pull request's head has moved on,
+  and its report is FAILED for every job it needed.
+
+**Wait on the `git-cicd verdict` status.** In branch protection, require
+`git-cicd verdict` (a required check matches a status of that name). A script
+should read the commit's statuses (`GET /repos/{owner}/{repo}/commits/{ref}/status`,
+or `statusCheckRollup` in `gh pr view --json statusCheckRollup`, where it is a
+`StatusContext`), and wait while it is pending or absent. No job's check run
+carries the name, so a reader is never shown two things called
+`git-cicd verdict` that disagree; the `git-cicd report` check run holds the
+full report, and its state follows the verdict.
 
 ## The generated workflow
 
@@ -172,12 +208,18 @@ differ only in jobs that are not `cron` generate the same file.
 
 - Trigger: `pull_request` (opened, synchronize, reopened), every target
   branch; `branches` are decided by the tool.
-- Token: `contents: read`.
-- A newer push to the same pull request cancels the running one.
+- Token: `contents: read`. The `git-cicd decide` and `git-cicd report` jobs
+  also get `statuses: write`, the one write permission on `open`, and only to
+  set the `git-cicd verdict` status (pending at the start, the verdict at the
+  end); the jobs that run the config's scripts get no write permission.
+- A newer push to the same pull request cancels the older run's jobs that
+  run the config's scripts (a `concurrency` group per pull request and job on
+  the `run` job only; there is none on the workflow or on the status-posting
+  jobs, so the newer run's pending status never waits for the older run).
 - `decide` works out the needed jobs; `run` gives each needed job its own
   runner (`ubuntu-latest`), at most `max_parallel` at once, always with setup;
-  `verdict` (`git-cicd verdict`) collects the results, verifies the workflow
-  and reports.
+  `verdict` (`git-cicd report`) collects the results, verifies the workflow,
+  reports and sets the `git-cicd verdict` status.
 - Only GitHub's own `actions/checkout`, `actions/upload-artifact` and
   `actions/download-artifact`; no Python version is written anywhere: setup
   scripts install the Python they need (for example from `requires-python`).
@@ -305,7 +347,7 @@ Exit codes:
 | `decide --moment open --target B --source B --base SHA --head SHA [--json] [--changed-files-out PATH]` | one decision per declared job, with the reason; in Actions also writes `jobs`, `any`, `max_parallel` to `GITHUB_OUTPUT` |
 | `run-job JOB --moment open --target … --head SHA [--setup] [--result PATH]` | setup when asked, then the steps; result JSON with the times |
 | `generate` / `verify` | write / check `.github/workflows/git-cicd.yml` |
-| `report --decisions FILE --results DIR` | the report and verdict from `decide --json` and `run-job --result` files |
+| `report --decisions FILE --results DIR [--verdict-out PATH]` | the report and verdict from `decide --json` and `run-job --result` files; `--verdict-out` writes the status state (`success`/`failure`) and description, one per line |
 | `check […]` | the local command above |
 
 ## Not built yet

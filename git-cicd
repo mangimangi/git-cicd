@@ -1053,18 +1053,51 @@ def cmd_verify(args, root):
     return 0 if ok else 1
 
 
+STATUS_DESCRIPTION_MAX = 140  # GitHub's limit on a commit status description
+
+
+def status_description(verdict):
+    """The verdict line as a commit status description: one line, at most
+    STATUS_DESCRIPTION_MAX characters."""
+    text = " ".join(str(verdict).split())
+    if len(text) > STATUS_DESCRIPTION_MAX:
+        text = text[:STATUS_DESCRIPTION_MAX - 3].rstrip() + "..."
+    return text
+
+
+def write_verdict(path, passed, verdict):
+    """Write the commit status state (success or failure) and description,
+    one per line, for the workflow step that sets the `git-cicd verdict`
+    status."""
+    if not path:
+        return
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(("success" if passed else "failure") + "\n"
+                + status_description(verdict) + "\n")
+
+
 def cmd_report(args, root):
-    config = load_config(root, args.config)
     try:
+        config = load_config(root, args.config)
         check_moment(config, args.moment)
     except UsageError as e:
         summary = os.environ.get("GITHUB_STEP_SUMMARY")
         if summary:
             with open(summary, "a", encoding="utf-8") as f:
                 f.write(f"## git-cicd verdict: FAILED\n\n{e}\n")
+        write_verdict(args.verdict_out, False, f"FAILED - {e}")
+        raise
+    except ConfigError as e:
+        write_verdict(args.verdict_out, False,
+                      "FAILED - the config is invalid: " + "; ".join(e.errors))
         raise
     decision = load_decisions(args.decisions)
-    passed, _ = report(config, root, decision, load_results(args.results))
+    passed, verdict = report(config, root, decision,
+                             load_results(args.results))
+    write_verdict(args.verdict_out, passed, verdict)
     return 0 if passed else 1
 
 
@@ -1130,6 +1163,9 @@ def build_parser():
                    help="directory holding run-job --result files (any "
                         "nesting)")
     p.add_argument("--moment", default="open", choices=ALL_MOMENTS)
+    p.add_argument("--verdict-out", metavar="PATH",
+                   help="write the commit status state (success or failure) "
+                        "and description, one per line, to PATH")
 
     p = add("check", cmd_check, "decide, run the needed jobs one after "
             "another and report, locally (no GitHub needed)")
