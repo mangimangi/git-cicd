@@ -680,10 +680,9 @@ workflow* on `main`, job `release` (inputs for example
 `{"bump_type": "minor"}`) or `update-vendored` (for example
 `{"vendor": "mangimangi/git-semver"}`).
 
-On the integration branch the vendor-installed workflows these jobs replace
-(`version-bump.yml`, `check-vendor.yml`, `install-vendored.yml`) still exist
-beside them until the planning session removes them; they are
-vendor-protected, so no session changes them.
+The vendor-installed workflows these jobs replace (`version-bump.yml`,
+`check-vendor.yml`, `install-vendored.yml`) are removed from this repository;
+git-semver and git-vendored still install them into other repositories.
 
 ```bash
 ./git-cicd check --setup     # the first time

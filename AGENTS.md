@@ -37,17 +37,16 @@ from the Actions tab: **Manual**, *Run workflow* on `main`, job `release` or
 `{"bump_type": "minor"}` or `{"vendor": "mangimangi/git-semver"}`; empty for
 the defaults).
 
-On the integration branch the old vendor workflows (`version-bump.yml`,
-`check-vendor.yml`, `install-vendored.yml`) still exist next to these jobs
-until the planning session removes them; they are vendor-protected, so a
-session leaves them alone. Nothing on `main` changes until then.
+The old vendor workflows (`version-bump.yml`, `check-vendor.yml`,
+`install-vendored.yml`) are removed from this repository; these jobs replace
+them.
 
 ## Vendored tools
 
 This repository's own vendored tools (git-vendored and git-semver, under
-`.vendored/` with their workflows in `.github/workflows/`) are updated only by
-the owner running the **Install Vendored** workflow from the Actions tab (its
-weekly schedule updates them too); each update arrives as a pull request from
+`.vendored/`) are updated only by the `update-vendored` job: the owner runs it
+from the Actions tab (**Manual**, job `update-vendored`), and its weekly
+schedule updates them too; each update arrives as a pull request from
 `chore/install-<vendor>`. git-vendored itself came once from its documented
 bootstrap. Adopting repositories install and upgrade git-cicd the same way
 (`README.md`, "Installing").
