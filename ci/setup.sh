@@ -6,6 +6,11 @@
 # (itself installed into a small venv when missing), and installs the test-only dependencies into a
 # virtualenv the test step finds on disk. No Python version is written in the
 # workflow or the config: this script is the only place that decides it.
+#
+# It also installs bats-core (the shell tests under tests/bats/) into the
+# cache when `bats` is not on PATH: the pinned release's npm tarball (bats-core
+# publishes itself to npm as `bats`), checked against its sha256. Setup may
+# download; the tests themselves use no network.
 set -euo pipefail
 
 FLOOR="$(sed -n 's/^requires-python *= *">= *\([0-9][0-9.]*\)".*/\1/p' pyproject.toml | head -n1)"
@@ -16,6 +21,9 @@ fi
 CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/git-cicd"
 VENV="$CACHE/venv-$FLOOR"
 TOOLS="$CACHE/tools"   # holds uv when it has to be installed
+BATS_VERSION=1.11.1
+BATS_SHA256=1d8a88fc70bc5a518c7cf17e5201b80b24e9475be95abe6508b3197a64b73365
+BATS_DIR="$CACHE/bats"  # ci/test.sh runs $BATS_DIR/bin/bats when bats is not on PATH
 
 find_floor() {
     local candidate
@@ -49,5 +57,40 @@ fi
 
 "$PYTHON" -m venv --clear "$VENV"
 "$VENV/bin/python" -m pip install --quiet --upgrade pip
-"$VENV/bin/python" -m pip install --quiet pytest pytest-cov
+# coverage >= 7.10 measures subprocesses (pyproject.toml patch = ["subprocess"]).
+"$VENV/bin/python" -m pip install --quiet pytest pytest-cov "coverage>=7.10"
 "$VENV/bin/python" --version
+
+install_bats() {
+    if command -v bats >/dev/null 2>&1; then
+        echo "ci/setup.sh: using $(bats --version) at $(command -v bats)"
+        return 0
+    fi
+    if [ "$(cat "$BATS_DIR/VERSION" 2>/dev/null)" = "$BATS_VERSION" ] \
+            && [ -x "$BATS_DIR/bin/bats" ]; then
+        echo "ci/setup.sh: using bats $BATS_VERSION at $BATS_DIR/bin/bats"
+        return 0
+    fi
+    local tmp
+    tmp="$(mktemp -d)"
+    if ! curl -fsSL -o "$tmp/bats.tgz" \
+            "https://registry.npmjs.org/bats/-/bats-$BATS_VERSION.tgz"; then
+        echo "ci/setup.sh: cannot download bats $BATS_VERSION" >&2
+        rm -rf "$tmp"
+        return 1
+    fi
+    if ! echo "$BATS_SHA256  $tmp/bats.tgz" | sha256sum -c --quiet - >/dev/null 2>&1; then
+        echo "ci/setup.sh: bats $BATS_VERSION does not match its pinned sha256" >&2
+        rm -rf "$tmp"
+        return 1
+    fi
+    tar -xzf "$tmp/bats.tgz" -C "$tmp"
+    rm -rf "$BATS_DIR"
+    mkdir -p "$(dirname "$BATS_DIR")"
+    mv "$tmp/package" "$BATS_DIR"
+    echo "$BATS_VERSION" > "$BATS_DIR/VERSION"
+    rm -rf "$tmp"
+    echo "ci/setup.sh: installed bats $BATS_VERSION at $BATS_DIR/bin/bats"
+}
+
+install_bats

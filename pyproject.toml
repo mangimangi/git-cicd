@@ -9,8 +9,29 @@ dynamic = ["version"]
 testpaths = ["tests"]
 
 [tool.coverage.run]
-include = ["git-cicd"]
+# Measure the tool wherever it runs: in the pytest process, and in every
+# `python3 git-cicd ...` a test starts as a subprocess (coverage >= 7.10).
+# Tests run the root script and copies of it installed into temporary
+# repositories (tests/conftest.py Repo.install_tool); the absolute pattern
+# matches both whatever the subprocess's working directory is.
+include = ["*/git-cicd"]
+patch = ["subprocess"]
+parallel = true
+
+[tool.coverage.paths]
+# Report every copy of the script as the root git-cicd: one row. Aliases map
+# directories: the root first, then the install directories the tests copy the
+# script into: Repo.install_tool's default (install.sh's too) and the
+# tools/ directories of tests/test_workflow.py. A pattern may not end with a
+# wildcard, so each directory is named.
+git-cicd = ["./", "*/.vendored/pkg/git-cicd/", "*/tools/cicd/",
+            "*/tools/my cicd/"]
 
 [tool.coverage.report]
+# The test job fails below 99% line coverage of git-cicd (pytest-cov reads
+# this; so does a local `coverage report`). A line is excluded with
+# `# pragma: no cover` only when no test can reach it, with a comment saying
+# why.
+fail_under = 99
 show_missing = true
 skip_empty = true

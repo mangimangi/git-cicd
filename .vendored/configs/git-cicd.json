@@ -6,24 +6,28 @@
       "branches": ["**"],
       "paths": ["git-cicd", "install.sh", "templates/**", "tests/**", "pyproject.toml", "ci/**"],
       "setup": "ci/setup.sh",
-      "steps": ["ci/test.sh"]
+      "steps": ["ci/test.sh"],
+      "manual": false
+    },
+    "version-check": {
+      "name": "Version Check",
+      "on": ["open"],
+      "branches": ["main"],
+      "steps": [[".vendored/pkg/git-semver/git-semver", "check-bump"]],
+      "manual": false
     },
     "release": {
       "name": "Release",
       "on": ["merge"],
       "branches": ["main"],
-      "steps": ["ci/release.sh"],
-      "inputs": {
-        "bump_type": {"description": "Version bump type", "choices": ["patch", "minor", "major"], "default": "patch"},
-        "subdirectory": {"description": "Subdirectory to bump (leave empty for root)", "default": ""},
-        "changelog_description": {"description": "Changelog entry (what changed in this release)", "default": ""}
-      }
+      "steps": [".vendored/pkg/git-semver/release"]
     },
     "vendor-check": {
       "name": "Check Vendor Files",
       "on": ["open"],
       "branches": ["**"],
-      "steps": ["ci/vendor-check.sh"]
+      "steps": ["ci/vendor-check.sh"],
+      "manual": false
     },
     "update-vendored": {
       "name": "Install Vendored",

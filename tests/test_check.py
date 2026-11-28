@@ -180,11 +180,14 @@ def test_works_without_github_env(project):
 
 
 def test_token_passthrough(project):
-    project.script("ci/a.sh", 'echo "$GITHUB_TOKEN/$VENDOR_PAT" >> "$LOG"\n')
+    """check runs on open: GITHUB_TOKEN reaches the script, a VENDOR_PAT in
+    the caller's environment does not, as in the Open workflow."""
+    project.script("ci/a.sh", 'echo "$GITHUB_TOKEN/${VENDOR_PAT-unset}" '
+                   '>> "$LOG"\n')
     project.commit("script")
     check(project, "--job", "docs", "--force", GITHUB_TOKEN="t",
           VENDOR_PAT="p")
-    assert logged(project) == ["t/p"]
+    assert logged(project) == ["t/unset"]
 
 
 def test_stale_workflow_fails_verdict(project):

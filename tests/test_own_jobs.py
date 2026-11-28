@@ -1,8 +1,9 @@
-"""git-cicd's own jobs: the config declares test, release, vendor-check and
-update-vendored, and their ci/ scripts call the vendored tools the way the
-workflows they replace did. The tools are replaced by fakes that log their
-argv and environment: no test runs .vendored/install or the git-semver
-release."""
+"""git-cicd's own jobs: the config declares test, version-check, release,
+vendor-check and update-vendored, and their steps call the vendored tools the
+way the workflows they replace did. The tools are replaced by fakes that log
+their argv and environment: no test runs .vendored/install or the git-semver
+release. The version check also runs the real `git-semver check-bump`, which
+is read-only and local."""
 
 import json
 import os
@@ -16,25 +17,35 @@ from tests.conftest import ROOT, git_cicd
 def test_this_repository_declares_its_own_jobs():
     config = git_cicd.load_config(str(ROOT))
     jobs = config["jobs"]
-    assert list(jobs) == ["test", "release", "vendor-check", "update-vendored"]
+    assert list(jobs) == ["test", "version-check", "release", "vendor-check",
+                          "update-vendored"]
 
+    version = jobs["version-check"]
+    assert version["title"] == "Version Check"
+    assert version["on"] == ["open"] and version["branches"] == ["main"]
+    assert version["paths"] is None and version["manual"] is False
+    assert version["steps"] == [[".vendored/pkg/git-semver/git-semver",
+                                 "check-bump"]]
+
+    # release tags the landed commit with the version it carries: no
+    # subcommand, no ci/ script and no inputs (git-semver refuses them when
+    # bump_on is pull_request)
     release = jobs["release"]
     assert release["title"] == "Release"
     assert release["on"] == ["merge"] and release["branches"] == ["main"]
     assert release["paths"] is None and release["manual"] is True
-    assert release["steps"] == [["ci/release.sh"]]
-    assert {k: (v["choices"], v["default"], v["required"])
-            for k, v in release["inputs"].items()} == {
-        "bump_type": (["patch", "minor", "major"], "patch", False),
-        "subdirectory": (None, "", False),
-        "changelog_description": (None, "", False),
-    }
+    assert release["steps"] == [[".vendored/pkg/git-semver/release"]]
+    assert release["inputs"] == {}
+    assert not (ROOT / "ci" / "release.sh").exists()
 
     check = jobs["vendor-check"]
     assert check["title"] == "Check Vendor Files"
     assert check["on"] == ["open"] and check["branches"] == ["**"]
     assert check["paths"] is None
     assert check["steps"] == [["ci/vendor-check.sh"]]
+    # the open jobs run on pull requests, never by hand
+    assert check["manual"] is False and jobs["test"]["manual"] is False
+    assert version["manual"] is False
 
     update = jobs["update-vendored"]
     assert update["title"] == "Install Vendored"
@@ -45,6 +56,39 @@ def test_this_repository_declares_its_own_jobs():
             for k, v in update["inputs"].items()} == {
         "vendor": (None, "all"), "version": (None, "latest"),
         "private": (["true", "false"], "false")}
+
+
+def test_the_manual_form_lists_release_and_update_vendored():
+    """The committed Manual workflow's form, as generate writes it from this
+    repository's config: the job dropdown and update-vendored's three named
+    fields (release takes none)."""
+    from tests.test_workflow import form_fields
+    text = (ROOT / ".github/workflows/git-cicd-manual.yml").read_text()
+    config = git_cicd.load_config(str(ROOT))
+    assert text == git_cicd.render_workflows(config, "git-cicd")[
+        ".github/workflows/git-cicd-manual.yml"]
+    fields = form_fields(text)
+    assert fields == {
+        "job": {"description": "The config job to run", "required": True,
+                "type": "choice", "options": ["release", "update-vendored"]},
+        "vendor": {"description": "Vendor to update (or all) "
+                                  "(job update-vendored)",
+                   "required": False, "default": "all", "type": "string"},
+        "version": {"description": "Version to install (default: latest) "
+                                   "(job update-vendored)",
+                    "required": False, "default": "latest",
+                    "type": "string"},
+        "private": {"description": "Vendor repo is private (use VENDOR_PAT) "
+                                   "(job update-vendored)",
+                    "required": False, "default": "false", "type": "choice",
+                    "options": ["true", "false"]},
+    }
+
+
+def test_semver_bumps_in_the_pull_request():
+    config = json.loads((ROOT / ".vendored/configs/git-semver.json")
+                        .read_text())
+    assert config["bump_on"] == "pull_request"
 
 
 def test_semver_files_list_every_template():
@@ -59,7 +103,8 @@ import json, os, sys
 with open(os.environ["LOG"], "a") as f:
     f.write(json.dumps({"tool": sys.argv[0], "argv": sys.argv[1:],
                         "env": {k: v for k, v in os.environ.items()
-                                if k.startswith(("GITHUB_", "INPUT_", "GH_"))}})
+                                if k.startswith(("GITHUB_", "INPUT_", "GH_",
+                                                 "CICD_"))}})
             + "\\n")
 """
 
@@ -68,14 +113,15 @@ with open(os.environ["LOG"], "a") as f:
 def own(repo, tmp_path):
     """A repository with this repository's ci/ scripts and config, and fake
     vendored tools."""
-    for name in ("release.sh", "vendor-check.sh", "update-vendored.sh",
-                 "setup.sh", "test.sh"):
+    for name in ("vendor-check.sh", "update-vendored.sh", "setup.sh",
+                 "test.sh"):
         dest = repo.path / "ci" / name
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / "ci" / name, dest)
     repo.write(".vendored/configs/git-cicd.json",
                (ROOT / ".vendored/configs/git-cicd.json").read_text())
-    for fake in (".vendored/pkg/git-semver/release", ".vendored/install",
+    for fake in (".vendored/pkg/git-semver/release",
+                 ".vendored/pkg/git-semver/git-semver", ".vendored/install",
                  ".vendored/check"):
         repo.write(fake, FAKE, executable=True)
     repo.log = tmp_path / "calls.jsonl"
@@ -93,59 +139,90 @@ def run_job(repo, job, trigger, head, base=None, branch="main", inputs=None,
     run_env = {"LOG": str(repo.log), "GITHUB_TOKEN": "ghs_token"}
     run_env.update(env)
     if inputs is not None:
-        run_env["CICD_MANUAL_INPUTS"] = json.dumps(inputs)
+        run_env["CICD_MANUAL_FORM"] = json.dumps(inputs)
     result = repo.run("run-job", job, f"--trigger={trigger}",
                       f"--target={branch}", f"--source={branch}",
                       f"--base={base or head}", f"--head={head}", env=run_env)
     return result
 
 
-def test_release_bumps_on_a_merge(own):
+def test_release_tags_the_landed_commit_on_a_merge(own):
     before = own.commit("before")
     landed = own.commit("feat: something")
     result = run_job(own, "release", "merge", landed, base=before)
     assert result.returncode == 0, result.stdout + result.stderr
     (call,) = calls(own)
     assert call["tool"].endswith(".vendored/pkg/git-semver/release")
-    assert call["argv"] == ["bump"]
+    # no subcommand: release reads bump_on and tags what landed
+    assert call["argv"] == []
     env = call["env"]
-    assert env["GITHUB_EVENT_NAME"] == "push"
-    assert env["GITHUB_EVENT_BEFORE"] == before
-    assert env["GH_TOKEN"] == "ghs_token"
-    assert env["INPUT_BUMP_TYPE"] == "patch"
-    assert env["INPUT_SUBDIRECTORY"] == "" and \
-        env["INPUT_CHANGELOG_DESCRIPTION"] == ""
+    assert env["CICD_TRIGGER"] == "merge"
+    assert env["CICD_BASE"] == before and env["CICD_HEAD"] == landed
+    assert env["GITHUB_TOKEN"] == "ghs_token"
+    assert not any(k.startswith(("CICD_INPUT_", "INPUT_")) for k in env)
 
 
-def test_release_publishes_a_bump_commit(own):
-    before = own.commit("before")
-    landed = own.commit("chore: bump version to 1.2.3")
-    result = run_job(own, "release", "merge", landed, base=before)
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert [c["argv"] for c in calls(own)] == [["publish"]]
-
-
-def test_release_skips_an_install_commit(own):
-    before = own.commit("before")
-    landed = own.commit("chore: install git-semver v1.0.0")
-    result = run_job(own, "release", "merge", landed, base=before)
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert calls(own) == []
-    assert "nothing to release" in result.stdout
-
-
-def test_release_by_hand_with_inputs(own):
-    sha = own.commit("chore: bump version to 1.2.3")  # the subject is ignored
-    note = "it's \"new\" $HOME `id`\nline two"
-    result = run_job(own, "release", "manual", sha,
-                     inputs={"bump_type": "minor", "changelog_description":
-                             note})
+def test_release_by_hand_takes_no_inputs(own):
+    sha = own.commit("feat: something")
+    result = run_job(own, "release", "manual", sha, inputs={})
     assert result.returncode == 0, result.stdout + result.stderr
     (call,) = calls(own)
-    assert call["argv"] == ["bump"]
-    assert call["env"]["GITHUB_EVENT_NAME"] == "workflow_dispatch"
-    assert call["env"]["INPUT_BUMP_TYPE"] == "minor"
-    assert call["env"]["INPUT_CHANGELOG_DESCRIPTION"] == note
+    assert call["argv"] == []
+    assert call["env"]["CICD_TRIGGER"] == "manual"
+
+
+def test_version_check_runs_check_bump_on_a_pull_request(own):
+    base = own.commit("base")
+    own.git("checkout", "-q", "-b", "feature")
+    head = own.commit("change")
+    result = own.run("run-job", "version-check", "--trigger=open",
+                     "--target=main", "--source=feature", f"--base={base}",
+                     f"--head={head}", env={"LOG": str(own.log)})
+    assert result.returncode == 0, result.stdout + result.stderr
+    (call,) = calls(own)
+    assert call["tool"].endswith(".vendored/pkg/git-semver/git-semver")
+    assert call["argv"] == ["check-bump"]
+    assert call["env"]["CICD_BASE"] == base
+    assert call["env"]["CICD_HEAD"] == head
+
+
+@pytest.fixture
+def semver(own):
+    """The `own` repository with this repository's git-semver config and the
+    real vendored git-semver, at version 1.0.0."""
+    repo = own
+    repo.write(".vendored/configs/git-semver.json",
+               (ROOT / ".vendored/configs/git-semver.json").read_text())
+    tool = repo.path / ".vendored/pkg/git-semver/git-semver"
+    shutil.copy2(ROOT / ".vendored/pkg/git-semver/git-semver", tool)
+    repo.write("VERSION", "1.0.0\n")
+    repo.write("git-cicd", "old\n")
+    repo.base = repo.commit("base")
+    repo.git("checkout", "-q", "-b", "feature")
+    return repo
+
+
+def version_check(repo):
+    head = repo.commit("change")
+    return repo.run("run-job", "version-check", "--trigger=open",
+                    "--target=main", "--source=feature",
+                    f"--base={repo.base}", f"--head={head}")
+
+
+def test_version_check_fails_a_change_that_keeps_the_version(semver):
+    semver.write("git-cicd", "new\n")
+    result = version_check(semver)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "the version was not raised: VERSION is still 1.0.0" in \
+        result.stdout
+
+
+def test_version_check_passes_a_change_that_raises_the_version(semver):
+    semver.write("git-cicd", "new\n")
+    semver.write("VERSION", "1.0.1\n")
+    result = version_check(semver)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "FAIL" not in result.stdout
 
 
 def test_vendor_check_uses_the_base_and_the_source_branch(own):
@@ -198,5 +275,5 @@ def test_update_vendored_by_hand_private(own):
 
 
 def test_scripts_are_executable_and_named_by_the_config():
-    for name in ("release.sh", "vendor-check.sh", "update-vendored.sh"):
+    for name in ("vendor-check.sh", "update-vendored.sh"):
         assert os.access(ROOT / "ci" / name, os.X_OK), name

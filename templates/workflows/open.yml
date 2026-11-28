@@ -30,6 +30,13 @@
 # waits on a check does not change on an upgrade; the report names each step
 # with its owner and version.
 #
+# A run that needs no job still runs the `run` job, once, as the placeholder
+# entry `(nothing)`, whose row is `Nothing needed / <repo>:(nothing)` and
+# whose steps are all skipped. The job has no job-level `if`: GitHub does not
+# expand a matrix job's name when the job is skipped before its matrix is
+# evaluated, so a skipped `run` job would show its `name:` expression as raw
+# text.
+#
 # The `Verdict / git-cicd:verdict` a reader waits on is a COMMIT STATUS on the
 # pull request's head commit, not a job: a job's check run appears only when
 # the job is queued, and the job that reports is queued last. The first step
@@ -126,7 +133,6 @@ jobs:
   run:
     name: ${{ fromJSON(needs.decide.outputs.names)[matrix.job] }} / ${{ github.event.repository.name }}:${{ matrix.job }}
     needs: decide
-    if: needs.decide.outputs.any == 'true'
     runs-on: ubuntu-latest
     concurrency:
       group: git-cicd-open-${{ github.event.pull_request.number }}-${{ matrix.job }}
@@ -138,12 +144,14 @@ jobs:
         job: ${{ fromJSON(needs.decide.outputs.jobs) }}
     steps:
       - name: Checkout repository
+        if: matrix.job != '(nothing)'
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Run job
+        if: matrix.job != '(nothing)'
         env:
           JOB: ${{ matrix.job }}
           TARGET: ${{ github.base_ref }}
@@ -151,7 +159,6 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           GITHUB_TOKEN: ${{ github.token }}
-          VENDOR_PAT: ${{ secrets.VENDOR_PAT }}
         run: |
           mkdir -p "$RUNNER_TEMP/git-cicd"
           python3 __TOOL__ run-job "$JOB" --trigger=open --target="$TARGET" \
@@ -159,7 +166,7 @@ jobs:
             --setup --result="$RUNNER_TEMP/git-cicd/result.json"
 
       - name: Upload result
-        if: always()
+        if: always() && matrix.job != '(nothing)'
         uses: actions/upload-artifact@v4
         with:
           name: git-cicd-result-${{ matrix.job }}

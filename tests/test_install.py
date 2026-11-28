@@ -87,7 +87,9 @@ def test_code_lands_under_install_dir(tmp_path, project):
         assert (project / INSTALL_DIR / "templates" / "workflows"
                 / f"{trigger}.yml").read_bytes() == \
             (ROOT / "templates" / "workflows" / f"{trigger}.yml").read_bytes()
-    assert (project / MERGE).is_file() and (project / MANUAL).is_file()
+    assert (project / MERGE).is_file()
+    # the starter config declares no job, so none allows a manual run
+    assert not (project / MANUAL).exists()
     assert "Installing git-cicd v1.2.3 from mangimangi/git-cicd" in result.stdout
 
 
@@ -169,6 +171,8 @@ def test_workflow_generated_and_regenerated(tmp_path, project):
 
 
 def test_manifest_lists_installed_files(tmp_path, project):
+    """The manifest holds what git-cicd owns; the generated workflows are the
+    repository's to commit, so they are on disk but not in it."""
     manifest = tmp_path / "manifest.txt"
     result = run_install(project, stub_install_sh(tmp_path),
                          env={"VENDOR_MANIFEST": str(manifest)})
@@ -179,18 +183,20 @@ def test_manifest_lists_installed_files(tmp_path, project):
                      f"{INSTALL_DIR}/templates/workflows/merge.yml",
                      f"{INSTALL_DIR}/templates/workflows/cron.yml",
                      f"{INSTALL_DIR}/templates/workflows/manual.yml",
-                     ".vendored/manifests/git-cicd.schema", WORKFLOW, MERGE,
-                     MANUAL]
+                     ".vendored/manifests/git-cicd.schema"]
+    assert not any(f.startswith(".github/workflows/") for f in files)
+    for workflow in (WORKFLOW, MERGE):
+        assert (project / workflow).is_file()
     assert not (project / CRON).exists()
+    assert not (project / MANUAL).exists()
     assert CONFIG not in files
     for f in files:
         assert (project / f).is_file()
 
 
-def test_manifest_lists_the_cron_workflow_once_a_job_has_cron(tmp_path,
-                                                             project):
-    """The cron template is always installed; the generated cron workflow is
-    in the manifest only when generate wrote it."""
+def test_upgrade_drops_workflows_from_an_older_manifest(tmp_path, project):
+    """An upgrade from a version that listed the generated workflows: the new
+    manifest lists none of them, cron included, and all are on disk."""
     ci = project / "ci" / "n.sh"
     ci.parent.mkdir()
     ci.write_text("#!/bin/sh\n")
@@ -200,11 +206,16 @@ def test_manifest_lists_the_cron_workflow_once_a_job_has_cron(tmp_path,
         "on": ["cron"], "branches": ["main"], "cron": "0 4 * * *",
         "steps": ["ci/n.sh"]}}}))
     manifest = tmp_path / "manifest.txt"
+    manifest.write_text("\n".join([f"{INSTALL_DIR}/git-cicd", WORKFLOW,
+                                   MERGE, MANUAL]) + "\n")
     result = run_install(project, stub_install_sh(tmp_path),
                          env={"VENDOR_MANIFEST": str(manifest)})
     assert result.returncode == 0, result.stdout + result.stderr
     files = manifest.read_text().splitlines()
-    assert files[-4:] == [WORKFLOW, MERGE, CRON, MANUAL]
+    assert files[-1] == ".vendored/manifests/git-cicd.schema"
+    assert not any(f.startswith(".github/workflows/") for f in files)
+    for workflow in (WORKFLOW, MERGE, CRON, MANUAL):
+        assert (project / workflow).is_file()
     assert '    - cron: "0 4 * * *"' in (project / CRON).read_text()
 
 

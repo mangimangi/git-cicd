@@ -726,3 +726,135 @@ def test_cron_invalid_config_fails_every_head(repo, tmp_path):
     assert [l[:2] for l in lines] == [[MAIN_SHA, "failure"],
                                       [DEV_SHA, "failure"]]
     assert lines[0][2].startswith("FAILED - the config is invalid")
+
+
+@pytest.mark.parametrize("version_file", ["../VERSION", "/etc/hostname", ""])
+def test_version_file_outside_the_repository_is_never_read(owned, monkeypatch,
+                                                           version_file):
+    owned.write(".vendored/configs/git-semver.json",
+                json.dumps({"version_file": version_file}) + "\n")
+    owned.write("VERSION", "9.9.9\n")
+    text = owned_report(owned, monkeypatch)
+    assert "Unit Tests / medici:unit:test.sh  passed" in text
+    assert "@" not in text
+
+
+@pytest.mark.parametrize("content", ["\n", "1.0\x07\n"])
+def test_blank_or_unprintable_version_is_no_version(owned, monkeypatch,
+                                                    content):
+    owned.write("VERSION", content)
+    text = owned_report(owned, monkeypatch)
+    assert "Unit Tests / medici:unit:test.sh  passed" in text
+    assert "@" not in text
+
+
+def test_old_result_step_label_that_does_not_split_names_itself(
+        owned, monkeypatch):
+    config = git_cicd.load_config(str(owned.path))
+    result = owned_result()
+    result["steps"] = [{"step": "ci/test.sh 'unbalanced", "seconds": 2.0,
+                        "exit_code": 0, "error": None}]
+    monkeypatch.setenv("GITHUB_REPOSITORY", "someone/medici")
+    text = run_report(config, owned, owned_decision(), {"unit": result})[2]
+    assert "Unit Tests / medici:unit:test.sh 'unbalanced  passed" in text
+
+
+def test_job_rows_without_a_root_name_the_repository_without_a_version(owned):
+    owned.write("VERSION", "0.3.0\n")
+    config = git_cicd.load_config(str(owned.path))
+    rows = git_cicd.job_rows(config, owned_decision(),
+                             {"unit": owned_result()}, repo="medici")
+    names = [child[0] for child in rows[0]["children"]]
+    assert names[0] == "Unit Tests / medici:unit:setup.sh"
+    assert "Unit Tests / medici:unit:test.sh" in names
+    assert "Unit Tests / tool:unit:check.sh" in names
+    assert not any("@" in n for n in names)
+
+
+def test_refusal_with_stale_workflows_names_both(config, repo):
+    reason = 'job docs cannot be run by hand ("manual": false)'
+    dec = decision(docs=(False, reason))
+    dec.update(trigger="manual", job="docs", refused=reason)
+    ok, verdict, _ = run_report(config, repo, dec, {}, workflow=MISMATCH)
+    assert not ok
+    assert verdict == (f"FAILED - {reason}; the workflows do not match the "
+                       "config")
+
+
+def test_cron_branch_without_a_run_of_a_needed_job_is_not_needed(
+        cron_config, repo, tmp_path):
+    dec = cron_decision()
+    dec["runs"] = [r for r in dec["runs"] if r["branch"] == "main"]
+    result, lines = run_cron_report(repo, tmp_path, dec, [
+        cron_result("main", MAIN_SHA)])
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "not needed (not scheduled on dev)" in result.stdout
+    assert lines[0] == [MAIN_SHA, "success",
+                        "PASSED - 1 of 2 jobs needed, 1 passed"]
+    assert lines[1][:2] == [DEV_SHA, "success"]
+    assert lines[1][2].startswith("PASSED - 0 of 2 jobs needed")
+
+
+def test_cron_report_without_verdict_out_writes_nothing(cron_config, repo,
+                                                        tmp_path):
+    (tmp_path / "d.json").write_text(json.dumps(cron_decision()))
+    (tmp_path / "r").mkdir()
+    result = repo.run("report", "--trigger=cron", "--decisions",
+                      str(tmp_path / "d.json"), "--results",
+                      str(tmp_path / "r"))
+    assert result.returncode == 1
+    assert result.stdout.splitlines()[-1].startswith("FAILED - schedule")
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["d.json", "r",
+                                                          "repo"]
+
+
+def test_cron_report_without_decisions_writes_no_statuses(cron_config, repo,
+                                                          tmp_path):
+    out = tmp_path / "verdict.txt"
+    result = repo.run("report", "--trigger=cron", "--decisions",
+                      str(tmp_path / "missing.json"), "--results",
+                      str(tmp_path), "--verdict-out", str(out))
+    assert result.returncode == 1
+    assert result.stdout.splitlines()[-1].startswith(
+        "FAILED - no decisions: the decide step failed or did not run")
+    assert out.read_text() == ""
+
+
+@pytest.mark.parametrize("content", ["[]", '{"jobs": {}}', "not json"])
+def test_decisions_that_are_not_a_decision_record_fail(config, repo, tmp_path,
+                                                       content):
+    repo.install_tool()
+    assert repo.run("generate").returncode == 0
+    (tmp_path / "d.json").write_text(content)
+    out = tmp_path / "verdict.txt"
+    result = repo.run("report", "--decisions", str(tmp_path / "d.json"),
+                      "--results", str(tmp_path), "--verdict-out", str(out))
+    assert result.returncode == 1
+    assert out.read_text().splitlines() == [
+        "failure", "FAILED - no decisions: the decide step failed or did "
+        "not run (see its log)"]
+
+
+def test_report_names_ignored_form_fields(config, repo, tmp_path,
+                                          monkeypatch):
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    note = "ignored input vendor (job docs does not declare it)"
+    dec = decision(docs=(True, "manual run"))
+    dec.update(trigger="manual", job="docs", refused=None, ignored=[note])
+    results = {"docs": passed_result("docs", steps=("ci/docs.sh",),
+                                     setup=False)}
+    ok, verdict, text = run_report(config, repo, dec, results)
+    assert ok
+    assert f"\n  {note}\nworkflows match config\n" in text
+    assert f"\n- {note}\n" in summary.read_text()
+
+
+@pytest.mark.parametrize("ignored", [None, "not a list", []])
+def test_report_without_ignored_fields_has_no_notes(config, repo, ignored):
+    dec = decision(docs=(True, "manual run"))
+    dec.update(trigger="manual", job="docs", refused=None, ignored=ignored)
+    results = {"docs": passed_result("docs", steps=("ci/docs.sh",),
+                                     setup=False)}
+    _, _, text = run_report(config, repo, dec, results)
+    assert "ignored" not in text and "not a list" not in text

@@ -430,7 +430,8 @@ def test_github_output_written(repo, tmp_path):
     assert result.returncode == 0, result.stderr
     lines = out.read_text().splitlines()
     assert lines == ["previous=1", 'jobs=["test"]',
-                     'names={"test": "Test", "lint": "Lint", "release": "Release"}',
+                     'names={"test": "Test", "lint": "Lint", "release": "Release", '
+                     '"(nothing)": "Nothing needed"}',
                      "any=true", "max_parallel=2"]
 
 
@@ -444,7 +445,9 @@ def test_github_output_none_needed(repo, tmp_path):
                       env={"GITHUB_OUTPUT": str(out)})
     assert result.returncode == 0
     assert out.read_text().splitlines() == [
-        "jobs=[]", 'names={"test": "Test", "lint": "Lint", "release": "Release"}',
+        'jobs=["(nothing)"]',
+        'names={"test": "Test", "lint": "Lint", "release": "Release", '
+        '"(nothing)": "Nothing needed"}',
         "any=false", "max_parallel=3"]
 
 
@@ -465,7 +468,8 @@ def test_github_output_names_title_case_default_and_written(repo, tmp_path):
                       "--source", "feature", "--base", base, "--head", head,
                       env={"GITHUB_OUTPUT": str(out)})
     assert result.returncode == 0, result.stderr
-    assert 'names={"unit-tests": "Unit Tests", "pypi": "PyPI"}' in \
+    assert ('names={"unit-tests": "Unit Tests", "pypi": "PyPI", '
+            '"(nothing)": "Nothing needed"}') in \
         out.read_text().splitlines()
 
 
@@ -581,7 +585,7 @@ def test_manual_refusal_outputs_need_no_job(repo, tmp_path):
     assert result.returncode == 0
     assert "refused: job lint cannot be run by hand" in result.stdout
     outputs = dict(line.split("=", 1) for line in out.read_text().splitlines())
-    assert outputs["jobs"] == "[]" and outputs["any"] == "false"
+    assert outputs["jobs"] == '["(nothing)"]' and outputs["any"] == "false"
 
 
 def test_manual_needs_job(repo):
@@ -605,44 +609,84 @@ def test_job_refused_for_other_triggers(repo, trigger):
 
 # ── manual: declared inputs ─────────────────────────────────────────────────
 
-INPUT_JOBS = {"release": {"branches": ["main"], "steps": ["ci/bump.sh"],
-                          "inputs": {
-                              "bump_type": {"choices": ["patch", "minor",
-                                                        "major"],
-                                            "default": "patch"},
-                              "note": {"required": True}}}}
+INPUT_JOBS = {
+    "release": {"branches": ["main"], "steps": ["ci/bump.sh"],
+                "inputs": {
+                    "bump_type": {"choices": ["patch", "minor", "major"],
+                                  "default": "patch"},
+                    "note": {"required": True}}},
+    "update": {"branches": ["main"], "steps": ["ci/bump.sh"],
+               "inputs": {"vendor": {"default": "all"},
+                          "private": {"choices": ["false", "true"]},
+                          "free": {}}},
+    "hidden": {"branches": ["main"], "steps": ["ci/bump.sh"],
+               "manual": False, "inputs": {"secret": {"default": "s"}}},
+}
 
 
-def decide_inputs(repo, inputs):
+def decide_inputs(repo, form, job="release"):
     head = repo.git("rev-parse", "HEAD")
-    result = repo.run("decide", "--trigger=manual", "--job=release",
+    env = {} if form is None else {"CICD_MANUAL_FORM": form}
+    result = repo.run("decide", "--trigger=manual", f"--job={job}",
                       "--target=main", "--source=main", f"--base={head}",
-                      f"--head={head}", "--json",
-                      env={"CICD_MANUAL_INPUTS": inputs})
+                      f"--head={head}", "--json", env=env)
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
 
 
 def test_manual_inputs_accepted(repo):
     setup_repo(repo, jobs=INPUT_JOBS)
-    data = decide_inputs(repo, '{"bump_type": "minor", "note": "x"}')
+    data = decide_inputs(repo, json.dumps({
+        "job": "release", "bump_type": "minor", "note": "x",
+        "vendor": "all", "private": "false", "free": ""}))
     assert data["refused"] is None
+    assert data["ignored"] == []
     assert data["jobs"][0]["needed"] is True
 
 
-@pytest.mark.parametrize("inputs,reason", [
+def test_manual_fields_of_other_jobs_are_ignored_and_noted(repo):
+    setup_repo(repo, jobs=INPUT_JOBS)
+    data = decide_inputs(repo, json.dumps({
+        "job": "release", "bump_type": "major", "note": "x",
+        "vendor": "mangimangi/git-semver", "private": "true", "free": "",
+        "unknown": "u", "blank": ""}))
+    assert data["refused"] is None
+    assert data["ignored"] == [
+        "ignored input vendor (job release does not declare it)",
+        "ignored input private (job release does not declare it)",
+        "ignored input unknown (job release does not declare it)"]
+    assert data["jobs"][0]["needed"] is True
+    head = repo.git("rev-parse", "HEAD")
+    text = repo.run("decide", "--trigger=manual", "--job=release",
+                    "--target=main", "--source=main", f"--base={head}",
+                    f"--head={head}", env={"CICD_MANUAL_FORM": json.dumps(
+                        {"note": "x", "vendor": "v"})}).stdout
+    assert "  ignored input vendor (job release does not declare it)\n" in text
+
+
+def test_manual_without_the_form_takes_the_defaults(repo):
+    setup_repo(repo, jobs=INPUT_JOBS)
+    data = decide_inputs(repo, None, job="update")
+    assert data["refused"] is None and data["ignored"] == []
+    data = decide_inputs(repo, None)
+    assert data["refused"] == "job release: input note is required"
+
+
+@pytest.mark.parametrize("form,reason", [
     ("", "job release: input note is required"),
+    ('{"note": ""}', "job release: input note is required"),
     ('{"note": "x", "bump_type": "huge"}',
      "job release: input bump_type: 'huge' is not one of the choices "
      "(patch, minor, major)"),
-    ('{"note": "x", "extra": "y"}',
-     "job release declares no input 'extra' (declared: bump_type, note)"),
-    ("not json", "the inputs are not valid JSON"),
-    ('{"note": ["x"]}', "the inputs must be a JSON object of string values"),
+    ("not json", "the manual run's form values are not valid JSON"),
+    ('["x"]', "the manual run's form values must be a JSON object of "
+              "string values"),
+    ('{"note": ["x"]}', "the manual run's form values must be a JSON object "
+                        "of string values"),
 ])
-def test_manual_input_failures_are_refusals(repo, inputs, reason):
+def test_manual_input_failures_are_refusals(repo, form, reason):
     setup_repo(repo, jobs=INPUT_JOBS)
-    data = decide_inputs(repo, inputs)
+    data = decide_inputs(repo, form)
     assert data["refused"].startswith(reason), data["refused"]
     assert not data["jobs"][0]["needed"]
 
@@ -741,6 +785,25 @@ def test_cron_outputs(repo, tmp_path):
     assert "runs=" not in out.read_text()
 
 
+def test_cron_outputs_nothing_to_run_is_the_placeholder(repo, tmp_path):
+    """A schedule with no run gives the matrix the one placeholder entry, so
+    the workflow's `run` job is never skipped (a skipped matrix job shows its
+    `name:` expression unexpanded)."""
+    setup_cron(repo)
+    out = tmp_path / "out"
+    data, _ = decide_cron(repo, "0 4 * * *", env={"GITHUB_OUTPUT": str(out)})
+    assert data["runs"] == []
+    outputs = dict(line.split("=", 1) for line in out.read_text().splitlines())
+    assert outputs["any"] == "false"
+    assert json.loads(outputs["runs"]) == [
+        {"job": "(nothing)", "branch": "", "sha": "", "key": "(nothing)"}]
+    assert json.loads(outputs["names"])["(nothing)"] == "Nothing needed"
+
+
+def test_placeholder_is_no_valid_job_name():
+    assert not git_cicd.JOB_NAME_RE.match(git_cicd.NOTHING_JOB)
+
+
 def test_cron_needs_cron(repo):
     setup_cron(repo)
     result = repo.run("decide", "--trigger=cron")
@@ -754,3 +817,54 @@ def test_cron_needs_cron(repo):
     result = repo.run("decide", "--trigger=open", "--target=main")
     assert result.returncode == 2
     assert "--trigger open needs --source, --base, --head" in result.stderr
+
+
+def test_unknown_trigger_is_refused_by_the_module_api(repo):
+    setup_repo(repo)
+    config = git_cicd.load_config(str(repo.path))
+    message = "unknown trigger 'push' (allowed: open, merge, cron, manual)"
+    with pytest.raises(git_cicd.UsageError, match=r"unknown trigger 'push'") \
+            as e:
+        git_cicd.decide(config, str(repo.path), "push", "main", "f", "HEAD",
+                        "HEAD")
+    assert str(e.value) == message
+    with pytest.raises(git_cicd.UsageError) as e:
+        git_cicd.run_job(config, str(repo.path), "test", {"trigger": "push"})
+    assert str(e.value) == message
+
+
+def test_empty_base_is_not_a_commit(repo):
+    setup_repo(repo)
+    result = repo.run("decide", "--trigger=open", "--target=main",
+                      "--source=feature", "--base=", "--head=HEAD", "--json")
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    jobs = {j["name"]: j for j in data["jobs"]}
+    assert "base '' is not a commit in this repository" \
+        in jobs["test"]["reason"]
+
+
+def test_unrelated_histories_report_the_diff_failure(repo):
+    setup_repo(repo)
+    repo.git("checkout", "-q", "--orphan", "other")
+    repo.write("src/other.py", "y\n")
+    other = repo.commit("unrelated")
+    base = repo.git("rev-parse", "main")
+    result = repo.run("decide", "--trigger=open", "--target=main",
+                      "--source=other", f"--base={base}", f"--head={other}",
+                      "--json")
+    assert result.returncode == 0, result.stderr
+    jobs = {j["name"]: j for j in json.loads(result.stdout)["jobs"]}
+    assert "git diff failed: fatal:" in jobs["test"]["reason"]
+    assert jobs["test"]["needed"] is True
+
+
+def test_cron_text_lists_each_branch_and_run(repo):
+    heads = setup_cron(repo, branches=("main",))
+    result = repo.run("decide", "--trigger=cron", "--cron=0 3 * * *")
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.splitlines()
+    assert lines[0] == "git-cicd decide: trigger cron, schedule 0 3 * * *"
+    assert f"  branch main: {heads['main']}" in lines
+    assert "  branch dev: does not exist" in lines
+    assert f"  run nightly on main at {heads['main']}" in lines

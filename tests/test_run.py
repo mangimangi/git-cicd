@@ -161,7 +161,9 @@ def test_environment_reaches_step(repo, log):
         "CICD_TARGET_BRANCH": "main", "CICD_SOURCE_BRANCH": "feature",
         "CICD_BASE": base, "CICD_HEAD": head,
         "CICD_CHANGED_FILES": values["CICD_CHANGED_FILES"],
-        "GITHUB_TOKEN": "ghs_tok", "VENDOR_PAT": "pat value $x",
+        # open runs a pull request's code: VENDOR_PAT (which may write) is
+        # dropped even when the caller has it
+        "GITHUB_TOKEN": "ghs_tok", "VENDOR_PAT": "",
     }
     assert os.path.isabs(values["CICD_CHANGED_FILES"])
     assert (log.parent / "log.txt.changed").read_text() == "src/app.py\n"
@@ -169,6 +171,18 @@ def test_environment_reaches_step(repo, log):
     # the changed-files file is cleaned up after the job
     assert not os.path.exists(values["CICD_CHANGED_FILES"])
     assert "ghs_tok" not in result.stdout + result.stderr
+    assert "pat value" not in result.stdout + result.stderr
+
+
+def test_open_step_has_no_vendor_pat_variable(repo, log):
+    """VENDOR_PAT is removed on open, not set empty."""
+    repo.script("ci/env.sh", 'echo "${VENDOR_PAT-unset}" >> "$LOG"\n')
+    base, head = setup_repo(repo, {"envjob": {
+        "on": ["open"], "branches": ["**"], "steps": ["ci/env.sh"]}}, log)
+    result = run_job(repo, "envjob", base, head,
+                     env=env_for(log, VENDOR_PAT="pat_token"))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert logged(log) == ["unset"]
 
 
 def test_merge_environment_reaches_step(repo, log):
@@ -183,10 +197,12 @@ def test_merge_environment_reaches_step(repo, log):
     landed = repo.commit("landed")
     result = repo.run("run-job", "envjob", "--trigger=merge", "--target=main",
                       "--source=main", f"--base={before}", f"--head={landed}",
-                      env=env_for(log))
+                      env=env_for(log, GITHUB_TOKEN="ghs_tok",
+                                  VENDOR_PAT="pat_token"))
     assert result.returncode == 0, result.stdout + result.stderr
-    values = dict(line.split("=", 1) for line in logged(log)[:7])
+    values = dict(line.split("=", 1) for line in logged(log)[:9])
     assert values == {
+        "GITHUB_TOKEN": "ghs_tok", "VENDOR_PAT": "pat_token",
         "CICD_TRIGGER": "merge", "CICD_JOB": "envjob",
         "CICD_TARGET_BRANCH": "main", "CICD_SOURCE_BRANCH": "main",
         "CICD_BASE": before, "CICD_HEAD": landed,
@@ -240,7 +256,7 @@ def test_manual_run_job_refusals(repo, log, job, branch, reason):
 
 # ── declared inputs ─────────────────────────────────────────────────────────
 
-DUMP_INPUTS = """env | grep '^CICD_INPUT_\\|^CICD_MANUAL_INPUTS=' | sort > "$LOG"
+DUMP_INPUTS = """env | grep '^CICD_INPUT_\\|^CICD_MANUAL_FORM=' | sort > "$LOG"
 printf '%s' "$CICD_INPUT_TEXT" > "$LOG.text"
 """
 
@@ -260,7 +276,7 @@ def setup_inputs(repo, job=None):
 def run_inputs(repo, sha, log, trigger="manual", inputs=None, **more):
     env = env_for(log, **more)
     if inputs is not None:
-        env["CICD_MANUAL_INPUTS"] = inputs
+        env["CICD_MANUAL_FORM"] = inputs
     return repo.run("run-job", "j", f"--trigger={trigger}", "--target=main",
                     "--source=main", f"--base={sha}", f"--head={sha}", env=env)
 
@@ -275,7 +291,7 @@ def test_manual_value_reaches_the_step_literally(repo, log):
     lines = logged(log)
     assert "CICD_INPUT_KIND=b" in lines
     assert "CICD_INPUT_EMPTY=" in lines
-    assert not any(l.startswith("CICD_MANUAL_INPUTS=") for l in lines)
+    assert not any(l.startswith("CICD_MANUAL_FORM=") for l in lines)
 
 
 @pytest.mark.parametrize("trigger", ["open", "merge"])
@@ -304,11 +320,11 @@ def test_undeclared_inherited_inputs_are_dropped(repo, log):
 
 
 @pytest.mark.parametrize("inputs,reason", [
-    ("{nope", "the inputs are not valid JSON"),
-    ('["a"]', "the inputs must be a JSON object of string values"),
-    ('{"text": 1}', "the inputs must be a JSON object of string values"),
-    ('{"other": "x"}',
-     "job j declares no input 'other' (declared: text, kind, empty)"),
+    ("{nope", "the manual run's form values are not valid JSON"),
+    ('["a"]', "the manual run's form values must be a JSON object of "
+              "string values"),
+    ('{"text": 1}', "the manual run's form values must be a JSON object of "
+                    "string values"),
     ('{"kind": "c"}', "job j: input kind: 'c' is not one of the choices (a, b)"),
 ])
 def test_manual_input_failures_refuse_the_run(repo, log, inputs, reason):
@@ -323,6 +339,14 @@ def test_missing_required_input_refuses_the_run(repo, log):
     job = dict(INPUT_JOB, inputs={"repo": {"required": True}})
     sha = setup_inputs(repo, job)
     result = run_inputs(repo, sha, log, inputs="{}")
+    assert result.returncode == 2
+    assert "job j: input repo is required" in result.stderr
+    # an empty field of the form is missing
+    result = run_inputs(repo, sha, log, inputs='{"job": "j", "repo": ""}')
+    assert result.returncode == 2
+    assert "job j: input repo is required" in result.stderr
+    # without the form every input is its default: a required one is missing
+    result = run_inputs(repo, sha, log)
     assert result.returncode == 2
     assert "job j: input repo is required" in result.stderr
     # on another trigger a required input is the empty string
@@ -433,7 +457,7 @@ def test_cron_environment_reaches_step(repo, log):
     sha = repo.commit("head")
     result = repo.run("run-job", "envjob", "--trigger=cron", "--target=main",
                       "--source=main", f"--base={sha}", f"--head={sha}",
-                      env=env_for(log, CICD_MANUAL_INPUTS='{"vendor": "x"}'))
+                      env=env_for(log, CICD_MANUAL_FORM='{"vendor": "x"}'))
     assert result.returncode == 0, result.stdout + result.stderr
     lines = logged(log)
     values = dict(line.split("=", 1) for line in lines[:7])
@@ -475,3 +499,38 @@ def test_run_job_function(repo, log):
              "base": "HEAD~1", "head": "HEAD"}
     result = git_cicd.run_job(config, str(repo.path), "t", facts)
     assert result["state"] == "passed"
+
+
+def test_a_step_that_removes_the_changed_files_list_still_passes(repo, log,
+                                                                  tmp_path):
+    repo.script("ci/a.sh", 'rm "$CICD_CHANGED_FILES"\n' + LOG_STEP)
+    base, head = setup_repo(repo, {"t": {
+        "on": ["open"], "branches": ["**"], "steps": ["ci/a.sh"]}}, log)
+    out = tmp_path / "result.json"
+    result = run_job(repo, "t", base, head, "--result", str(out),
+                     env=env_for(log))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert logged(log) == ["a.sh"]
+    assert json.loads(out.read_text())["state"] == "passed"
+
+
+def test_manual_run_gets_only_its_own_fields(repo, log):
+    """The form holds every manual job's fields: run-job passes the chosen
+    job only those it declares, says which others it ignored (those not at
+    their form default) and never passes the form on."""
+    repo.script("ci/inputs.sh", DUMP_INPUTS)
+    repo.config({"jobs": {
+        "j": INPUT_JOB,
+        "other": {"branches": ["**"], "steps": ["ci/inputs.sh"],
+                  "inputs": {"vendor": {"default": "all"},
+                             "private": {"choices": ["false", "true"]}}}}})
+    sha = repo.commit("base")
+    form = {"job": "j", "text": "mine", "kind": "b", "empty": "",
+            "vendor": "someone", "private": "false"}
+    result = run_inputs(repo, sha, log, inputs=json.dumps(form))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert ("==> git-cicd: ignored input vendor (job j does not declare it)"
+            in result.stdout)
+    assert "private" not in result.stdout
+    assert sorted(logged(log)) == ["CICD_INPUT_EMPTY=", "CICD_INPUT_KIND=b",
+                                   "CICD_INPUT_TEXT=mine"]
