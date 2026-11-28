@@ -1,0 +1,7 @@
+{
+  "repo": "mangimangi/git-vendored",
+  "install_branch": "chore/install-git-vendored",
+  "protected": [
+    ".vendored/**"
+  ]
+}
