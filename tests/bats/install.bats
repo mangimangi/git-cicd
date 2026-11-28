@@ -53,10 +53,9 @@ install() {
         "$INSTALL_DIR/templates/workflows/merge.yml" \
         "$INSTALL_DIR/templates/workflows/cron.yml" \
         "$INSTALL_DIR/templates/workflows/manual.yml" \
-        .vendored/manifests/git-cicd.schema \
-        .github/workflows/git-cicd-open.yml \
-        .github/workflows/git-cicd-merge.yml \
-        .github/workflows/git-cicd-manual.yml)" ]
+        .vendored/manifests/git-cicd.schema)" ]
+    # the generated workflows are the repository's to commit, never protected
+    ! grep -q '^\.github/workflows/' "$MANIFEST"
 }
 
 @test "VENDOR_REF names the version over the argument" {
@@ -78,6 +77,10 @@ install() {
                       "branches": ["main"], "steps": ["ci/nightly.sh"]}}}
 JSON
     cp .vendored/configs/git-cicd.json "$BATS_TEST_TMPDIR/config.before"
+    # the manifest of a version that listed the generated workflows
+    printf '%s\n' "$INSTALL_DIR/git-cicd" .github/workflows/git-cicd-open.yml \
+        .github/workflows/git-cicd-merge.yml \
+        .github/workflows/git-cicd-manual.yml > "$MANIFEST"
     install v1.3.0
     [ "$status" -eq 0 ]
     [[ "$output" != *"Created .vendored/configs/git-cicd.json"* ]]
@@ -86,7 +89,11 @@ JSON
     [ ! -e "$INSTALL_DIR/templates/workflow.yml" ]
     [ ! -e .github/workflows/git-cicd.yml ]
     grep -q "0 3 \* \* \*" .github/workflows/git-cicd-cron.yml
-    grep -qx .github/workflows/git-cicd-cron.yml "$MANIFEST"
+    for trigger in open merge cron manual; do
+        [ -f ".github/workflows/git-cicd-$trigger.yml" ]
+    done
+    grep -qx "$INSTALL_DIR/git-cicd" "$MANIFEST"
+    ! grep -q '^\.github/workflows/' "$MANIFEST"
 }
 
 @test "without VENDOR_INSTALL_DIR the install refuses" {

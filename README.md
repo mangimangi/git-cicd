@@ -491,8 +491,7 @@ The cron workflow (`Cron`):
   writes no `git-cicd-cron.yml` and removes an existing one (saying so; commit
   the removal), and `verify` fails while it is still there: GitHub needs an
   event under `on:`, and a schedule must never fire with nothing to run. The
-  template is installed either way, and the install manifest lists only the
-  workflows `generate` wrote.
+  template is installed either way.
 - **GitHub runs schedules only from the default branch's copy of the file**,
   on the default branch's ref. A schedule added on another branch does
   nothing until it reaches the default branch, and decide reads the default
@@ -521,9 +520,11 @@ The cron workflow (`Cron`):
   `Report / git-cicd:report` check follows; a missing branch has no commit to
   carry a status and fails the run.
 
-**The generate/verify rule.** The platform's token cannot push workflow files,
-so CI never regenerates. Whoever upgrades git-cicd or changes the config runs
-`generate` and commits what it writes in the same pull request.
+**The generate/verify rule.** The generated workflows are the repository's to
+commit (see "Who owns what" under Installing). The platform's token cannot push
+workflow files, so CI never regenerates. Whoever upgrades
+git-cicd or changes the config runs `generate` and commits what it writes in
+the same pull request, from any branch; the vendor check accepts it.
 `git-cicd verify` regenerates every file in memory, compares each whole file,
 and fails naming the command to run when one is missing or differs, or when
 the old single file is still there; that catches a stale file and any hand
@@ -535,8 +536,9 @@ git-cicd up to 0.0.2 generated one file, `.github/workflows/git-cicd.yml`, for
 every trigger. In a repository that still has it, `generate` writes
 `.github/workflows/git-cicd-open.yml` and **removes the old file**; commit
 the new file and the deletion together. Until then `verify` fails (and so does
-the verdict), naming the command to run. The install pull request of an
-upgrade does this for you, since every install runs `generate`. Then point
+the verdict), naming the command to run. Every install runs `generate`, so the
+install pull request of an upgrade does this for you when it may carry workflow
+files; otherwise run `generate` and commit from any branch. Then point
 branch protection and anything else that waited on `git-cicd verdict` at
 `Verdict / git-cicd:verdict`.
 
@@ -550,16 +552,19 @@ to install or upgrade it.
    (`.github/workflows/install-vendored.yml`), choose *Run workflow* and enter
    `mangimangi/git-cicd` as the vendor (the version defaults to the latest).
 2. The workflow opens the install pull request from the branch
-   `chore/install-git-cicd`. That pull request carries the tool, the schema,
-   the config when it is missing, and the regenerated per-trigger workflows
+   `chore/install-git-cicd`. That pull request carries the tool, the
+   templates, the schema and the config when it is missing. The install also
+   regenerates the per-trigger workflows
    (`.github/workflows/git-cicd-open.yml`, `git-cicd-merge.yml`,
    `git-cicd-manual.yml`, and `git-cicd-cron.yml` when a job has `cron` in
-   `on`; on the first upgrade from the single
-   file, also the deletion of `.github/workflows/git-cicd.yml`). Review and
-   merge it like any other.
-3. Upgrades are the same run (the workflow's weekly schedule also updates every
-   vendor); each one opens a new install pull request with the regenerated
-   workflow.
+   `on`; on the first upgrade from the single file, also the deletion of
+   `.github/workflows/git-cicd.yml`), but the pull request may arrive without
+   them: one pushed with a token that may not write workflow files leaves
+   them out. Review and merge it like any other.
+3. Then, if the workflows are missing or stale (`git-cicd verify` fails),
+   run `generate` and commit what it writes, from any branch (see below).
+4. Upgrades are the same run (the workflow's weekly schedule also updates every
+   vendor); each one opens a new install pull request.
 
 **The one exception is git-vendored itself.** A repository with no `.vendored/`
 yet gets git-vendored once from git-vendored's documented bootstrap (the
@@ -585,17 +590,24 @@ What lands where:
 | `.vendored/pkg/git-cicd/templates/workflows/<trigger>.yml` | the templates `generate` fills, one per generated trigger | replaced |
 | `.vendored/manifests/git-cicd.schema` | the config schema, for `.vendored/audit` | replaced |
 | `.vendored/configs/git-cicd.json` | your config: the jobs | **created once**, only when missing; never overwritten |
-| `.github/workflows/git-cicd-<trigger>.yml` | the generated workflows | **regenerated on every install**, so an upgrade reaches them in the install pull request |
+| `.github/workflows/git-cicd-<trigger>.yml` | the generated workflows: **the repository's**, not in the install manifest | **regenerated on disk on every install**; you commit them (the install pull request may not carry them) |
 
 The default config declares no jobs (`"jobs": {}`, `"needs_nothing": []`), so
-a fresh install validates and needs nothing until you declare jobs. The config
-and the generated workflows are listed as editable (`_vendor.allowed`) for
-git-vendored's check, the workflows as the pattern
-`.github/workflows/git-cicd-*.yml`, which covers the files of triggers still to
-come; the tool's own files are protected. (A repository first installed before
-this pattern keeps the editable list it was registered with; its install pull
-requests regenerate the workflows from the install branch, which the check
-lets through.)
+a fresh install validates and needs nothing until you declare jobs.
+
+**Who owns what.** The install manifest (`.vendored/manifests/git-cicd.files`)
+lists only what git-cicd owns: the tool, its templates and the schema; those
+are protected. The generated workflows are the repository's, allowed and never
+protected: `install.sh`
+writes them to disk but never lists them in the manifest, and the installed
+config lists them as editable (`_vendor.allowed`, the pattern
+`.github/workflows/git-cicd-*.yml`, which covers the files of triggers still
+to come) along with the config itself. So the fix for a missing or stale
+workflow is always the same: run `generate` and commit the result from any
+branch, which the vendor check accepts. (A repository registered before this
+pattern keeps the editable list it was registered with; add
+`.github/workflows/git-cicd-*.yml` to `_vendor.allowed` in
+`.vendored/configs/git-cicd.json`.)
 
 **Whoever changes the config runs**
 
