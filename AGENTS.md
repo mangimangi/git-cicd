@@ -35,7 +35,7 @@ to install it.
 After changing `.vendored/configs/git-cicd.json` or a template under
 `templates/workflows/`, run `./git-cicd generate` and commit the generated
 workflows (`.github/workflows/git-cicd-<trigger>.yml`, one per trigger;
-`git-cicd-open.yml`, `git-cicd-merge.yml`, `git-cicd-cron.yml` and `git-cicd-manual.yml`; the cron file exists only while a job has `cron` in `on`, the manual file only while a job allows manual runs, and the manual file's form lists the manual jobs and their inputs); the verdict fails while they disagree.
+`git-cicd-open.yml`, `git-cicd-merge.yml`, `git-cicd-cron.yml` and `git-cicd-manual.yml`; the merge file exists only while a job has `merge` in `on` and its push `branches` are those jobs' branches, the cron file only while a job has `cron` in `on`, the manual file only while a job allows manual runs, and the manual file's form lists the manual jobs and their inputs); the verdict fails while they disagree.
 
 ## This repository's jobs
 
