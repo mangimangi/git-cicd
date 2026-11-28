@@ -61,6 +61,12 @@ JOB_FIELDS = ("name", "on", "branches", "paths", "setup", "steps", "cron", "manu
 INPUT_FIELDS = ("description", "required", "default", "choices")
 
 JOB_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+# The `run` matrix entry of a run that needs no job. A matrix job skipped by a
+# job-level `if` shows its `name:` expression unexpanded, so the workflows
+# never skip `run`: they run this entry and skip its steps. Its name is no
+# valid job name (JOB_NAME_RE), so it cannot be a config job's.
+NOTHING_JOB = "(nothing)"
+NOTHING_TITLE = "Nothing needed"
 INPUT_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 # Every declared input reaches a script as CICD_INPUT_<NAME upper-cased>.
 INPUT_ENV_PREFIX = "CICD_INPUT_"
@@ -825,9 +831,12 @@ def write_github_output(decision):
     if not path:
         return
     with open(path, "a", encoding="utf-8") as f:
-        f.write(f"jobs={json.dumps(needed_jobs(decision))}\n")
+        # the matrix is never empty: a run that needs nothing runs the
+        # placeholder entry, whose steps the workflow skips (NOTHING_JOB)
+        f.write(f"jobs={json.dumps(needed_jobs(decision) or [NOTHING_JOB])}\n")
         names = {j["name"]: j.get("title") or default_title(j["name"])
                  for j in decision["jobs"]}
+        names[NOTHING_JOB] = NOTHING_TITLE
         f.write(f"names={json.dumps(names)}\n")
         any_run = decision["runs"] if decision["trigger"] == "cron" \
             else needed_jobs(decision)
@@ -836,7 +845,9 @@ def write_github_output(decision):
         if decision["trigger"] == "cron":
             # the cron matrix: one entry per (job, branch), cron only, so
             # the outputs of the other triggers stay as they are
-            f.write(f"runs={json.dumps(decision['runs'])}\n")
+            runs = decision["runs"] or [{"job": NOTHING_JOB, "branch": "",
+                                         "sha": "", "key": NOTHING_JOB}]
+            f.write(f"runs={json.dumps(runs)}\n")
 
 
 def write_changed_files(path, files):

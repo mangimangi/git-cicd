@@ -249,6 +249,7 @@ request they are:
 |---|---|---|
 | `Decide / git-cicd:decide` | decides which jobs the change needs; posts the pending status | check run (a job) |
 | `<name> / <repo>:<job>` | one per needed job, for example `Unit Tests / medici:unit-tests` | check run (a job) |
+| `Nothing needed / <repo>:(nothing)` | only when the run needs no job: a placeholder whose steps are all skipped | check run (a job) |
 | `Report / git-cicd:report` | collects the results, writes the report, posts the final status | check run (a job) |
 | `Verdict / git-cicd:verdict` | the verdict: **the one object a reader waits on** | commit status |
 
@@ -262,6 +263,21 @@ medici:unit-tests`, `Merge / Decide / git-cicd:decide`,
 `Verdict / git-cicd:verdict`. No row or status name carries a version: it is
 what branch protection and anything else that waits on a check refers to, and
 it does not change when a tool is upgraded.
+
+**A run that needs no job** (on any trigger: a pull request that changes only
+`needs_nothing` files, a push to a branch no `merge` job names, a schedule
+with nothing to run) shows `Decide / git-cicd:decide`,
+`Nothing needed / <repo>:(nothing)` and `Report / git-cicd:report`, all
+green, and the `Verdict / git-cicd:verdict` status as always (for example
+`PASSED - 0 of 3 jobs needed: only needs_nothing files changed`). The
+placeholder row is the workflow's `run` job, run once for the placeholder
+entry `(nothing)` with every step skipped (it takes a runner for a few
+seconds). The `run` job is never skipped as a whole: GitHub does not expand
+the name of a matrix job that is skipped before its matrix is evaluated, so a
+skipped `run` job would show its raw `${{ ... }}` name expression as a row.
+`(nothing)` is no valid job name, so no config job's row can look like it.
+The placeholder uploads no result, so the report and the verdict are the
+same as without it.
 
 ### The report
 
@@ -648,7 +664,7 @@ Exit codes:
 | Command | What |
 |---|---|
 | `validate [--config PATH]` | load and validate the config: `config ok: N jobs` or every error |
-| `decide --trigger open\|merge\|manual --target B --source B --base SHA --head SHA [--job NAME] [--json] [--changed-files-out PATH]`, or `decide --trigger cron --cron EXPR [--json]` | one decision per declared job, with the reason; `--job` names the job of a manual run (required with `--trigger manual`, refused with any other); `--cron` is the schedule that fired (required with `--trigger cron`, refused with any other); in Actions also writes `jobs`, `names`, `any`, `max_parallel` (and on cron `runs`) to `GITHUB_OUTPUT` |
+| `decide --trigger open\|merge\|manual --target B --source B --base SHA --head SHA [--job NAME] [--json] [--changed-files-out PATH]`, or `decide --trigger cron --cron EXPR [--json]` | one decision per declared job, with the reason; `--job` names the job of a manual run (required with `--trigger manual`, refused with any other); `--cron` is the schedule that fired (required with `--trigger cron`, refused with any other); in Actions also writes `jobs`, `names`, `any`, `max_parallel` (and on cron `runs`) to `GITHUB_OUTPUT`, where `jobs` (and `runs`) is the placeholder `(nothing)` when no job is needed |
 | `run-job JOB --trigger open\|merge\|cron\|manual --target … --head SHA [--setup] [--result PATH]` | setup when asked, then the steps; result JSON with the times |
 | `generate` / `verify` | write / check the generated workflows (`.github/workflows/git-cicd-open.yml`, `.github/workflows/git-cicd-merge.yml`, `.github/workflows/git-cicd-manual.yml`, and `.github/workflows/git-cicd-cron.yml` when a job has `cron` in `on`); `generate` removes, and `verify` fails on, the old `.github/workflows/git-cicd.yml` |
 | `report --decisions FILE --results DIR [--trigger open\|merge\|cron\|manual] [--verdict-out PATH]` | the report and verdict from `decide --json` and `run-job --result` files; `--verdict-out` writes the status state (`success`/`failure`) and description, one per line (on cron one line per branch head: `<sha> TAB <state> TAB <description>`) |

@@ -430,7 +430,8 @@ def test_github_output_written(repo, tmp_path):
     assert result.returncode == 0, result.stderr
     lines = out.read_text().splitlines()
     assert lines == ["previous=1", 'jobs=["test"]',
-                     'names={"test": "Test", "lint": "Lint", "release": "Release"}',
+                     'names={"test": "Test", "lint": "Lint", "release": "Release", '
+                     '"(nothing)": "Nothing needed"}',
                      "any=true", "max_parallel=2"]
 
 
@@ -444,7 +445,9 @@ def test_github_output_none_needed(repo, tmp_path):
                       env={"GITHUB_OUTPUT": str(out)})
     assert result.returncode == 0
     assert out.read_text().splitlines() == [
-        "jobs=[]", 'names={"test": "Test", "lint": "Lint", "release": "Release"}',
+        'jobs=["(nothing)"]',
+        'names={"test": "Test", "lint": "Lint", "release": "Release", '
+        '"(nothing)": "Nothing needed"}',
         "any=false", "max_parallel=3"]
 
 
@@ -465,7 +468,8 @@ def test_github_output_names_title_case_default_and_written(repo, tmp_path):
                       "--source", "feature", "--base", base, "--head", head,
                       env={"GITHUB_OUTPUT": str(out)})
     assert result.returncode == 0, result.stderr
-    assert 'names={"unit-tests": "Unit Tests", "pypi": "PyPI"}' in \
+    assert ('names={"unit-tests": "Unit Tests", "pypi": "PyPI", '
+            '"(nothing)": "Nothing needed"}') in \
         out.read_text().splitlines()
 
 
@@ -581,7 +585,7 @@ def test_manual_refusal_outputs_need_no_job(repo, tmp_path):
     assert result.returncode == 0
     assert "refused: job lint cannot be run by hand" in result.stdout
     outputs = dict(line.split("=", 1) for line in out.read_text().splitlines())
-    assert outputs["jobs"] == "[]" and outputs["any"] == "false"
+    assert outputs["jobs"] == '["(nothing)"]' and outputs["any"] == "false"
 
 
 def test_manual_needs_job(repo):
@@ -739,6 +743,25 @@ def test_cron_outputs(repo, tmp_path):
     repo.run("decide", "--trigger=open", "--target=main", "--source=f",
              f"--base={base}", f"--head={base}", env={"GITHUB_OUTPUT": str(out)})
     assert "runs=" not in out.read_text()
+
+
+def test_cron_outputs_nothing_to_run_is_the_placeholder(repo, tmp_path):
+    """A schedule with no run gives the matrix the one placeholder entry, so
+    the workflow's `run` job is never skipped (a skipped matrix job shows its
+    `name:` expression unexpanded)."""
+    setup_cron(repo)
+    out = tmp_path / "out"
+    data, _ = decide_cron(repo, "0 4 * * *", env={"GITHUB_OUTPUT": str(out)})
+    assert data["runs"] == []
+    outputs = dict(line.split("=", 1) for line in out.read_text().splitlines())
+    assert outputs["any"] == "false"
+    assert json.loads(outputs["runs"]) == [
+        {"job": "(nothing)", "branch": "", "sha": "", "key": "(nothing)"}]
+    assert json.loads(outputs["names"])["(nothing)"] == "Nothing needed"
+
+
+def test_placeholder_is_no_valid_job_name():
+    assert not git_cicd.JOB_NAME_RE.match(git_cicd.NOTHING_JOB)
 
 
 def test_cron_needs_cron(repo):

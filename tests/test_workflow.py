@@ -855,3 +855,41 @@ def test_generate_without_templates_names_the_missing_template(repo):
     assert result.stderr.strip().startswith(
         f"git-cicd: cannot read the workflow template {template}: ")
     assert "No such file or directory" in result.stderr
+
+
+# ── a run that needs no job ─────────────────────────────────────────────────
+
+@pytest.mark.parametrize("path,entry", [
+    (WORKFLOW, "matrix.job"), (MERGE, "matrix.job"),
+    (MANUAL, "matrix.job"), (CRON, "matrix.entry.job")])
+def test_run_job_is_never_skipped_and_skips_the_placeholder(tool_repo, path,
+                                                            entry):
+    """GitHub shows a matrix job skipped by a job-level `if` under its raw
+    `name:` expression, so `run` has none: a run that needs no job runs the
+    placeholder entry (`decide` never writes an empty matrix), and every
+    step of `run` is skipped for it."""
+    generate(tool_repo, cron_config())
+    text = (tool_repo.path / path).read_text()
+    run = job_blocks(text)["run"]
+    header = run.split("\n    steps:\n", 1)[0]
+    assert not re.search(r"(?m)^    if:", header)
+    assert "    needs: decide\n" in header
+    skip = f"{entry} != '{git_cicd.NOTHING_JOB}'"
+    steps = steps_of(run)
+    assert [s.split("\n", 1)[0] for s in steps] == [
+        "Checkout repository", "Run job", "Upload result"]
+    for step in steps[:2]:
+        assert step.split("\n")[1] == f"        if: {skip}"
+    assert steps[2].split("\n")[1] == f"        if: always() && {skip}"
+    head = text.split("\njobs:\n", 1)[0]
+    prose = " ".join(" ".join(
+        line.lstrip("# ") for line in head.splitlines()).split())
+    assert ("A run that needs no job still runs the `run` job, once, as the "
+            "placeholder entry `(nothing)`, whose row is "
+            "`Nothing needed / <repo>:(nothing)`") in prose
+    # every other row keeps its name
+    assert "    name: Decide / git-cicd:decide\n" in text
+    assert "    name: Report / git-cicd:report\n" in text
+    assert (f"    name: ${{{{ fromJSON(needs.decide.outputs.names)[{entry}] }}}}"
+            f" / ${{{{ github.event.repository.name }}}}:${{{{ {entry} }}}}\n") \
+        in run
