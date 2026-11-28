@@ -5,7 +5,12 @@ Releases of git-cicd. Each entry is written by `git-semver bump` in the pull req
 ## [0.1.0] - 2026-11-28
 
 ### Changed
-- A manual run is started from a form that lists the jobs and their inputs; the free-text `inputs` field and CICD_MANUAL_INPUTS are removed (breaking: run `generate`, pass one `-f <name>=<value>` per input) (gcd-8f83); the Open workflow passes VENDOR_PAT to pull request jobs (gcd-9e80); git-cicd bumps its version in the pull request and tags on merge (gcd-c8e1)
+- A manual run is started from a form that lists the manual jobs (a `job` dropdown) and their declared inputs; the free-text `inputs` field and `CICD_MANUAL_INPUTS` are removed (breaking: run `generate` and commit the Manual workflow, start runs with one `-f <name>=<value>` per input, and read `CICD_INPUT_<NAME>` in scripts) (gcd-8f83)
+- The `Open` workflow no longer passes `VENDOR_PAT` to the job that runs a pull request's scripts, and `run-job --trigger open` (so `check`) removes an inherited one; `Merge`, `Cron` and `Manual` still pass it (breaking for an `open` job that read a private vendor with `VENDOR_PAT`: run `generate`, and move that step to a job on `merge`, `cron` or a manual run) (gcd-9e80)
+- `install.sh` no longer lists the generated workflows in the install manifest: they are the repository's to commit and are never protected (every install still regenerates them on disk; commit them yourself) (gcd-364e)
+- A run that needs no job shows a `Nothing needed / <repo>:(nothing)` placeholder row instead of a skipped row named with raw `${{ }}` text (run `generate` and commit the workflows) (gcd-69df)
+- Line coverage of `git-cicd`, including the runs tests start as subprocesses, is measured and enforced at 99%, and `install.sh` and the `ci/` scripts have bats tests (no change for adopters) (gcd-1ee1)
+- This repository raises its version in the pull request and tags the merged commit on `main` (its own release; no change for adopters) (gcd-c8e1)
 
 ## [0.0.4] - 2026-11-28
 
