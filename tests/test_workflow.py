@@ -833,3 +833,25 @@ def test_cron_jobs_change_only_the_cron_file(tool_repo):
     assert sorted(after) == sorted(list(before) + ["git-cicd-cron.yml"])
     for name, text in before.items():
         assert after[name] == text
+
+
+def test_generate_refuses_a_tool_path_the_workflow_cannot_hold(repo):
+    repo.config({"jobs": {}})
+    repo.install_tool("tools/my cicd")
+    result = repo.run("generate")
+    assert result.returncode == 2
+    assert result.stderr.strip() == (
+        "git-cicd: the tool path 'tools/my cicd/git-cicd' contains characters "
+        "the generated workflow does not accept")
+
+
+def test_generate_without_templates_names_the_missing_template(repo):
+    repo.config({"jobs": {}})
+    repo.install_tool()
+    template = repo.tool.parent / "templates" / "workflows" / "open.yml"
+    template.unlink()
+    result = repo.run("generate")
+    assert result.returncode == 2
+    assert result.stderr.strip().startswith(
+        f"git-cicd: cannot read the workflow template {template}: ")
+    assert "No such file or directory" in result.stderr

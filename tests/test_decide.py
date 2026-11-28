@@ -754,3 +754,54 @@ def test_cron_needs_cron(repo):
     result = repo.run("decide", "--trigger=open", "--target=main")
     assert result.returncode == 2
     assert "--trigger open needs --source, --base, --head" in result.stderr
+
+
+def test_unknown_trigger_is_refused_by_the_module_api(repo):
+    setup_repo(repo)
+    config = git_cicd.load_config(str(repo.path))
+    message = "unknown trigger 'push' (allowed: open, merge, cron, manual)"
+    with pytest.raises(git_cicd.UsageError, match=r"unknown trigger 'push'") \
+            as e:
+        git_cicd.decide(config, str(repo.path), "push", "main", "f", "HEAD",
+                        "HEAD")
+    assert str(e.value) == message
+    with pytest.raises(git_cicd.UsageError) as e:
+        git_cicd.run_job(config, str(repo.path), "test", {"trigger": "push"})
+    assert str(e.value) == message
+
+
+def test_empty_base_is_not_a_commit(repo):
+    setup_repo(repo)
+    result = repo.run("decide", "--trigger=open", "--target=main",
+                      "--source=feature", "--base=", "--head=HEAD", "--json")
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    jobs = {j["name"]: j for j in data["jobs"]}
+    assert "base '' is not a commit in this repository" \
+        in jobs["test"]["reason"]
+
+
+def test_unrelated_histories_report_the_diff_failure(repo):
+    setup_repo(repo)
+    repo.git("checkout", "-q", "--orphan", "other")
+    repo.write("src/other.py", "y\n")
+    other = repo.commit("unrelated")
+    base = repo.git("rev-parse", "main")
+    result = repo.run("decide", "--trigger=open", "--target=main",
+                      "--source=other", f"--base={base}", f"--head={other}",
+                      "--json")
+    assert result.returncode == 0, result.stderr
+    jobs = {j["name"]: j for j in json.loads(result.stdout)["jobs"]}
+    assert "git diff failed: fatal:" in jobs["test"]["reason"]
+    assert jobs["test"]["needed"] is True
+
+
+def test_cron_text_lists_each_branch_and_run(repo):
+    heads = setup_cron(repo, branches=("main",))
+    result = repo.run("decide", "--trigger=cron", "--cron=0 3 * * *")
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.splitlines()
+    assert lines[0] == "git-cicd decide: trigger cron, schedule 0 3 * * *"
+    assert f"  branch main: {heads['main']}" in lines
+    assert "  branch dev: does not exist" in lines
+    assert f"  run nightly on main at {heads['main']}" in lines

@@ -512,3 +512,18 @@ def test_malformed_inputs_refused(scripts, inputs, expected):
 
 def test_inputs_is_a_known_job_field():
     assert "inputs" in git_cicd.JOB_FIELDS
+
+
+def test_setup_empty_path(scripts):
+    refused(scripts, {"jobs": {"test": job(setup="")}},
+            "job test: setup: empty path")
+
+
+def test_outside_a_git_repository_is_a_usage_error(repo, tmp_path):
+    outside = tmp_path / "not-a-repo"
+    outside.mkdir()
+    result = repo.run("validate", cwd=outside,
+                      env={"GIT_CEILING_DIRECTORIES": str(tmp_path)})
+    assert result.returncode == 2
+    assert result.stderr.startswith(
+        "git-cicd: not inside a git repository: fatal:")

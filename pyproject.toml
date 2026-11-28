@@ -21,9 +21,11 @@ parallel = true
 [tool.coverage.paths]
 # Report every copy of the script as the root git-cicd: one row. Aliases map
 # directories: the root first, then the install directories the tests copy the
-# script into (Repo.install_tool's default and tests/test_workflow.py's
-# tools/cicd; install.sh installs into .vendored/pkg/git-cicd too).
-git-cicd = ["./", "*/.vendored/pkg/git-cicd/", "*/tools/cicd/"]
+# script into: Repo.install_tool's default (install.sh's too) and the
+# tools/ directories of tests/test_workflow.py. A pattern may not end with a
+# wildcard, so each directory is named.
+git-cicd = ["./", "*/.vendored/pkg/git-cicd/", "*/tools/cicd/",
+            "*/tools/my cicd/"]
 
 [tool.coverage.report]
 show_missing = true
