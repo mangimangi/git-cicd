@@ -89,7 +89,7 @@ def test_generate_writes_file(tool_repo):
 
 
 @pytest.mark.parametrize("path,count", [(WORKFLOW, 8), (MERGE, 8),
-                                        (MANUAL, 8)])
+                                        (MANUAL, 9)])
 def test_no_expressions_inside_run_blocks(tool_repo, path, count):
     generate(tool_repo, base_config())
     blocks = run_blocks((tool_repo.path / path).read_text())

@@ -147,10 +147,11 @@ def test_groups_only_hold_jobs_of_the_trigger(tool_repo):
     assert git_cicd.permission_groups(config, "manual") == {
         "run-packages-read": {"permissions": {
             "contents": "write", "pull-requests": "write",
-            "packages": "read"}, "jobs": ["o"]}}
+            "packages": "read"}, "environment": None, "jobs": ["o"]}}
     assert git_cicd.permission_groups(config, "open") == {
         "run-packages-read": {"permissions": {
-            "contents": "read", "packages": "read"}, "jobs": ["o"]}}
+            "contents": "read", "packages": "read"}, "environment": None,
+            "jobs": ["o"]}}
     assert git_cicd.permission_groups(config, "cron") == {}
 
 

@@ -67,12 +67,7 @@
     "manual_role": {
       "type": "string",
       "required": false,
-      "enum": [
-        "admin",
-        "write"
-      ],
-      "default": "admin",
-      "description": "The lowest role that may start a manual run (default admin). The Manual workflow reads the repository permission of whoever started the run and passes it to the tool (CICD_ACTOR_ROLE); a lower, empty or unknown role is refused and the report names the person and the role required. write allows anyone the platform lets start a run (write access). The check lives in the workflow file of the branch the run is started on, so it does not hold against a writer: a protected environment (a job's environment) does."
+      "description": "admin (the default) or write: the lowest role that may start a manual run. The Manual workflow reads the repository permission of whoever started the run and passes it to the tool (CICD_ACTOR_ROLE); a lower, empty or unknown role is refused and the report names the person and the role required. write allows anyone the platform lets start a run (write access). The check lives in the workflow file of the branch the run is started on, so it does not hold against a writer: a protected environment (a job's environment) does."
     }
   }
 }

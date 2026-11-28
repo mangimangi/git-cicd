@@ -72,7 +72,7 @@
 # id ends in `env-<name>` (for example `run-env-release`) and which says
 # `environment: "<name>"` (a validated name, written literally): GitHub then
 # applies that environment's rules (required reviewers, allowed branches)
-# before the job starts and gives it that environment's secrets. A secret
+# before the job starts, and the secrets kept in that environment. A secret
 # still reaches a script only when its job declares it.
 #
 # Secrets: a job gets only the secrets its config job declares (`secrets`,

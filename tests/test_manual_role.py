@@ -241,7 +241,7 @@ def test_a_job_without_environment_is_unchanged(tool_repo):
         assert job_block(plain[path], "run") == \
             job_block(with_env[path], "run")
     # no environment anywhere: no group run job at all
-    assert "run-env" not in "".join(plain.values())
+    assert "\n  run-env" not in "".join(plain.values())
 
 
 def test_decide_puts_an_environment_job_in_its_group(tool_repo, tmp_path):
