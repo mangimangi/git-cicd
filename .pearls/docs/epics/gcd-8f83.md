@@ -62,3 +62,26 @@ What stays:
 - One workflow per job; `key=value` input; any change to the `open`, `merge` or `cron` triggers.
 - Changing how git-semver or git-vendored declare their jobs (they regenerate when they upgrade).
 - Raising this repository's version or changing how it releases (unit 12).
+
+## Issues
+
+- **gcd-8f83.1** — Generate the Manual workflow's form from the config: `job` dropdown of the manual jobs in config order, one field per distinct declared input (description, default, dropdown for choices), sharing by name with `validate` refusing incompatible declarations, the `job` reserved name, the platform input limit, no Manual workflow when no job is manual, `verify` covering the form, `templates/config.schema`. First "What ships" item.
+- **gcd-8f83.2** (blocked by .1) — The form is safe and the old way of passing inputs has one fate: free-text `inputs` field and `CICD_MANUAL_INPUTS` removed, one reading path (`CICD_MANUAL_FORM: ${{ toJSON(inputs) }}`), only the chosen job's fields passed, others ignored and reported, `${{` refused, hostile-declaration tests, literal values reaching scripts. Second "What ships" item.
+- **gcd-8f83.3** (blocked by .2) — git-cicd's own form regenerated (with `"manual": false` on `test` and `vendor-check`), `tests/test_own_jobs.py`, README sections, upgrade note, AGENTS.md. Third "What ships" item.
+
+## Refinement decisions
+
+- **Form fields are `required: false`; the tool enforces `required` for the chosen job** (gcd-8f83.1, gcd-8f83.2) — the form shows every job's fields, so a required field would force inputs of jobs not chosen; an empty value of a required input counts as missing.
+- **Absent default and `""` are the same default when two jobs share an input** (gcd-8f83.1) — both give the script the empty string (`input_values`).
+- **Differing descriptions of a shared input are allowed; the first job's is used** (gcd-8f83.1) — a description does not change the value a script gets; only different choices or defaults cannot share a field.
+- **An input named `job` is refused on a job that allows manual runs** (gcd-8f83.1) — it would collide with the form's `job` field.
+- **The platform limit is 25 `workflow_dispatch` inputs, `job` included (24 input fields)** (gcd-8f83.1) — GitHub changelog 2025-12-04 raised it from 10 to 25; the implementer re-checks the docs and cites the source in a code comment.
+- **With no manual job, no Manual workflow is generated; `generate` removes a stale one and `verify` fails while it exists** (gcd-8f83.1) — a `choice` input needs at least one option and a workflow with nothing to run should not exist; mirrors the cron workflow.
+- **Values are written with `json.dumps`, names bare** (gcd-8f83.1, gcd-8f83.2) — a JSON string is a valid YAML double-quoted scalar, as `schedule_block` already does for cron; names are validated identifiers.
+- **One env variable `CICD_MANUAL_FORM: ${{ toJSON(inputs) }}` replaces `CICD_MANUAL_INPUTS`** (gcd-8f83.2) — keeps the step env blocks fixed text, gives one reading path, and keeps values in an env var only.
+- **The reading of manual values (and the ignored-field report) is in gcd-8f83.2, not .1** (gcd-8f83.1, gcd-8f83.2) — .1 keeps the old free-text field and env lines so a run still works between the two issues; .2 switches the read path in one place.
+- **An ignored field is reported only when its value differs from the field's form default** (gcd-8f83.2) — GitHub prefills defaults, so reporting every other job's field would report on every run.
+- **`${{` is refused in descriptions, defaults and choices of manual jobs** (gcd-8f83.2) — GitHub evaluates `${{ }}` in workflow strings and YAML has no escape for it.
+- **`test` and `vendor-check` get `"manual": false` in this repo's config** (gcd-8f83.3) — the acceptance criterion's dropdown is exactly `release` and `update-vendored`, and AGENTS.md has the owner start only those by hand.
+- **The header comments of `open.yml`, `merge.yml`, `cron.yml` are not changed** (gcd-8f83.1, gcd-8f83.3) — those generated files must stay byte-identical; the README and the manual template carry the changed rule (headache filed).
+- **Three issues, one per "What ships" item, chained by dependencies** (all) — each item touches the same Manual template and reading code in sequence.
