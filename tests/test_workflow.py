@@ -1538,3 +1538,109 @@ def test_manual_role_step_maps_the_permission(tmp_path, answer, code, role):
     assert calls.read_text().splitlines() == [
         "api", "repos/owner/repo/collaborators/octo/permission",
         "--jq", ".permission"]
+
+
+# ── included jobs ───────────────────────────────────────────────────────────
+
+SHARED = "shared/jobs.json"
+ALL_FILES = (WORKFLOW, MERGE, CRON, MANUAL)
+
+
+def write_shared(repo, jobs):
+    repo.write(SHARED, json.dumps({"jobs": jobs}, indent=2) + "\n")
+
+
+def generated(repo, config):
+    """Generate for the config; return {path: text} of the files written."""
+    repo.config(config)
+    result = repo.run("generate")
+    assert result.returncode == 0, result.stderr
+    return {p: (repo.path / p).read_text() for p in ALL_FILES
+            if (repo.path / p).exists()}
+
+
+INCLUDED_JOBS = {
+    "publish": {"name": "Publish", "on": ["merge"],
+                "branches": ["main", "release/*"], "steps": ["ci/other.sh"],
+                "secrets": ["CICD_WRITE_TOKEN"],
+                "permissions": {"packages": "write"},
+                "inputs": {"channel": {"description": "Channel",
+                                       "choices": ["stable", "beta"],
+                                       "default": "stable"}}},
+    "nightly": {"on": ["cron"], "cron": "0 3 * * *", "branches": ["main"],
+                "steps": ["ci/other.sh"]},
+}
+INCLUDE_LINE = {"path": SHARED, "jobs": {
+    "publish": {"secrets": ["CICD_WRITE_TOKEN"],
+                "permissions": {"packages": "write"}},
+    "nightly": {}}}
+
+
+def test_included_jobs_generate_as_declared_jobs(tool_repo):
+    """The same jobs declared directly and taken from an include line
+    generate byte-identical workflows."""
+    direct = base_config()
+    direct["jobs"].update(INCLUDED_JOBS)
+    expected = generated(tool_repo, direct)
+    assert set(expected) == set(ALL_FILES)
+    for path in ALL_FILES:
+        (tool_repo.path / path).unlink()
+    write_shared(tool_repo, INCLUDED_JOBS)
+    assert generated(tool_repo, base_config(include=[INCLUDE_LINE])) == \
+        expected
+    assert tool_repo.run("verify").returncode == 0
+
+
+def test_included_merge_job_makes_the_merge_workflow(tool_repo):
+    config = {"jobs": {"test": base_config()["jobs"]["test"]}}
+    assert MERGE not in generated(tool_repo, config)
+    write_shared(tool_repo, INCLUDED_JOBS)
+    config["include"] = [{"path": SHARED, "jobs": {"publish": {
+        "secrets": ["CICD_WRITE_TOKEN"],
+        "permissions": {"packages": "write"}}}}]
+    files = generated(tool_repo, config)
+    assert merge_trigger(files[MERGE]) == "['main', 'release/*']"
+    assert CRON not in files
+
+
+def test_included_manual_job_is_in_the_manual_form(tool_repo):
+    write_shared(tool_repo, INCLUDED_JOBS)
+    text = generated(tool_repo, base_config(include=[INCLUDE_LINE],
+                                            repository="repo"))[MANUAL]
+    on = text.split("\non:\n", 1)[1].split("\npermissions:")[0]
+    assert '          - "Publish / repo:publish"\n' in on
+    assert '          - "Nightly / repo:nightly"\n' in on
+    assert "      channel:\n" in on
+    assert '        description: "Channel (Publish / repo:publish)"\n' in on
+
+
+def test_verify_follows_a_change_to_an_included_job(tool_repo):
+    write_shared(tool_repo, INCLUDED_JOBS)
+    config = base_config(include=[INCLUDE_LINE])
+    generated(tool_repo, config)
+    assert tool_repo.run("verify").returncode == 0
+    # a job no include line names changes nothing
+    jobs = json.loads(json.dumps(INCLUDED_JOBS))
+    jobs["unnamed"] = {"on": ["merge"], "branches": ["dev"],
+                       "steps": ["ci/other.sh"]}
+    write_shared(tool_repo, jobs)
+    assert tool_repo.run("verify").returncode == 0
+    # a taken job's branches change: verify fails until generate runs
+    jobs["publish"]["branches"] = ["main", "dev"]
+    write_shared(tool_repo, jobs)
+    result = tool_repo.run("verify")
+    assert result.returncode == 1
+    assert "+    branches: ['main', 'dev']" in result.stdout
+    assert (f"the workflows do not match the config; run: {TOOL} generate "
+            "and commit") in result.stdout
+    assert tool_repo.run("generate").returncode == 0
+    assert tool_repo.run("verify").returncode == 0
+    # a taken job's on changes: the Cron workflow is no longer needed
+    jobs["nightly"]["on"] = []
+    del jobs["nightly"]["cron"]
+    write_shared(tool_repo, jobs)
+    result = tool_repo.run("verify")
+    assert result.returncode == 1
+    assert CRON in result.stdout
+    assert tool_repo.run("generate").returncode == 0
+    assert tool_repo.run("verify").returncode == 0

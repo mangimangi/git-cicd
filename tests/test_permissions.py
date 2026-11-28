@@ -362,3 +362,18 @@ def test_verify_fails_until_a_declaration_is_regenerated(tool_repo, change):
     assert f"run: {TOOL} generate" in result.stdout
     assert tool_repo.run("generate").returncode == 0
     assert tool_repo.run("verify").returncode == 0
+
+
+def test_an_included_jobs_permissions_join_the_same_group(tool_repo):
+    tool_repo.write("shared/jobs.json", json.dumps({"jobs": {
+        "inc": job(permissions={"packages": "write"})}}))
+    own = job(permissions={"packages": "write"})
+    tool_repo.config({"jobs": {"own": own}, "include": [
+        {"path": "shared/jobs.json",
+         "jobs": {"inc": {"permissions": {"packages": "write"}}}}]})
+    config = git_cicd.load_config(str(tool_repo.path))
+    groups = git_cicd.permission_groups(config, "merge")
+    assert groups == {"run-packages-write": {
+        "permissions": {"contents": "write", "pull-requests": "write",
+                        "packages": "write"},
+        "jobs": ["own", "inc"]}}

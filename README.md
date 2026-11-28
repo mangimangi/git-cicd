@@ -22,7 +22,7 @@ executes: `open` (pull requests), `merge` (a change lands on a branch),
 
 | Path | Owner | What |
 |---|---|---|
-| `.vendored/configs/git-cicd.json` | the repository | the config: jobs, `needs_nothing`, `max_parallel` |
+| `.vendored/configs/git-cicd.json` | the repository | the config: jobs, `include` (jobs taken from files in the repository), `needs_nothing`, `max_parallel` |
 | `.github/workflows/git-cicd-<trigger>.yml` | generated | the GitHub Actions workflows, one per trigger (`git-cicd-open.yml`, `git-cicd-merge.yml` when a job has `merge` in `on`, `git-cicd-manual.yml` when a job allows manual runs, and `git-cicd-cron.yml` when a job has `cron` in `on`); generated, committed |
 | your scripts (e.g. `ci/`) | the repository | setup and step scripts, wherever the repository keeps them; git-cicd installs none |
 | `.vendored/pkg/git-cicd/` | git-cicd | the tool and its workflow template, installed by `install.sh` |
@@ -55,6 +55,7 @@ Top level:
 | `max_parallel` | positive integer | `3` | how many job runners run at once |
 | `repository` | string (letters, digits, `.`, `-`, `_`) | none | the repository's name as rows show it (`<repo>` in `<name> / <repo>:<job>`); without it, the last path segment of the `origin` remote's URL, else the checkout's directory name (see [Rows](#rows)) |
 | `manual_role` | `"admin"` or `"write"` | `"admin"` | who may start a manual run: only an admin of the repository, or anyone who can write to it; see [Who can start a manual run](#who-can-start-a-manual-run) |
+| `include` | array of include lines | none | jobs taken from files in the repository, each with the most it may ask for; see [Inheriting a job from a file (include)](#inheriting-a-job-from-a-file-include) |
 | `_vendor` | anything | | git-vendored's registry key; ignored by git-cicd |
 
 Any other key is refused, including `_comment_*` keys: comments belong here,
@@ -303,6 +304,97 @@ one`), an input named `job`, `${{` in a description, default or choice, and
 a form of more than 25 fields (it gives the count and the limit); each
 message says what to change, `"manual": false` on a job among the options.
 
+### Inheriting a job from a file (include)
+
+A check that several repositories run can be written once, as jobs in a
+file, and taken by each repository with an include line in its own config:
+
+```json
+"include": [{
+  "path": ".vendored/pkg/git-dev/jobs.json",
+  "jobs": {"upgrade-check": {"secrets": ["CICD_READ_TOKEN"]}}
+}]
+```
+
+An include line has exactly two fields:
+
+- `path`: a file in the repository, relative to its root. An absolute path or
+  a `..` segment is refused.
+- `jobs`: a non-empty object. Its keys are the names of the jobs taken from the
+  file, and each value is that job's **limit**, the most it may ask for:
+  `secrets` (an array of distinct declarable secrets, default none) and
+  `permissions` (scope → `read` or `write`, as a job's permissions, default
+  none).
+
+The included file holds only jobs, each written exactly as a job in the config
+is:
+
+```json
+{
+  "jobs": {
+    "upgrade-check": {
+      "name": "Upgrade Check",
+      "on": ["open"],
+      "branches": ["**"],
+      "steps": [".vendored/pkg/git-dev/upgrade-check.sh"],
+      "secrets": ["CICD_READ_TOKEN"]
+    }
+  }
+}
+```
+
+git-cicd reads the file from the repository's working tree with a plain read.
+It opens no network connection, runs no other tool and does not fetch the file.
+It does not care how the file got there: vendoring, a hand commit or a
+submodule all work, and no vendoring tool is required.
+
+**The include line is the limit.** Only the jobs a line names exist for the
+repository. Any other job in the file is not read, validated or run. A taken
+job that declares a secret not in its limit, or a permission not in its limit
+or wider than it (`write` where the limit says `read`), is refused. So an
+update to the file cannot start a new job, or give a job a secret or a
+permission, on its own. Taking another job or widening a limit is an edit to
+the repository's own config. Each taken job is validated as a job of the
+config's own: its step and setup files must be executable files in the
+repository, no `write` permission on `open`, and every other check above. The
+taken jobs follow the config's own jobs, in include-line order and, within a
+line, in the order of its `jobs` keys. From then on nothing tells them apart
+from the repository's own: `decide`, `run-job`, `check`, the report,
+`generate` and `verify` treat them the same.
+
+**An update to the file.** A change to an included file makes the jobs needed,
+like a change to the config: every `open` or `merge` job whose `branches`
+match (see [When a job runs](#when-a-job-runs)), even when the file is in
+`needs_nothing`. When an update changes a taken job in a way the workflows
+carry (its triggers, the Merge branches, its permissions, its manual inputs),
+run `generate` and commit the workflows in the same pull request. A
+repository's own update script can do that. When it was not done, `verify`
+fails with its usual message (`the workflows do not match the config; run:
+... generate and commit ...`).
+
+**Failures.** Each of these is an invalid config (exit 2). Its error names the
+config, the included file and the job, for example
+`.vendored/configs/git-cicd.json: include .vendored/pkg/git-dev/jobs.json:
+job upgrade-check: secret CICD_WRITE_TOKEN is not in the include line's limit
+(allowed: CICD_READ_TOKEN); widening it is an edit to the include line`:
+
+- the file is missing or unreadable, or is not valid JSON;
+- the file is not `{"jobs": {...}}`: its top level is not an object, `jobs`
+  is missing or not an object, or it has another top-level key;
+- a named job is absent from the file;
+- a named job has the name of one of the config's own jobs or of a job another
+  include line takes;
+- a job declares a secret or a permission beyond its limit;
+- a job fails any check of a job, such as a step or setup file that is not in
+  the repository;
+- `path` leaves the repository (absolute, or a `..` segment).
+
+A malformed `include` is refused the same way: one that is not an array; a line
+that is not an object or has a field other than `path` and `jobs`; a missing or
+empty `path`; `jobs` that is missing, not an object or empty; an invalid job
+name; or a limit that is not an object, has a field other than `secrets` and
+`permissions`, or holds secrets or permissions a job could not declare.
+
 ### Patterns
 
 `branches`, `paths` and `needs_nothing` use one matcher: `**` matches any
@@ -338,15 +430,15 @@ any sequence without `/` (so `*.md` is Markdown at the repository root only),
   the config's `manual_role` is refused, and
   the run's verdict is FAILED with the reason in the report, never silently.
 - A change affects **every** `open` or `merge` job whose `branches` match when it touches
-  the git-cicd config or any script any job names (setup or step, whatever
-  the job's triggers); when a changed file is in no job's `paths` and not in
+  the git-cicd config, a file it includes (`include`) or any script any job
+  names (setup or step, whatever the job's triggers); when a changed file is in no job's `paths` and not in
   `needs_nothing`; or when the diff cannot be computed or is empty. So "not
   needed" only happens on purpose. `branches` always binds; forcing overrides
   `paths` only.
 - The changed files are `git diff --name-only --no-renames BASE...HEAD`: what
   the branch changed since it left the base (both paths of a rename count).
-- A file in `needs_nothing` never makes a job needed, unless it is the config
-  or a job script.
+- A file in `needs_nothing` never makes a job needed, unless it is the config,
+  an included file or a job script.
 
 Every decision carries a reason, and the report shows it.
 
