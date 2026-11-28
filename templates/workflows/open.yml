@@ -159,7 +159,6 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           GITHUB_TOKEN: ${{ github.token }}
-          VENDOR_PAT: ${{ secrets.VENDOR_PAT }}
         run: |
           mkdir -p "$RUNNER_TEMP/git-cicd"
           python3 __TOOL__ run-job "$JOB" --trigger=open --target="$TARGET" \

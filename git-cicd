@@ -968,17 +968,28 @@ def write_changed_files(path, files):
 
 # ── Run ─────────────────────────────────────────────────────────────────────
 
+# secrets a script on open never sees: the Open workflow does not pass them
+# and a local check (an open run) removes them from the caller's environment
+OPEN_WITHHELD_ENV = frozenset({"VENDOR_PAT"})
+
+
 def script_env(job_name, facts, changed_files_path, inputs=None):
     """The inherited environment plus the CICD_ facts about the change and
     one CICD_INPUT_<NAME> per declared input.
 
     Inherited CICD_INPUT_ variables and the manual run's raw form values
     (CICD_MANUAL_FORM) are removed, so the declared inputs are the only
-    channel. GITHUB_TOKEN and VENDOR_PAT reach scripts unchanged through the
-    inherited environment; git-cicd itself never reads or logs them.
+    channel. GITHUB_TOKEN reaches scripts unchanged through the inherited
+    environment, and so does VENDOR_PAT on every trigger but open: a pull
+    request's code never gets the write-capable secret, in CI (the Open
+    workflow does not pass it) or locally (check runs on open), so both give
+    a script the same environment. git-cicd itself never reads or logs them.
     """
+    dropped = {MANUAL_FORM_ENV}
+    if facts["trigger"] == "open":
+        dropped |= OPEN_WITHHELD_ENV
     env = {k: v for k, v in os.environ.items()
-           if not k.startswith(INPUT_ENV_PREFIX) and k != MANUAL_FORM_ENV}
+           if not k.startswith(INPUT_ENV_PREFIX) and k not in dropped}
     for key, value in (inputs or {}).items():
         env[input_env_name(key)] = value
     env.update({

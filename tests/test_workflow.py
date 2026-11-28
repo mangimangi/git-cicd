@@ -87,6 +87,17 @@ def test_no_expressions_inside_run_blocks(tool_repo, path, count):
         assert "${{" not in block, block
 
 
+def test_vendor_pat_reaches_every_trigger_but_open():
+    """VENDOR_PAT may write; only open runs a pull request's own code."""
+    templates = ROOT / "templates" / "workflows"
+    assert "VENDOR_PAT" not in (templates / "open.yml").read_text()
+    assert "VENDOR_PAT" not in (
+        ROOT / ".github" / "workflows" / "git-cicd-open.yml").read_text()
+    for trigger in ("merge", "cron", "manual"):
+        text = (templates / f"{trigger}.yml").read_text()
+        assert "VENDOR_PAT: ${{ secrets.VENDOR_PAT }}" in text, trigger
+
+
 def test_template_run_blocks_have_no_expressions():
     templates = sorted(TEMPLATES.glob("*.yml"))
     assert len(templates) == len(git_cicd.GENERATED_TRIGGERS)
@@ -110,7 +121,8 @@ def test_workflow_contract(tool_repo):
     assert "job: ${{ fromJSON(needs.decide.outputs.jobs) }}" in text
     assert "fail-fast: false" in text
     assert "GITHUB_TOKEN: ${{ github.token }}" in text
-    assert "VENDOR_PAT: ${{ secrets.VENDOR_PAT }}" in text
+    # a pull request's code never gets the write-capable VENDOR_PAT
+    assert "VENDOR_PAT" not in text
     assert "--setup --result=" in text
     assert "name: git-cicd-result-${{ matrix.job }}" in text
     uses = re.findall(r"(?m)^\s*(?:- )?uses:\s*(\S+)", text)
