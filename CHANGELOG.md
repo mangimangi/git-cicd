@@ -2,6 +2,11 @@
 
 Releases of git-cicd. Each entry is written by `git-semver bump` in the pull request that raises the version; merging it into `main` tags and publishes that version.
 
+## [0.2.0] - 2026-11-28
+
+### Changed
+- Breaking: a job gets only the secrets and permissions it declares (gcd-cf98.1, gcd-cf98.2, gcd-cf98.3). A job on merge, cron or a manual run that used VENDOR_PAT without declaring it no longer receives it: declare "secrets": ["VENDOR_PAT"], or rename the secret to CICD_WRITE_TOKEN and declare that, then run generate and commit the config and the workflows. Every documented secret (CICD_WRITE_TOKEN, CICD_READ_TOKEN, VENDOR_PAT) is removed from the environment of a job that does not declare it, on every trigger and in a local check. New: declared secrets CICD_READ_TOKEN (reads private repositories) and CICD_WRITE_TOKEN (proposes changes), VENDOR_PAT deprecated; declared permissions of the workflow token (contents, pull-requests, issues, packages; read or write; no write on open), each distinct set in a generated run job of its own; absent declared secrets named in the report.
+
 ## [0.1.0] - 2026-11-28
 
 ### Changed

@@ -1,5 +1,7 @@
 """Tests for git-cicd check: decide, run and report locally."""
 
+import json
+
 import pytest
 
 from tests.conftest import git_cicd
@@ -179,15 +181,32 @@ def test_works_without_github_env(project):
     assert not list(project.path.glob("*summary*"))
 
 
+SECRETS_ECHO = ('echo "$GITHUB_TOKEN/${CICD_WRITE_TOKEN-unset}/'
+                '${CICD_READ_TOKEN-unset}/${VENDOR_PAT-unset}" >> "$LOG"\n')
+ALL_SECRETS = {"GITHUB_TOKEN": "t", "CICD_WRITE_TOKEN": "w",
+               "CICD_READ_TOKEN": "r", "VENDOR_PAT": "p"}
+
+
 def test_token_passthrough(project):
-    """check runs on open: GITHUB_TOKEN reaches the script, a VENDOR_PAT in
-    the caller's environment does not, as in the Open workflow."""
-    project.script("ci/a.sh", 'echo "$GITHUB_TOKEN/${VENDOR_PAT-unset}" '
-                   '>> "$LOG"\n')
+    """check removes every documented secret a job does not declare from the
+    caller's environment; GITHUB_TOKEN reaches the script."""
+    project.script("ci/a.sh", SECRETS_ECHO)
     project.commit("script")
-    check(project, "--job", "docs", "--force", GITHUB_TOKEN="t",
-          VENDOR_PAT="p")
-    assert logged(project) == ["t/unset"]
+    check(project, "--job", "docs", "--force", **ALL_SECRETS)
+    assert logged(project) == ["t/unset/unset/unset"]
+
+
+def test_check_gives_a_declared_secret(project):
+    """A job that declares CICD_READ_TOKEN gets it in a local check, and no
+    other documented secret."""
+    project.script("ci/a.sh", SECRETS_ECHO)
+    config = json.loads((project.path / git_cicd.CONFIG_PATH).read_text())
+    config["jobs"]["docs"]["secrets"] = ["CICD_READ_TOKEN"]
+    project.config(config)
+    project.commit("declare")
+    result = check(project, "--job", "docs", "--force", **ALL_SECRETS)
+    assert logged(project) == ["t/unset/r/unset"]
+    assert "declared secret" not in result.stdout
 
 
 def test_stale_workflow_fails_verdict(project):

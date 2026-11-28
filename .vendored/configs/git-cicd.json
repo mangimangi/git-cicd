@@ -35,10 +35,11 @@
       "cron": "0 9 * * 1",
       "branches": ["main"],
       "steps": ["ci/update-vendored.sh"],
+      "secrets": ["CICD_WRITE_TOKEN", "VENDOR_PAT"],
       "inputs": {
         "vendor": {"description": "Vendor to update (or all)", "default": "all"},
         "version": {"description": "Version to install (default: latest)", "default": "latest"},
-        "private": {"description": "Vendor repo is private (use VENDOR_PAT)", "choices": ["true", "false"], "default": "false"}
+        "private": {"description": "Vendor repo is private (use CICD_WRITE_TOKEN)", "choices": ["true", "false"], "default": "false"}
       }
     }
   },

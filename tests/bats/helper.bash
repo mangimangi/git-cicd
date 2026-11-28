@@ -18,6 +18,8 @@ common_setup() {
         esac
     done
     unset GH_TOKEN CI
+    # no test reads a real token (ci/test.sh sets sentinels for these)
+    unset CICD_WRITE_TOKEN CICD_READ_TOKEN VENDOR_PAT GH_TOKEN GITHUB_TOKEN
 
     REPO="$BATS_TEST_TMPDIR/repo"
     STUBS="$BATS_TEST_TMPDIR/stubs"

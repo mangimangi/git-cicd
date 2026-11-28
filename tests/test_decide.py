@@ -432,6 +432,7 @@ def test_github_output_written(repo, tmp_path):
     assert lines == ["previous=1", 'jobs=["test"]',
                      'names={"test": "Test", "lint": "Lint", "release": "Release", '
                      '"(nothing)": "Nothing needed"}',
+                     'secrets={"test": [], "lint": [], "release": []}',
                      "any=true", "max_parallel=2"]
 
 
@@ -448,6 +449,7 @@ def test_github_output_none_needed(repo, tmp_path):
         'jobs=["(nothing)"]',
         'names={"test": "Test", "lint": "Lint", "release": "Release", '
         '"(nothing)": "Nothing needed"}',
+        'secrets={"test": [], "lint": [], "release": []}',
         "any=false", "max_parallel=3"]
 
 

@@ -6,10 +6,12 @@
 # Only CI runs this script (the Monday schedule, or a manual run); a session
 # never runs it or .vendored/install itself. The vendor, version and private
 # flag are the job's declared inputs (defaults all, latest, false). GH_TOKEN
-# is VENDOR_PAT when it is set, else GITHUB_TOKEN.
+# is the first that is set of CICD_WRITE_TOKEN and VENDOR_PAT (the job
+# declares both secrets; VENDOR_PAT is the deprecated name, kept until the
+# repository's secret is renamed), else GITHUB_TOKEN.
 set -euo pipefail
 
-export GH_TOKEN="${VENDOR_PAT:-${GITHUB_TOKEN:-}}"
+export GH_TOKEN="${CICD_WRITE_TOKEN:-${VENDOR_PAT:-${GITHUB_TOKEN:-}}}"
 ARGS=("${CICD_INPUT_VENDOR:-all}" --version "${CICD_INPUT_VERSION:-latest}"
       --pr --deps=install)
 if [ "${CICD_INPUT_PRIVATE:-false}" = "true" ]; then

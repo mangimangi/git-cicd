@@ -858,3 +858,67 @@ def test_report_without_ignored_fields_has_no_notes(config, repo, ignored):
                                      setup=False)}
     _, _, text = run_report(config, repo, dec, results)
     assert "ignored" not in text and "not a list" not in text
+
+
+# ── absent declared secrets ─────────────────────────────────────────────────
+
+def test_absent_secrets_named_on_the_row(config, repo, tmp_path,
+                                         monkeypatch):
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    r = passed_result("test")
+    r["absent_secrets"] = ["CICD_WRITE_TOKEN", "not-a-secret-name"]
+    _, _, text = run_report(config, repo, decision(test=(True, "r")),
+                            {"test": r})
+    lines = text.splitlines()
+    i = lines.index(next(l for l in lines if l.startswith("  Test /")))
+    assert "    declared secret CICD_WRITE_TOKEN is not set" in lines[i + 1:]
+    # only documented names are shown, whatever a result file holds
+    assert "not-a-secret-name" not in text
+    assert "| &nbsp;&nbsp;↳ secrets | declared secret CICD_WRITE_TOKEN is " \
+        "not set | | |" in summary.read_text()
+
+
+def test_result_without_absent_secrets_reports_as_before(config, repo):
+    r = passed_result("test")
+    assert "absent_secrets" not in r
+    _, _, text = run_report(config, repo, decision(test=(True, "r")),
+                            {"test": r})
+    assert "declared secret" not in text
+
+
+def test_secret_value_never_printed(repo, tmp_path):
+    """run-job, its result file and the report never hold a secret's
+    value, set or not."""
+    repo.script("ci/t.sh", "exit 0\n")
+    repo.config({"jobs": {"t": {"on": ["open"], "branches": ["**"],
+                                "steps": ["ci/t.sh"],
+                                "secrets": ["CICD_WRITE_TOKEN",
+                                            "CICD_READ_TOKEN"]}}})
+    repo.install_tool()
+    assert repo.run("generate").returncode == 0
+    base = repo.commit("base")
+    artifacts = tmp_path / "artifacts"
+    (artifacts / "r").mkdir(parents=True)
+    result_file = artifacts / "r" / "result.json"
+    env = {"CICD_WRITE_TOKEN": "s3cret-write", "VENDOR_PAT": "s3cret-pat",
+           "GITHUB_TOKEN": "s3cret-gh"}
+    run = repo.run("run-job", "t", "--trigger=open", "--target=main",
+                   "--source=f", f"--base={base}", f"--head={base}",
+                   f"--result={result_file}", env=env)
+    assert run.returncode == 0, run.stdout + run.stderr
+    dec = tmp_path / "d.json"
+    dec.write_text(json.dumps({
+        "trigger": "open", "target": "main", "source": "f", "base": base,
+        "head": base, "changed_files": [], "max_parallel": 3,
+        "jobs": [{"name": "t", "needed": True, "reason": "r",
+                  "blocking": True}]}))
+    summary = tmp_path / "summary.md"
+    rep = repo.run("report", "--decisions", str(dec), "--results",
+                   str(artifacts),
+                   env=dict(env, GITHUB_STEP_SUMMARY=str(summary)))
+    assert rep.returncode == 0, rep.stdout + rep.stderr
+    assert "declared secret CICD_READ_TOKEN is not set" in rep.stdout
+    everything = (run.stdout + run.stderr + result_file.read_text()
+                  + rep.stdout + rep.stderr + summary.read_text())
+    assert "s3cret" not in everything

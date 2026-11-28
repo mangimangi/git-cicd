@@ -116,3 +116,19 @@ SH
     [[ "$output" == *"ci/test.sh: bats is not installed, so the shell tests cannot run; run: ./git-cicd check --setup"* ]]
     [ -n "$(pytest_call)" ]
 }
+
+@test "pytest and bats run with a sentinel for every token name" {
+    fake_python "$VENV/bin/python"
+    cat > "$STUBS/bats" <<'SH'
+#!/bin/bash
+for name in CICD_WRITE_TOKEN CICD_READ_TOKEN VENDOR_PAT GH_TOKEN GITHUB_TOKEN; do
+    echo "token $name=${!name-unset}" >> "$LOG"
+done
+SH
+    chmod +x "$STUBS/bats"
+    run bash ci/test.sh
+    [ "$status" -eq 0 ]
+    for name in CICD_WRITE_TOKEN CICD_READ_TOKEN VENDOR_PAT GH_TOKEN GITHUB_TOKEN; do
+        grep -qx "token $name=git-cicd-test-sentinel" "$LOG"
+    done
+}
