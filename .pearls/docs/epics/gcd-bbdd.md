@@ -35,6 +35,7 @@ From the interface agreed on 2026-11-27 (README; `mangimangi/git-dev`, `.pearls/
 ## What ships
 
 - The `merge` trigger executes
+  - issue: gcd-bbdd.1
   - vehicle: type: issue
   - source repo: git-cicd
   - target repo: git-cicd
@@ -42,6 +43,7 @@ From the interface agreed on 2026-11-27 (README; `mangimangi/git-dev`, `.pearls/
   - shape: `decide --trigger merge`, `run-job --trigger merge` and `report` work for a change that landed on a branch: the needed jobs are those with `merge` in `on`, whose `branches` match the branch, and that the change affects (the same `paths` and `needs_nothing` rules as `open`; the changed files are what the push brought). `generate` writes `.github/workflows/git-cicd-merge.yml`, named `Merge`, fixed text: its GitHub event is a push to any branch (branches are decided by the tool); `contents: write` and `pull-requests: write` for the job that runs the config's scripts; runs on one branch queue and are never cancelled; full history and tags are available to a step (git-semver's release needs them). The verdict is the commit status `Verdict / git-cicd:verdict` on the landed commit, pending from the first step of decide and final from the last step of report. Scripts get `CICD_TRIGGER=merge` and the other `CICD_` variables with documented meanings on `merge` (target is the branch landed on; base is the commit before the push). `verify` covers the new file.
 
 - Manual runs execute
+  - issue: gcd-bbdd.2
   - vehicle: type: issue
   - source repo: git-cicd
   - target repo: git-cicd
@@ -49,6 +51,7 @@ From the interface agreed on 2026-11-27 (README; `mangimangi/git-dev`, `.pearls/
   - shape: A manual run of one named job executes: allowed unless the job says `"manual": false`; the job's `branches` still bind against the branch the run is started on; `paths` is ignored. `generate` writes `.github/workflows/git-cicd-manual.yml`, named `Manual`, with a `workflow_dispatch` and the `job` input, write permissions as on `merge`. An unknown job, a job with `"manual": false` or a branch that does not match fails the run with the reason in the report, never silently. The verdict is the same commit status on the commit the run is for.
 
 - Declared inputs for manual runs
+  - issue: gcd-bbdd.3
   - vehicle: type: issue
   - source repo: git-cicd
   - target repo: git-cicd
@@ -56,6 +59,7 @@ From the interface agreed on 2026-11-27 (README; `mangimangi/git-dev`, `.pearls/
   - shape: A job may declare the inputs a manual run of it takes (name, whether required, a default, and for a choice the allowed values). `validate` refuses a malformed declaration naming the job and the reason. A manual run passes the values to the job's steps only as environment variables with a documented naming rule; a value never becomes part of a command line and never appears as `${{ }}` inside a `run:` block. An undeclared input, a missing required one or a value outside a choice fails the run with the reason. The design must fit a workflow whose text does not vary with the config's jobs (the generated file stays fixed text) and must be able to carry what the three workflows above take today: `bump_type` (patch, minor, major), `subdirectory`, `changelog_description`; `vendor`, `version`, `private`; and git-vendored's `repo`, `version` for validate. Triggers other than manual give a step the declared defaults.
 
 - The `cron` trigger executes
+  - issue: gcd-bbdd.4
   - vehicle: type: issue
   - source repo: git-cicd
   - target repo: git-cicd
@@ -63,6 +67,7 @@ From the interface agreed on 2026-11-27 (README; `mangimangi/git-dev`, `.pearls/
   - shape: `generate` writes `.github/workflows/git-cicd-cron.yml`, named `Cron`, whose schedule block has one entry per distinct cron expression among the config's jobs with `cron` in `on` and is the only part of any generated file that varies with the config; with no such job the file's handling is decided, documented and verified (no schedule that never has anything to run). At a scheduled time, the jobs whose expression is the one that fired run on each of their literal `branches`; `paths` does not apply. Write permissions as on `merge`. The verdict is the commit status on the head commit of the branch the run is for. The README says that GitHub runs schedules only from the default branch's copy of the file. `verify` fails when the schedule block and the config disagree.
 
 - git-cicd's own release, vendor check and weekly update are git-cicd jobs
+  - issue: gcd-bbdd.5
   - vehicle: type: issue
   - source repo: git-cicd
   - target repo: git-cicd
@@ -87,3 +92,36 @@ From the interface agreed on 2026-11-27 (README; `mangimangi/git-dev`, `.pearls/
 - Secrets beyond `GITHUB_TOKEN` and `VENDOR_PAT`; an image or runtime per job.
 - A trigger for "something outside this repository changed"; anything about how versions move.
 - How an install pull request carries workflow files.
+
+## Issues
+
+Order: gcd-bbdd.1 first; gcd-bbdd.2 and gcd-bbdd.4 after it; gcd-bbdd.3 after gcd-bbdd.2; gcd-bbdd.5 last (blocked by all four).
+
+- gcd-bbdd.1 — merge trigger: `decide`/`run-job`/`report --trigger merge`, `templates/workflows/merge.yml`, the run queue, the non-open verdict rule, install.sh, tests, README/AGENTS.md.
+- gcd-bbdd.2 — manual runs: `decide --trigger manual --job`, refusals reported, `templates/workflows/manual.yml` with the `job` input, tests, docs.
+- gcd-bbdd.3 — declared inputs: the job field `inputs`, validation, `CICD_INPUT_<NAME>`, the fixed `inputs` dispatch input carrying JSON, defaults on other triggers, schema, tests, docs.
+- gcd-bbdd.4 — cron trigger: `templates/workflows/cron.yml` and its schedule block, `decide --trigger cron --cron`, per-branch heads and verdicts, the no-cron-job handling, tests, docs.
+- gcd-bbdd.5 — this repository's own `release`, `vendor-check` and `update-vendored` jobs and their `ci/` scripts, git-semver.json `files`, the four committed workflows, README/AGENTS.md.
+
+## Refinement decisions
+
+- **A branch-creating push (all-zero before sha) or an unresolvable base counts as "cannot compute the diff", so every matching merge job is needed** (gcd-bbdd.1). Reason: "not needed" must only happen on purpose, which is the existing forcing rule.
+- **On merge, `CICD_SOURCE_BRANCH` equals the branch landed on** (gcd-bbdd.1). Reason: a push has no separate source, and the variable is never empty.
+- **Merge skips a push that deletes a branch** (gcd-bbdd.1). Reason: there is no commit to run on or to put a status on.
+- **merge.yml has no `concurrency` key; decide waits until earlier Merge/Manual runs on the same branch finish** (gcd-bbdd.1, gcd-bbdd.2). Reason: a GitHub concurrency group with `cancel-in-progress: false` still cancels a pending run when a newer one joins, which would break "never cancelled". Manual runs share the queue, as version-bump.yml's push-to-main group does today.
+- **A non-open run posts `Verdict / git-cicd:verdict` only when no open pull request has the commit as its head; otherwise its Report check run carries the verdict** (gcd-bbdd.1, gcd-bbdd.2, gcd-bbdd.4). Reason: Open and Merge runs on the same commit would overwrite each other's status, and a Merge run that needs nothing could turn a failed Open verdict green. The owner's rule makes the status the verdict "when there is no pull request".
+- **templates/workflows/open.yml is not touched, though its header says the other triggers are "not built yet"** (gcd-bbdd.1). Reason: the acceptance criterion requires git-cicd-open.yml to stay byte-identical.
+- **`decide --trigger manual --job NAME`; a refusal (unknown job, `"manual": false`, branch mismatch) is recorded in the decision record, decide exits 0, and report gives FAILED with the reason** (gcd-bbdd.2). Reason: the reason must reach the report, never silently.
+- **On manual, target = source = the branch the run was started on, base = head = github.sha, and the changed files are empty** (gcd-bbdd.2). Reason: there is no change, and paths are ignored.
+- **The `inputs` field: name `^[a-z][a-z0-9_]*$`, with `description`, `required`, `default` and `choices`; every value is a string (booleans are a true/false choice)** (gcd-bbdd.3). Reason: environment variables are strings.
+- **A required input may not have a default; bump_type is declared not required with default patch** (gcd-bbdd.3). Reason: a default would make `required` meaningless, and not-required-with-default carries today's behaviour.
+- **Env naming: `CICD_INPUT_<NAME upper-cased>`, always set (value, else default, else empty); undeclared inherited `CICD_INPUT_*` are removed** (gcd-bbdd.3). Reason: a predictable, documented channel and nothing stray.
+- **Manual values travel in one fixed second dispatch input `inputs` (a JSON object of strings), passed to the tool only as the env entry `CICD_MANUAL_INPUTS` and stripped from the scripts' environment** (gcd-bbdd.3). Reason: the generated file cannot list per-job inputs, GitHub caps the number of dispatch inputs, and JSON carries quotes and newlines exactly.
+- **With no cron job, no git-cicd-cron.yml is generated; generate removes a stale one, verify fails while it exists, and the install manifest lists only the files generate wrote** (gcd-bbdd.4). Reason: GitHub needs an event under `on:`, and the doc forbids a schedule with nothing to run.
+- **Cron: decide takes `--cron` (from `github.event.schedule` through env), resolves each literal branch's head once from `origin/<branch>`, fails a missing branch with its reason, uses a cron-only matrix output, and gives one verdict per branch head** (gcd-bbdd.4). Reason: every job on a branch runs on one commit, nothing fails silently, and the open outputs and file stay unchanged.
+- **On cron, target = source = the branch, base = head = its head commit, and the changed files are empty** (gcd-bbdd.4). Reason: a schedule has no change.
+- **Cron runs do not join the Merge/Manual queue** (gcd-bbdd.4). Reason: schedule runs carry the default branch's ref, and the only planned cron job opens pull requests.
+- **`release` has no `paths`, so a needs_nothing-only push to main does not release** (gcd-bbdd.5). Reason: a bump commit still publishes, because VERSION is in no paths and not in needs_nothing.
+- **ci/vendor-check.sh passes `--base "$CICD_BASE"` and sets GITHUB_HEAD_REF from CICD_SOURCE_BRANCH when unset** (gcd-bbdd.5). Reason: it works the same locally and in Actions, and install branches pass.
+- **ci/update-vendored.sh sets GH_TOKEN to VENDOR_PAT, else GITHUB_TOKEN** (gcd-bbdd.5). Reason: like-for-like with install-vendored.yml.
+- **Adding the new templates to git-semver.json `files` stays in gcd-bbdd.5, as the doc assigns it** (gcd-bbdd.5). Reason: follow the doc.
