@@ -20,7 +20,12 @@ The checks run with the tool itself, the same way CI runs them:
 non-zero on a failed verdict. Run a single job with `--job test`.
 The `test` job measures line coverage of `git-cicd`, including the runs tests
 start as subprocesses (`pyproject.toml` `[tool.coverage]`), and prints one
-`git-cicd` row with the missing lines.
+`git-cicd` row with the missing lines. It fails below 99% line coverage of
+`git-cicd` (`fail_under` in `pyproject.toml`): a change that lowers coverage
+below 99% fails the verdict and adds its tests in the same pull request. A
+line is excluded (`# pragma: no cover`) only when no test can reach it, with a
+comment on that line saying why. In CI the step fails when pytest-cov is
+missing; locally without `--setup` it runs and says coverage was not checked.
 
 After changing `.vendored/configs/git-cicd.json` or a template under
 `templates/workflows/`, run `./git-cicd generate` and commit the generated

@@ -28,5 +28,10 @@ git-cicd = ["./", "*/.vendored/pkg/git-cicd/", "*/tools/cicd/",
             "*/tools/my cicd/"]
 
 [tool.coverage.report]
+# The test job fails below 99% line coverage of git-cicd (pytest-cov reads
+# this; so does a local `coverage report`). A line is excluded with
+# `# pragma: no cover` only when no test can reach it, with a comment saying
+# why.
+fail_under = 99
 show_missing = true
 skip_empty = true

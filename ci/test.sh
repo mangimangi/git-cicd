@@ -11,6 +11,9 @@
 # combines them (mapping installed copies onto the root git-cicd) and prints
 # one row with the missing lines. The directory is removed afterwards, so no
 # data carries over from one run to the next and nothing lands in the checkout.
+# The step fails below 99% (pyproject.toml fail_under), after the report.
+# In CI (CI set) a missing pytest-cov fails the step, so the gate is never
+# skipped; locally the suite still runs and says coverage was not checked.
 set -euo pipefail
 
 FLOOR="$(sed -n 's/^requires-python *= *">= *\([0-9][0-9.]*\)".*/\1/p' pyproject.toml | head -n1)"
@@ -32,7 +35,10 @@ if "$PYTHON" -c "import pytest_cov" 2>/dev/null; then
     trap 'rm -rf "$DATA"' EXIT
     export COVERAGE_FILE="$DATA/.coverage"
     COV=(--cov --cov-report=term-missing --cov-config=pyproject.toml)
+elif [ -n "${CI:-}" ]; then
+    echo "ci/test.sh: pytest-cov is not installed, so the 99% coverage gate cannot run; run: ./git-cicd check --setup" >&2
+    exit 1
 else
-    echo "ci/test.sh: pytest-cov is not installed; coverage was not measured (run: ./git-cicd check --setup)"
+    echo "ci/test.sh: pytest-cov is not installed; coverage was not measured or checked (run: ./git-cicd check --setup)"
 fi
 "$PYTHON" -m pytest tests/ -v "${COV[@]}"
