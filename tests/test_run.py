@@ -637,3 +637,21 @@ def test_script_env_removes_undeclared_secrets(monkeypatch):
     assert "CICD_READ_TOKEN" not in env and "CICD_WRITE_TOKEN" not in env
     assert git_cicd.absent_secrets(["CICD_READ_TOKEN", "VENDOR_PAT"]) == [
         "CICD_READ_TOKEN"]
+
+
+def test_run_job_runs_an_included_job(repo, log):
+    repo.script("ci/a.sh", LOG_STEP)
+    repo.write("shared/jobs.json", json.dumps({"jobs": {"inc": {
+        "on": ["open"], "branches": ["**"], "steps": [["ci/a.sh", "x"]],
+        "secrets": ["CICD_READ_TOKEN"]}}}))
+    repo.config({"jobs": {}, "include": [{"path": "shared/jobs.json",
+                                          "jobs": {"inc": {"secrets": [
+                                              "CICD_READ_TOKEN"]}}}]})
+    base = repo.commit("base")
+    repo.git("checkout", "-q", "-b", "feature")
+    repo.write("src/app.py", "x\n")
+    head = repo.commit("change")
+    result = run_job(repo, "inc", base, head, env=env_for(log))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert logged(log) == ["a.sh x"]
+    assert "==> git-cicd: job inc: step 1/1 ci/a.sh x" in result.stdout

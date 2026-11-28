@@ -1240,8 +1240,11 @@ def decide(config, root, trigger, target, source, base, head, files=None,
         if not files:
             force = "no changed files found"
         else:
-            forcing = job_scripts(config) | {config_relpath(config, root),
-                                             CONFIG_PATH}
+            # A change to the config, an included file or a job's script
+            # forces every job the trigger and branches allow.
+            forcing = (job_scripts(config)
+                       | {config_relpath(config, root), CONFIG_PATH}
+                       | set(config.get("includes", [])))
             touched = [f for f in files if _norm(f) in forcing]
             if touched:
                 force = "config or job script changed: " + _name_files(touched)
