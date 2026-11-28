@@ -694,3 +694,313 @@ def test_manual_roles_are_accepted(scripts, value):
 def test_manual_role_must_be_admin_or_write(scripts, value):
     refused(scripts, {"jobs": {"t": job()}, "manual_role": value},
             "config: manual_role must be one of write, admin")
+
+
+# ── include ─────────────────────────────────────────────────────────────────
+
+CONFIG_FILE = ".vendored/configs/git-cicd.json"
+SHARED = ".vendored/pkg/shared/jobs.json"
+
+
+def shared_file(repo, jobs, path=SHARED, extra=None):
+    """Write an included file {"jobs": jobs} (plus extra top-level keys)."""
+    data = {"jobs": jobs}
+    data.update(extra or {})
+    repo.write(path, json.dumps(data, indent=2) + "\n")
+
+
+def including(jobs=None, *lines):
+    """A config with its own jobs and the given include lines."""
+    return {"jobs": jobs if jobs is not None else {"own": job()},
+            "include": list(lines)}
+
+
+def line(path=SHARED, **jobs):
+    return {"path": path, "jobs": jobs or {"upgrade-check": {}}}
+
+
+def test_included_job_is_loaded_and_counted(scripts):
+    shared_file(scripts, {"upgrade-check": job(secrets=["CICD_READ_TOKEN"])})
+    scripts.config(including(None, line(**{"upgrade-check": {
+        "secrets": ["CICD_READ_TOKEN"]}})))
+    result = scripts.run("validate")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "config ok: 2 jobs"
+    config = git_cicd.load_config(str(scripts.path))
+    assert list(config["jobs"]) == ["own", "upgrade-check"]
+    assert config["includes"] == [SHARED]
+
+
+def test_included_job_normalized_as_an_own_job(scripts):
+    declared = job(name="Upgrade Check", paths=["src/**"],
+                   setup="ci/setup.sh", permissions={"packages": "read"},
+                   inputs={"level": {"description": "Level",
+                                     "default": "x"}})
+    shared_file(scripts, {"upgrade-check": declared})
+    scripts.config(including({}, line(**{"upgrade-check": {
+        "permissions": {"packages": "read"}}})))
+    included = git_cicd.load_config(str(scripts.path))["jobs"]
+    scripts.config({"jobs": {"upgrade-check": declared}})
+    own = git_cicd.load_config(str(scripts.path))
+    assert included == own["jobs"]
+    assert own["includes"] == []
+
+
+def test_unnamed_job_in_included_file_does_not_exist(scripts):
+    shared_file(scripts, {"upgrade-check": job(),
+                          "other": job(steps=["ci/missing.sh"])})
+    scripts.config(including(None, line()))
+    assert scripts.run("validate").returncode == 0
+    config = git_cicd.load_config(str(scripts.path))
+    assert "other" not in config["jobs"]
+
+
+def test_merge_order_follows_the_include_lines(scripts):
+    shared_file(scripts, {"a": job(), "b": job()})
+    shared_file(scripts, {"c": job()}, path="more/jobs.json")
+    scripts.config(including({"own": job()},
+                             line(path="more/jobs.json", c={}),
+                             line(b={}, a={})))
+    config = git_cicd.load_config(str(scripts.path))
+    assert list(config["jobs"]) == ["own", "c", "b", "a"]
+    assert config["includes"] == ["more/jobs.json", SHARED]
+
+
+def test_include_path_is_normalized(scripts):
+    shared_file(scripts, {"upgrade-check": job()})
+    scripts.config(including(None, line(path="./" + SHARED)))
+    assert git_cicd.load_config(str(scripts.path))["includes"] == [SHARED]
+
+
+def test_limits_at_or_above_the_declaration_accepted(scripts):
+    shared_file(scripts, {
+        "none": job(),
+        "secret": job(secrets=["CICD_READ_TOKEN"]),
+        "read": job(on=["merge"], branches=["main"],
+                    permissions={"packages": "read"}),
+        "write": job(on=["merge"], branches=["main"],
+                     permissions={"packages": "write"}),
+    })
+    limit = {"secrets": ["CICD_READ_TOKEN"],
+             "permissions": {"packages": "write"}}
+    scripts.config(including({}, line(none=limit, secret=limit, read=limit,
+                                      write=limit)))
+    result = scripts.run("validate")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "config ok: 4 jobs"
+
+
+def test_included_file_missing(scripts):
+    refused(scripts, including(None, line()), CONFIG_FILE,
+            f"include {SHARED}: cannot read the file")
+
+
+def test_included_file_is_a_directory(scripts):
+    (scripts.path / "adir").mkdir()
+    refused(scripts, including(None, line(path="adir")),
+            f"{CONFIG_FILE}: include adir: cannot read the file")
+
+
+def test_included_file_not_utf8(scripts):
+    (scripts.path / "bin.json").write_bytes(b"\xff\xfe{")
+    refused(scripts, including(None, line(path="bin.json")),
+            f"{CONFIG_FILE}: include bin.json: the file is not UTF-8 text")
+
+
+def test_included_file_not_json(scripts):
+    scripts.write(SHARED, "{not json")
+    refused(scripts, including(None, line()),
+            f"{CONFIG_FILE}: include {SHARED}: the file is not valid JSON")
+
+
+@pytest.mark.parametrize("data,text", [
+    ([], "the top level must be a JSON object"),
+    ({}, "the file has no jobs"),
+    ({"jobs": []}, "jobs must be an object in the file"),
+    ({"jobs": {}, "needs_nothing": []}, "unknown field needs_nothing in the "
+                                        "file"),
+])
+def test_included_file_wrong_shape(scripts, data, text):
+    scripts.write(SHARED, json.dumps(data))
+    refused(scripts, including(None, line()),
+            f"{CONFIG_FILE}: include {SHARED}: {text}")
+
+
+def test_named_job_absent_from_file(scripts):
+    shared_file(scripts, {"other": job()})
+    refused(scripts, including(None, line()),
+            f"{CONFIG_FILE}: include {SHARED}: job upgrade-check: the file "
+            "has no job upgrade-check (it has: other)")
+
+
+def test_named_job_absent_from_empty_file(scripts):
+    shared_file(scripts, {})
+    refused(scripts, including(None, line()), "(it has: none)")
+
+
+def test_named_job_collides_with_own_job(scripts):
+    shared_file(scripts, {"own": job()})
+    refused(scripts, including(None, line(own={})),
+            f"{CONFIG_FILE}: include {SHARED}: job own: the config declares "
+            "a job own of its own")
+
+
+def test_named_job_collides_with_another_include(scripts):
+    shared_file(scripts, {"upgrade-check": job()})
+    shared_file(scripts, {"upgrade-check": job()}, path="more/jobs.json")
+    refused(scripts, including(None, line(), line(path="more/jobs.json")),
+            f"{CONFIG_FILE}: include more/jobs.json: job upgrade-check: job "
+            f"upgrade-check is already taken by include {SHARED}")
+
+
+def test_secret_not_in_limit(scripts):
+    shared_file(scripts, {"upgrade-check": job(secrets=["CICD_WRITE_TOKEN"])})
+    refused(scripts, including(None, line(**{"upgrade-check": {
+        "secrets": ["CICD_READ_TOKEN"]}})),
+            f"{CONFIG_FILE}: include {SHARED}: job upgrade-check: secret "
+            "CICD_WRITE_TOKEN is not in the include line's limit (allowed: "
+            "CICD_READ_TOKEN)")
+
+
+def test_secret_with_no_limit(scripts):
+    shared_file(scripts, {"upgrade-check": job(secrets=["CICD_READ_TOKEN"])})
+    refused(scripts, including(None, line()),
+            "secret CICD_READ_TOKEN is not in the include line's limit "
+            "(allowed: none)")
+
+
+def test_permission_not_in_limit(scripts):
+    shared_file(scripts, {"upgrade-check": job(
+        permissions={"packages": "read"})})
+    refused(scripts, including(None, line(**{"upgrade-check": {
+        "permissions": {"issues": "write"}}})),
+            f"{CONFIG_FILE}: include {SHARED}: job upgrade-check: permission "
+            "packages is not in the include line's limit (allowed: issues: "
+            "write)")
+
+
+def test_permission_wider_than_limit(scripts):
+    shared_file(scripts, {"upgrade-check": job(
+        on=["merge"], branches=["main"], permissions={"packages": "write"})})
+    refused(scripts, including(None, line(**{"upgrade-check": {
+        "permissions": {"packages": "read"}}})),
+            f"{CONFIG_FILE}: include {SHARED}: job upgrade-check: permission "
+            "packages: write is wider than the include line's limit "
+            "(packages: read)")
+
+
+def test_included_job_step_missing(scripts):
+    shared_file(scripts, {"upgrade-check": job(steps=["ci/missing.sh"],
+                                               setup="ci/nosetup.sh")})
+    refused(scripts, including(None, line()),
+            f"{CONFIG_FILE}: include {SHARED}: job upgrade-check: step 1: "
+            "ci/missing.sh is not a file in the repository",
+            f"{CONFIG_FILE}: include {SHARED}: job upgrade-check: setup")
+
+
+def test_included_job_other_checks_apply(scripts):
+    shared_file(scripts, {"upgrade-check": job(permissions={
+        "packages": "write"}, bogus=1)})
+    refused(scripts, including(None, line(**{"upgrade-check": {
+        "permissions": {"packages": "write"}}})),
+            f"include {SHARED}: job upgrade-check: unknown field bogus",
+            f"include {SHARED}: job upgrade-check: permission packages: "
+            "write is not allowed on a job with open in on")
+
+
+def test_included_job_not_an_object(scripts):
+    shared_file(scripts, {"upgrade-check": "nope"})
+    refused(scripts, including(None, line()),
+            f"include {SHARED}: job upgrade-check: a job must be an object")
+
+
+@pytest.mark.parametrize("path,text", [
+    ("/etc/jobs.json", "/etc/jobs.json is an absolute path"),
+    ("../jobs.json", "../jobs.json contains a '..' segment"),
+    ("a/../../jobs.json", "a/../../jobs.json contains a '..' segment"),
+])
+def test_include_path_leaves_the_repository(scripts, path, text):
+    refused(scripts, including(None, line(path=path)),
+            f"{CONFIG_FILE}: include {path}: {text}")
+
+
+def test_include_path_leaving_and_bad_jobs_both_reported(scripts):
+    refused(scripts, including(None, {"path": "/x.json", "jobs": {}}),
+            "/x.json is an absolute path", "jobs must be a non-empty object")
+
+
+def test_include_names_a_custom_config_path(scripts):
+    scripts.write("other.json", json.dumps(including(None, line())))
+    result = scripts.run("validate", "--config", "other.json")
+    assert result.returncode == 2
+    assert f"other.json: include {SHARED}: cannot read" in result.stderr
+
+
+@pytest.mark.parametrize("value,text", [
+    ({}, "include must be an array of include lines"),
+    ("x", "include must be an array of include lines"),
+    ([[]], "include[0]: an include line must be an object"),
+    ([{"path": SHARED, "jobs": {"upgrade-check": {}}, "x": 1}],
+     f"include {SHARED}: unknown field x"),
+    ([{"jobs": {"upgrade-check": {}}}],
+     "include[0]: path must be a non-empty string"),
+    ([{"path": "", "jobs": {"upgrade-check": {}}}],
+     "include[0]: path must be a non-empty string"),
+    ([{"path": 3, "jobs": {"upgrade-check": {}}}],
+     "include[0]: path must be a non-empty string"),
+    ([{"path": SHARED}], "jobs must be a non-empty object"),
+    ([{"path": SHARED, "jobs": []}], "jobs must be a non-empty object"),
+    ([{"path": SHARED, "jobs": {}}], "jobs must be a non-empty object"),
+    ([{"path": SHARED, "jobs": {"bad name": {}}}],
+     "job bad name: invalid job name"),
+    ([{"path": SHARED, "jobs": {"upgrade-check": []}}],
+     "job upgrade-check: the limit must be an object"),
+    ([{"path": SHARED, "jobs": {"upgrade-check": {"x": 1}}}],
+     "job upgrade-check: unknown field x in the limit"),
+    ([{"path": SHARED, "jobs": {"upgrade-check": {"secrets": "X"}}}],
+     "the limit's secrets must be an array of distinct secret names"),
+    ([{"path": SHARED, "jobs": {"upgrade-check": {"secrets": ["NOPE"]}}}],
+     "the limit's secrets must be an array of distinct secret names"),
+    ([{"path": SHARED, "jobs": {"upgrade-check": {
+        "secrets": ["VENDOR_PAT", "VENDOR_PAT"]}}}],
+     "the limit's secrets must be an array of distinct secret names"),
+    ([{"path": SHARED, "jobs": {"upgrade-check": {"permissions": []}}}],
+     "job upgrade-check: the limit: permissions must be an object"),
+    ([{"path": SHARED, "jobs": {"upgrade-check": {
+        "permissions": {"actions": "write"}}}}],
+     "job upgrade-check: the limit: unknown permission 'actions'"),
+    ([{"path": SHARED, "jobs": {"upgrade-check": {
+        "permissions": {"packages": "admin"}}}}],
+     "level 'admin' is not allowed"),
+])
+def test_malformed_include_refused(scripts, value, text):
+    shared_file(scripts, {"upgrade-check": job()})
+    refused(scripts, {"jobs": {"own": job()}, "include": value},
+            CONFIG_FILE, text)
+
+
+def test_include_with_invalid_own_jobs_still_checked(scripts):
+    refused(scripts, {"jobs": [], "include": [line()]},
+            "config: jobs must be an object",
+            f"include {SHARED}: cannot read the file")
+
+
+def test_included_jobs_join_the_manual_form_checks(scripts):
+    shared_file(scripts, {"upgrade-check": job(inputs={
+        "job": {"description": "clash"}})})
+    refused(scripts, including(None, line()),
+            "job upgrade-check: input job: the name job is reserved")
+
+
+def test_reading_an_included_file_runs_no_tool(scripts, monkeypatch):
+    shared_file(scripts, {"upgrade-check": job()})
+    scripts.config(including(None, line()))
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("no subprocess may run to read an include")
+
+    monkeypatch.setattr(git_cicd.subprocess, "run", forbidden)
+    monkeypatch.setattr(git_cicd.subprocess, "Popen", forbidden)
+    monkeypatch.setattr(git_cicd, "git", forbidden)
+    config = git_cicd.load_config(str(scripts.path))
+    assert "upgrade-check" in config["jobs"]
