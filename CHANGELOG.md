@@ -2,6 +2,11 @@
 
 Releases of git-cicd. Each entry is written by `git-semver bump` in the pull request that raises the version; merging it into `main` tags and publishes that version.
 
+## [0.4.0] - 2026-11-28
+
+### Changed
+- Only an admin starts a manual run by default: the new top-level config key manual_role (admin, the default, or write) is the lowest role of whoever starts one, and the Manual workflow reads the role of the person who started the run and passes it to decide (CICD_ACTOR_ROLE), which refuses anyone below it and an unreadable role. Breaking default: adopters whose non-admin writers start manual runs set "manual_role": "write"; run generate and commit git-cicd-manual.yml.
+
 ## [0.3.0] - 2026-11-28
 
 ### Changed

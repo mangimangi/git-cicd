@@ -67,6 +67,9 @@ def test_the_manual_form_lists_release_and_update_vendored():
     config = git_cicd.load_config(str(ROOT))
     assert text == git_cicd.render_workflows(config, "git-cicd")[
         ".github/workflows/git-cicd-manual.yml"]
+    assert config["manual_role"] == "admin"  # the default: admins only
+    assert ("          CICD_ACTOR_ROLE: ${{ steps.role.outputs.role }}\n"
+            in text)
     fields = form_fields(text)
     assert fields == {
         "job": {"description": "The config job to run", "required": True,

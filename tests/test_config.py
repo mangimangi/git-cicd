@@ -673,3 +673,24 @@ def test_repository_defaults_to_none(scripts):
 def test_repository_must_be_a_name(scripts, value):
     refused(scripts, {"jobs": {"t": job()}, "repository": value},
             "config: repository must be the repository's name")
+
+
+# ── manual_role ─────────────────────────────────────────────────────────────
+
+def test_manual_role_defaults_to_admin(scripts):
+    scripts.config({"jobs": {"t": job()}})
+    assert git_cicd.load_config(str(scripts.path))["manual_role"] == "admin"
+
+
+@pytest.mark.parametrize("value", ["admin", "write"])
+def test_manual_roles_are_accepted(scripts, value):
+    scripts.config({"jobs": {"t": job()}, "manual_role": value})
+    assert scripts.run("validate").returncode == 0
+    assert git_cicd.load_config(str(scripts.path))["manual_role"] == value
+
+
+@pytest.mark.parametrize("value", ["read", "Admin", "", "maintain", None, 1,
+                                   ["admin"], True])
+def test_manual_role_must_be_admin_or_write(scripts, value):
+    refused(scripts, {"jobs": {"t": job()}, "manual_role": value},
+            "config: manual_role must be one of write, admin")
