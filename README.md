@@ -13,18 +13,17 @@ It is one Python 3 file with no dependency beyond the standard library and the
 git CLI, vendored by [git-vendored](https://github.com/mangimangi/git-vendored)
 and versioned by [git-semver](https://github.com/mangimangi/git-semver).
 
-What is built today: the whole interface is validated, and the `open` trigger
-(pull requests), the `merge` trigger (a change lands on a branch), manual
-runs of one named job and local runs execute. The `cron` trigger validates in
-a config and is reported as **not built yet** when asked to run (exit 2); it
-is never silently ignored. See [Not built yet](#not-built-yet).
+What is built today: the whole interface is validated, and every trigger
+executes: `open` (pull requests), `merge` (a change lands on a branch),
+`cron` (a schedule fires), manual runs of one named job, and local runs. See
+[Not built yet](#not-built-yet) for what remains.
 
 ## Files
 
 | Path | Owner | What |
 |---|---|---|
 | `.vendored/configs/git-cicd.json` | the repository | the config: jobs, `needs_nothing`, `max_parallel` |
-| `.github/workflows/git-cicd-<trigger>.yml` | generated | the GitHub Actions workflows, one per trigger (`git-cicd-open.yml`, `git-cicd-merge.yml` and `git-cicd-manual.yml` today); generated, committed |
+| `.github/workflows/git-cicd-<trigger>.yml` | generated | the GitHub Actions workflows, one per trigger (`git-cicd-open.yml`, `git-cicd-merge.yml`, `git-cicd-manual.yml`, and `git-cicd-cron.yml` when a job has `cron` in `on`); generated, committed |
 | your scripts (e.g. `ci/`) | the repository | setup and step scripts, wherever the repository keeps them; git-cicd installs none |
 | `.vendored/pkg/git-cicd/` | git-cicd | the tool and its workflow template, installed by `install.sh` |
 
@@ -179,6 +178,11 @@ any sequence without `/` (so `*.md` is Markdown at the repository root only),
   `before`), so, like any base that does not resolve, the diff cannot be
   computed and every `merge` job whose `branches` match is needed. A push
   that deletes a branch runs nothing.
+- **`cron`**: a schedule fires, and the job's `cron` is the expression that
+  fired. The job then runs once on each of its literal `branches`, at that
+  branch's head commit; `paths` and `needs_nothing` do not apply (a schedule
+  has no change). A branch that does not exist fails the run with
+  `branch <b> does not exist`, never silently.
 - **manual**: someone runs one named job by hand (the `Manual` workflow).
   Every job may be run by hand unless it says `"manual": false`; `branches`
   still binds, against the branch the run is started on; `paths` and
@@ -205,13 +209,13 @@ Every decision carries a reason, and the report shows it.
 
 | Variable | Value |
 |---|---|
-| `CICD_TRIGGER` | the trigger (`open`, `merge`, `manual`) |
+| `CICD_TRIGGER` | the trigger (`open`, `merge`, `cron`, `manual`) |
 | `CICD_JOB` | the job name |
-| `CICD_TARGET_BRANCH` | the target branch: on `open` the pull request's base; on `merge` the branch the change landed on; on manual the branch the run was started on |
-| `CICD_SOURCE_BRANCH` | the source branch: on `open` the pull request's head (what `.vendored/check` needs to let install branches through); on `merge` and manual the same branch as the target (there is no separate source, and the variable is never empty) |
-| `CICD_BASE` | the base commit: on `open` the pull request's base; on `merge` the commit before the push (all zeros when the push created the branch); on manual the run's commit |
-| `CICD_HEAD` | the head commit: on `open` the pull request's head; on `merge` the landed commit; on manual the run's commit (`github.sha`) |
-| `CICD_CHANGED_FILES` | absolute path of a file listing the changed files, one per line (empty when the diff cannot be computed, and always on manual) |
+| `CICD_TARGET_BRANCH` | the target branch: on `open` the pull request's base; on `merge` the branch the change landed on; on `cron` the branch the job runs on; on manual the branch the run was started on |
+| `CICD_SOURCE_BRANCH` | the source branch: on `open` the pull request's head (what `.vendored/check` needs to let install branches through); on `merge`, `cron` and manual the same branch as the target (there is no separate source, and the variable is never empty) |
+| `CICD_BASE` | the base commit: on `open` the pull request's base; on `merge` the commit before the push (all zeros when the push created the branch); on `cron` the branch's head commit; on manual the run's commit |
+| `CICD_HEAD` | the head commit: on `open` the pull request's head; on `merge` the landed commit; on `cron` the branch's head commit (the same as the base); on manual the run's commit (`github.sha`) |
+| `CICD_CHANGED_FILES` | absolute path of a file listing the changed files, one per line (empty when the diff cannot be computed, and always on `cron` and manual) |
 | `CICD_INPUT_<NAME>` | one per [declared input](#declared-inputs): the manual run's value, else the default, else empty; no other `CICD_INPUT_` variable is set |
 
 - `GITHUB_TOKEN` and `VENDOR_PAT`, passed through unchanged. git-cicd itself
@@ -254,7 +258,7 @@ repository the workflow runs in. GitHub shows a check run after its
 workflow's name, which is the trigger's (`Open / Unit Tests / medici:unit-tests`,
 `Open / Decide / git-cicd:decide`, and on a push `Merge / Unit Tests /
 medici:unit-tests`, `Merge / Decide / git-cicd:decide`,
-`Merge / Report / git-cicd:report`, and `Manual / ...` for a manual run); a status has no workflow and shows as
+`Merge / Report / git-cicd:report`, and `Cron / ...` or `Manual / ...` for a schedule or a manual run); a status has no workflow and shows as
 `Verdict / git-cicd:verdict`. No row or status name carries a version: it is
 what branch protection and anything else that waits on a check refers to, and
 it does not change when a tool is upgraded.
@@ -336,9 +340,10 @@ What a reader can rely on, and from when:
   its `decide` job once it sees that the pull request's head has moved on,
   and its report is FAILED for every job it needed.
 
-**The status when there is no pull request.** A `merge` or manual run's
-verdict is the same `Verdict / git-cicd:verdict` commit status, on the commit
-the run is for (the landed commit, or the commit a manual run was started on):
+**The status when there is no pull request.** A `merge`, `cron` or manual
+run's verdict is the same `Verdict / git-cicd:verdict` commit status, on the
+commit the run is for (the landed commit, the head of each branch a schedule
+runs on, or the commit a manual run was started on):
 pending from the first step of decide, final from the last step of report,
 and failure when the report did not run to the end. One exception keeps the
 status the pull request's: a push to a branch with an open pull request
@@ -371,11 +376,11 @@ overlap rule, and each named for its trigger, so a row reads
 |---|---|---|---|
 | `open` | `Open` | `.github/workflows/git-cicd-open.yml` | yes |
 | `merge` | `Merge` | `.github/workflows/git-cicd-merge.yml` | yes |
-| `cron` | `Cron` | `.github/workflows/git-cicd-cron.yml` | not yet |
+| `cron` | `Cron` | `.github/workflows/git-cicd-cron.yml` | yes, when a job has `cron` in `on` |
 | manual | `Manual` | `.github/workflows/git-cicd-manual.yml` | yes |
 
-The names and file names are fixed for good: when the other triggers are
-built, they add their files and change none. The names are the trigger words
+The names and file names are fixed for good: each trigger was built by
+adding its own file, changing no other. The names are the trigger words
 (not `CI`/`CD`): the config already says `"on": ["open"]`, and a trigger is
 not a kind of job.
 
@@ -458,6 +463,47 @@ The manual workflow (`Manual`):
 - Token, checkout, queue and verdict as on `Merge`: write permissions only on
   the job that runs the config's scripts, full history and tags, and manual
   and merge runs on one branch go one at a time, never cancelled.
+
+The cron workflow (`Cron`):
+
+- Event: `schedule`, one entry per distinct `cron` expression among the
+  config's jobs with `cron` in `on`, sorted and quoted
+  (`    - cron: "0 9 * * 1"`). This schedule block is the only part of any
+  generated file that varies with the config; `verify` fails when it and the
+  config disagree.
+- **No cron job, no file.** With no job that has `cron` in `on`, `generate`
+  writes no `git-cicd-cron.yml` and removes an existing one (saying so; commit
+  the removal), and `verify` fails while it is still there: GitHub needs an
+  event under `on:`, and a schedule must never fire with nothing to run. The
+  template is installed either way, and the install manifest lists only the
+  workflows `generate` wrote.
+- **GitHub runs schedules only from the default branch's copy of the file**,
+  on the default branch's ref. A schedule added on another branch does
+  nothing until it reaches the default branch, and decide reads the default
+  branch's config.
+- `decide --trigger cron --cron EXPR` gets the expression that fired
+  (`github.event.schedule`, through `env:`) and needs every job whose `cron`
+  is that expression, once for each of its literal `branches`; other cron
+  jobs are `not needed (scheduled at <their expression>)`. It resolves each
+  branch's head once, from `origin/<branch>` after a full checkout, so every
+  job on a branch runs on the same commit, and a branch that does not exist
+  is reported as failed. Its matrix output is the cron-only `runs`, a list of
+  `{key, job, branch, sha}`.
+- Token: write permissions (`contents: write`, `pull-requests: write`) only
+  on the job that runs the config's scripts, which checks out its branch's
+  head with full history and tags; decide and report get `statuses: write`
+  and `pull-requests: read`.
+- No queue: a schedule event carries the default branch's ref, not the job's
+  branch, so cron runs do not join the `Merge`/`Manual` queue (the one cron
+  job planned, a weekly update, only opens pull requests).
+- Verdict: one `Verdict / git-cicd:verdict` status on the head commit of
+  **each branch** the run is for, set to pending as soon as decide has
+  resolved the heads and to the branch's verdict by the last step of report
+  (failure when the report did not run to the end), under the no-open-pull-
+  request rule. The report has one section and one verdict per branch, then
+  the run's verdict (`PASSED - schedule 0 9 * * 1 on 1 branch`), which the
+  `Report / git-cicd:report` check follows; a missing branch has no commit to
+  carry a status and fails the run.
 
 **The generate/verify rule.** The platform's token cannot push workflow files,
 so CI never regenerates. Whoever upgrades git-cicd or changes the config runs
@@ -593,25 +639,21 @@ Exit codes:
 |---|---|
 | 0 | verdict PASSED |
 | 1 | verdict FAILED (a blocking job failed or could not run, or the generated workflows do not match the config) |
-| 2 | config or usage error, or a trigger that is not built yet |
+| 2 | config or usage error, or a refused manual `run-job` |
 
 ## Commands
 
 | Command | What |
 |---|---|
 | `validate [--config PATH]` | load and validate the config: `config ok: N jobs` or every error |
-| `decide --trigger open\|merge\|manual --target B --source B --base SHA --head SHA [--job NAME] [--json] [--changed-files-out PATH]` | one decision per declared job, with the reason; `--job` names the job of a manual run (required with `--trigger manual`, refused with any other); in Actions also writes `jobs`, `names`, `any`, `max_parallel` to `GITHUB_OUTPUT` |
-| `run-job JOB --trigger open\|merge\|manual --target … --head SHA [--setup] [--result PATH]` | setup when asked, then the steps; result JSON with the times |
-| `generate` / `verify` | write / check the generated workflows (`.github/workflows/git-cicd-open.yml`, `.github/workflows/git-cicd-merge.yml`, `.github/workflows/git-cicd-manual.yml`); `generate` removes, and `verify` fails on, the old `.github/workflows/git-cicd.yml` |
-| `report --decisions FILE --results DIR [--trigger open\|merge\|manual] [--verdict-out PATH]` | the report and verdict from `decide --json` and `run-job --result` files; `--verdict-out` writes the status state (`success`/`failure`) and description, one per line |
+| `decide --trigger open\|merge\|manual --target B --source B --base SHA --head SHA [--job NAME] [--json] [--changed-files-out PATH]`, or `decide --trigger cron --cron EXPR [--json]` | one decision per declared job, with the reason; `--job` names the job of a manual run (required with `--trigger manual`, refused with any other); `--cron` is the schedule that fired (required with `--trigger cron`, refused with any other); in Actions also writes `jobs`, `names`, `any`, `max_parallel` (and on cron `runs`) to `GITHUB_OUTPUT` |
+| `run-job JOB --trigger open\|merge\|cron\|manual --target … --head SHA [--setup] [--result PATH]` | setup when asked, then the steps; result JSON with the times |
+| `generate` / `verify` | write / check the generated workflows (`.github/workflows/git-cicd-open.yml`, `.github/workflows/git-cicd-merge.yml`, `.github/workflows/git-cicd-manual.yml`, and `.github/workflows/git-cicd-cron.yml` when a job has `cron` in `on`); `generate` removes, and `verify` fails on, the old `.github/workflows/git-cicd.yml` |
+| `report --decisions FILE --results DIR [--trigger open\|merge\|cron\|manual] [--verdict-out PATH]` | the report and verdict from `decide --json` and `run-job --result` files; `--verdict-out` writes the status state (`success`/`failure`) and description, one per line (on cron one line per branch head: `<sha> TAB <state> TAB <description>`) |
 | `check […]` | the local command above |
 
 ## Not built yet
 
-- The `cron` trigger: it validates, and `decide`/`run-job`/`report` exit 2
-  with `the cron trigger is not built yet` when asked to run it. Its workflow
-  (`Cron`) is not generated yet, so nothing triggers it; when it is built, it
-  adds its own file under the name above and changes no other file.
 - Secrets beyond `GITHUB_TOKEN` and `VENDOR_PAT`.
 - An image or runtime per job.
 

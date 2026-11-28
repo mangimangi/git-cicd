@@ -9,6 +9,7 @@ from tests.conftest import ROOT, git_cicd
 WORKFLOW = ".github/workflows/git-cicd-open.yml"
 MERGE = ".github/workflows/git-cicd-merge.yml"
 MANUAL = ".github/workflows/git-cicd-manual.yml"
+CRON = ".github/workflows/git-cicd-cron.yml"
 TEMPLATES = ROOT / "templates" / "workflows"
 LEGACY = ".github/workflows/git-cicd.yml"
 TEMPLATE = ROOT / "templates" / "workflows" / "open.yml"
@@ -339,14 +340,15 @@ def test_verify_fails_while_the_old_file_is_there(tool_repo):
 
 def test_generated_files_are_named_for_their_triggers():
     """One workflow per trigger, its name the trigger's word and its file
-    fixed for good; `open`, `merge` and `manual` are generated so far."""
+    fixed for good; every trigger is generated (cron when a job has cron in
+    on)."""
     assert git_cicd.WORKFLOWS == {
         "open": ("Open", ".github/workflows/git-cicd-open.yml"),
         "merge": ("Merge", ".github/workflows/git-cicd-merge.yml"),
         "cron": ("Cron", ".github/workflows/git-cicd-cron.yml"),
         "manual": ("Manual", ".github/workflows/git-cicd-manual.yml"),
     }
-    assert git_cicd.GENERATED_TRIGGERS == ("open", "merge", "manual")
+    assert git_cicd.GENERATED_TRIGGERS == ("open", "merge", "cron", "manual")
     templates = sorted(p.stem for p in (ROOT / "templates" / "workflows")
                        .glob("*.yml"))
     assert templates == sorted(git_cicd.GENERATED_TRIGGERS)
@@ -703,3 +705,131 @@ def test_declared_inputs_do_not_change_the_files(tool_repo):
         "bump_type": {"choices": ["patch", "minor"], "default": "patch"}}
     generate(tool_repo, config)
     assert generated_files(tool_repo) == files_a
+
+
+# ── cron: the Cron workflow ─────────────────────────────────────────────────
+
+def cron_config():
+    config = base_config()
+    config["jobs"]["nightly"] = {"on": ["cron"], "branches": ["main", "dev"],
+                                 "cron": "0 3 * * *", "steps": ["ci/test.sh"]}
+    config["jobs"]["weekly"] = {"on": ["cron", "open"], "branches": ["main"],
+                                "cron": "0 9 * * 1", "steps": ["ci/test.sh"]}
+    config["jobs"]["again"] = {"on": ["cron"], "branches": ["dev"],
+                               "cron": "0 3 * * *", "steps": ["ci/other.sh"]}
+    return config
+
+
+def generate_cron(repo, config=None):
+    generate(repo, config or cron_config())
+    return (repo.path / CRON).read_text()
+
+
+def test_cron_file_has_one_schedule_entry_per_distinct_expression(tool_repo):
+    text = generate_cron(tool_repo)
+    assert text.startswith(f"# {CRON} - GENERATED")
+    assert "\nname: Cron\n" in text
+    assert ('\non:\n  schedule:\n    - cron: "0 3 * * *"\n'
+            '    - cron: "0 9 * * 1"\n\npermissions:') in text
+    assert "__SCHEDULE__" not in text and "__TOOL__" not in text
+    assert "CRON: ${{ github.event.schedule }}" in text
+    assert f'python3 {TOOL} decide --trigger=cron --cron="$CRON"' in text
+    assert f"python3 {TOOL} report --trigger=cron" in text
+
+
+def test_cron_file_no_expressions_in_run_blocks(tool_repo):
+    blocks = run_blocks(generate_cron(tool_repo))
+    assert len(blocks) == 7
+    for block in blocks:
+        assert "${{" not in block, block
+
+
+def test_cron_permissions_and_no_queue(tool_repo):
+    text = generate_cron(tool_repo)
+    jobs = job_blocks(text)
+    assert set(jobs) == {"decide", "run", "verdict"}
+    assert text.split("\njobs:\n", 1)[0].endswith(
+        "\npermissions:\n  contents: read\n")
+    assert ("    permissions:\n      contents: write\n"
+            "      pull-requests: write\n") in jobs["run"]
+    for name in ("decide", "verdict"):
+        assert ("    permissions:\n      contents: read\n      statuses: write\n"
+                "      pull-requests: read\n") in jobs[name]
+    writes = re.findall(r"^\s*([a-z-]+):\s*write\s*$", text, re.M)
+    assert sorted(writes) == ["contents", "pull-requests", "statuses",
+                              "statuses"]
+    body = text.split("\nname: Cron\n", 1)[1]
+    assert "concurrency" not in body and "actions/runs\"" not in body
+    checkout = steps_of(jobs["run"])[0]
+    assert "fetch-depth: 0" in checkout and "fetch-tags: true" in checkout
+    assert "ref: ${{ matrix.entry.sha }}" in checkout
+    assert "entry: ${{ fromJSON(needs.decide.outputs.runs) }}" in jobs["run"]
+    assert "name: git-cicd-result-${{ matrix.entry.key }}" in jobs["run"]
+
+
+def test_cron_verdict_per_branch_pending_then_final_last(tool_repo):
+    jobs = job_blocks(generate_cron(tool_repo))
+    names = [s.split("\n", 1)[0] for s in steps_of(jobs["decide"])]
+    assert names[:3] == ["Checkout repository",
+                         "Decide which jobs the schedule needs",
+                         "Set the Verdict / git-cicd:verdict status to pending"]
+    pending = steps_of(jobs["decide"])[2]
+    assert "jq -r '.heads[] | select(. != null)'" in pending
+    assert "-f state=pending" in pending
+    last = steps_of(jobs["verdict"])[-1]
+    assert last.startswith("Set the Verdict / git-cicd:verdict status\n")
+    assert "        if: always()\n" in last
+    assert "read -r HEAD_SHA STATE DESCRIPTION" in last
+    assert "tfailure\\tFAILED - the report did not run to the end" in last
+    for step in (pending, last):
+        assert 'select(.state == "open" and .head.sha == env.HEAD_SHA)' in step
+        assert "continue" in step
+
+
+def test_no_cron_job_no_cron_file(tool_repo):
+    generate(tool_repo, base_config())
+    assert not (tool_repo.path / CRON).exists()
+    assert tool_repo.run("verify").returncode == 0
+
+
+def test_generate_removes_a_cron_file_without_cron_jobs(tool_repo):
+    generate_cron(tool_repo)
+    tool_repo.config(base_config())
+    result = tool_repo.run("verify")
+    assert result.returncode == 1
+    assert f"{CRON} is still there, but no job has cron in on" in result.stdout
+    assert f"and the removal of {CRON}" in result.stdout
+    result = tool_repo.run("generate")
+    assert result.returncode == 0
+    assert f"removed {CRON} (no job has cron in on" in result.stdout
+    assert not (tool_repo.path / CRON).exists()
+    assert tool_repo.run("verify").returncode == 0
+
+
+def test_stale_schedule_block_fails_verify(tool_repo):
+    generate_cron(tool_repo)
+    config = cron_config()
+    config["jobs"]["weekly"]["cron"] = "0 10 * * 1"
+    tool_repo.config(config)
+    result = tool_repo.run("verify")
+    assert result.returncode == 1
+    assert '-    - cron: "0 9 * * 1"' in result.stdout
+    assert '+    - cron: "0 10 * * 1"' in result.stdout
+
+
+def test_verify_fails_on_a_hand_edit_of_the_cron_file(tool_repo):
+    text = generate_cron(tool_repo)
+    (tool_repo.path / CRON).write_text(text.replace("fetch-tags: true", ""))
+    result = tool_repo.run("verify")
+    assert result.returncode == 1
+    assert f"{CRON} (committed)" in result.stdout
+
+
+def test_cron_jobs_change_only_the_cron_file(tool_repo):
+    generate(tool_repo, base_config())
+    before = generated_files(tool_repo)
+    generate_cron(tool_repo)
+    after = generated_files(tool_repo)
+    assert sorted(after) == sorted(list(before) + ["git-cicd-cron.yml"])
+    for name, text in before.items():
+        assert after[name] == text

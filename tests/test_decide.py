@@ -282,25 +282,23 @@ def test_not_open_jobs_reported(repo):
     assert jobs["release"]["reason"] == "not an open job"
 
 
-@pytest.mark.parametrize("trigger", ["cron"])
-def test_unbuilt_triggers_exit_2(repo, trigger):
+def test_unknown_trigger_is_refused(repo):
     base = setup_repo(repo)
-    result = repo.run("decide", "--trigger", trigger, "--target", "main",
+    result = repo.run("decide", "--trigger", "nightly", "--target", "main",
                       "--source", "feature", "--base", base, "--head", base)
     assert result.returncode == 2
-    assert (f"the {trigger} trigger is not built yet (built: "
-            f"{', '.join(git_cicd.BUILT_TRIGGERS)})") in result.stderr
-    assert "gcd-e74c" not in result.stderr
-    assert result.stdout == ""
+    assert "invalid choice: 'nightly'" in result.stderr
 
 
-def test_unbuilt_trigger_lists_declaring_jobs(repo):
-    base = setup_repo(repo, jobs={
-        "nightly": {"on": ["cron"], "branches": ["main"], "cron": "0 3 * * *",
-                    "steps": ["ci/test.sh"]}})
-    result = repo.run("decide", "--trigger", "cron", "--target", "main",
-                      "--source", "feature", "--base", base, "--head", base)
-    assert "jobs declaring it: nightly" in result.stderr
+@pytest.mark.parametrize("trigger", ["open", "merge", "cron", "manual"])
+def test_no_trigger_is_not_built(repo, trigger):
+    base = setup_repo(repo)
+    extra = {"cron": ["--cron=0 3 * * *"], "manual": ["--job=test"]}
+    result = repo.run("decide", f"--trigger={trigger}", "--target=main",
+                      "--source=main", f"--base={base}", f"--head={base}",
+                      *extra.get(trigger, []))
+    assert "not built" not in result.stdout + result.stderr
+    assert result.returncode == 0, result.stderr
 
 
 # ── merge: a change landed on a branch ──────────────────────────────────────
@@ -647,3 +645,112 @@ def test_manual_input_failures_are_refusals(repo, inputs, reason):
     data = decide_inputs(repo, inputs)
     assert data["refused"].startswith(reason), data["refused"]
     assert not data["jobs"][0]["needed"]
+
+
+# ── cron: a schedule fired ──────────────────────────────────────────────────
+
+CRON_JOBS = {
+    "test": {"on": ["open"], "branches": ["**"], "steps": ["ci/test.sh"]},
+    "nightly": {"on": ["cron"], "branches": ["main", "dev"],
+                "cron": "0 3 * * *", "paths": ["src/**"],
+                "steps": ["ci/lint.sh"]},
+    "weekly": {"on": ["cron", "open"], "branches": ["main"],
+               "cron": "0 9 * * 1", "steps": ["ci/bump.sh"]},
+    "again": {"on": ["cron"], "branches": ["dev"], "cron": "0 3 * * *",
+              "steps": ["ci/test.sh"]},
+}
+
+
+def setup_cron(repo, branches=("main", "dev")):
+    """Remote-tracking heads for the cron branches, as after a full
+    checkout. Return {branch: sha}."""
+    setup_repo(repo, jobs=CRON_JOBS)
+    heads = {}
+    for branch in branches:
+        repo.write(f"{branch}.txt", branch)
+        heads[branch] = repo.commit(f"on {branch}")
+        repo.git("update-ref", f"refs/remotes/origin/{branch}", heads[branch])
+    return heads
+
+
+def decide_cron(repo, expr, env=None):
+    result = repo.run("decide", "--trigger=cron", f"--cron={expr}", "--json",
+                      env=env)
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    return data, {j["name"]: j for j in data["jobs"]}
+
+
+def test_cron_needs_the_jobs_of_the_fired_expression_on_each_branch(repo):
+    heads = setup_cron(repo)
+    data, jobs = decide_cron(repo, "0 3 * * *")
+    assert data["trigger"] == "cron" and data["cron"] == "0 3 * * *"
+    assert data["changed_files"] == []
+    assert jobs["nightly"] == dict(jobs["nightly"], needed=True,
+                                   reason="scheduled 0 3 * * *")
+    assert jobs["again"]["needed"] is True
+    assert jobs["weekly"]["needed"] is False
+    assert jobs["weekly"]["reason"] == "scheduled at 0 9 * * 1"
+    assert jobs["test"]["reason"] == "not a cron job"
+    assert data["runs"] == [
+        {"key": "nightly-1", "job": "nightly", "branch": "main",
+         "sha": heads["main"]},
+        {"key": "nightly-2", "job": "nightly", "branch": "dev",
+         "sha": heads["dev"]},
+        {"key": "again-1", "job": "again", "branch": "dev",
+         "sha": heads["dev"]},
+    ]
+    assert data["heads"] == {"main": heads["main"], "dev": heads["dev"]}
+    assert data["missing"] == []
+
+
+def test_cron_other_expression(repo):
+    heads = setup_cron(repo)
+    data, jobs = decide_cron(repo, "0 9 * * 1")
+    assert [r["job"] for r in data["runs"]] == ["weekly"]
+    assert data["heads"] == {"main": heads["main"]}
+    assert jobs["nightly"]["reason"] == "scheduled at 0 3 * * *"
+
+
+def test_cron_missing_branch_is_recorded(repo):
+    heads = setup_cron(repo, branches=("main",))
+    data, _ = decide_cron(repo, "0 3 * * *")
+    assert data["heads"] == {"main": heads["main"], "dev": None}
+    assert [(r["job"], r["branch"]) for r in data["runs"]] == [
+        ("nightly", "main")]
+    assert data["missing"] == [
+        {"job": "nightly", "branch": "dev",
+         "reason": "branch dev does not exist"},
+        {"job": "again", "branch": "dev",
+         "reason": "branch dev does not exist"}]
+
+
+def test_cron_outputs(repo, tmp_path):
+    setup_cron(repo)
+    out = tmp_path / "out"
+    data, _ = decide_cron(repo, "0 3 * * *", env={"GITHUB_OUTPUT": str(out)})
+    outputs = dict(line.split("=", 1) for line in out.read_text().splitlines())
+    assert json.loads(outputs["runs"]) == data["runs"]
+    assert outputs["any"] == "true"
+    assert json.loads(outputs["names"])["nightly"] == "Nightly"
+    # the other triggers' outputs carry no runs
+    base = repo.git("rev-parse", "HEAD")
+    out.write_text("")
+    repo.run("decide", "--trigger=open", "--target=main", "--source=f",
+             f"--base={base}", f"--head={base}", env={"GITHUB_OUTPUT": str(out)})
+    assert "runs=" not in out.read_text()
+
+
+def test_cron_needs_cron(repo):
+    setup_cron(repo)
+    result = repo.run("decide", "--trigger=cron")
+    assert result.returncode == 2
+    assert "--trigger cron needs --cron EXPR" in result.stderr
+    result = repo.run("decide", "--trigger=open", "--cron=0 3 * * *",
+                      "--target=main", "--source=f", "--base=HEAD",
+                      "--head=HEAD")
+    assert result.returncode == 2
+    assert "--cron is for --trigger cron only" in result.stderr
+    result = repo.run("decide", "--trigger=open", "--target=main")
+    assert result.returncode == 2
+    assert "--trigger open needs --source, --base, --head" in result.stderr

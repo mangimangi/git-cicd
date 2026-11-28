@@ -421,15 +421,40 @@ def test_unknown_job(repo, log):
     assert "unknown job 'nope'" in result.stderr
 
 
-@pytest.mark.parametrize("trigger", ["cron"])
-def test_unbuilt_trigger(repo, log, trigger):
+def test_cron_environment_reaches_step(repo, log):
+    """On cron, target and source are the branch, base and head its head
+    commit, the changed files are empty and inputs are their defaults."""
+    repo.script("ci/env.sh", DUMP_ENV + 'echo "$CICD_INPUT_VENDOR" >> "$LOG"\n')
+    repo.config({"jobs": {"envjob": {
+        "on": ["cron"], "cron": "0 9 * * 1", "branches": ["main"],
+        "inputs": {"vendor": {"default": "all"}}, "steps": ["ci/env.sh"]}}})
+    repo.commit("base")
+    repo.write("src/app.py", "x\n")
+    sha = repo.commit("head")
+    result = repo.run("run-job", "envjob", "--trigger=cron", "--target=main",
+                      "--source=main", f"--base={sha}", f"--head={sha}",
+                      env=env_for(log, CICD_MANUAL_INPUTS='{"vendor": "x"}'))
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = logged(log)
+    values = dict(line.split("=", 1) for line in lines[:7])
+    assert values == {
+        "CICD_TRIGGER": "cron", "CICD_JOB": "envjob",
+        "CICD_TARGET_BRANCH": "main", "CICD_SOURCE_BRANCH": "main",
+        "CICD_BASE": sha, "CICD_HEAD": sha,
+        "CICD_CHANGED_FILES": values["CICD_CHANGED_FILES"],
+    }
+    assert (log.parent / "log.txt.changed").read_text() == ""
+    assert lines[-1] == "all"
+
+
+def test_result_names_branch_and_head(repo, log, tmp_path):
     repo.script("ci/a.sh")
     base, head = setup_repo(repo, {"t": {
         "on": ["open"], "branches": ["**"], "steps": ["ci/a.sh"]}}, log)
-    result = repo.run("run-job", "t", f"--trigger={trigger}", "--target=main",
-                      "--source=f", f"--base={base}", f"--head={head}")
-    assert result.returncode == 2
-    assert f"the {trigger} trigger is not built yet" in result.stderr
+    out = tmp_path / "result.json"
+    assert run_job(repo, "t", base, head, "--result", str(out)).returncode == 0
+    data = json.loads(out.read_text())
+    assert data["target"] == "main" and data["head"] == head
 
 
 def test_changed_files_when_diff_fails_is_empty_file(repo, log):

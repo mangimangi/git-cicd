@@ -11,7 +11,8 @@ import pytest
 ROOT = Path(__file__).parent.parent
 INSTALL_SH = ROOT / "install.sh"
 SHIPPED = ["git-cicd", "templates/workflows/open.yml",
-           "templates/workflows/merge.yml", "templates/workflows/manual.yml",
+           "templates/workflows/merge.yml", "templates/workflows/cron.yml",
+           "templates/workflows/manual.yml",
            "templates/config.json",
            "templates/config.schema"]
 INSTALL_DIR = ".vendored/pkg/git-cicd"
@@ -19,6 +20,7 @@ CONFIG = ".vendored/configs/git-cicd.json"
 WORKFLOW = ".github/workflows/git-cicd-open.yml"
 MERGE = ".github/workflows/git-cicd-merge.yml"
 MANUAL = ".github/workflows/git-cicd-manual.yml"
+CRON = ".github/workflows/git-cicd-cron.yml"
 WORKFLOWS_ALLOWED = ".github/workflows/git-cicd-*.yml"
 LEGACY = ".github/workflows/git-cicd.yml"
 
@@ -81,7 +83,7 @@ def test_code_lands_under_install_dir(tmp_path, project):
     assert (project / INSTALL_DIR / "templates" / "workflows" / "open.yml") \
         .read_bytes() == (ROOT / "templates" / "workflows" / "open.yml") \
         .read_bytes()
-    for trigger in ("open", "merge", "manual"):
+    for trigger in ("open", "merge", "cron", "manual"):
         assert (project / INSTALL_DIR / "templates" / "workflows"
                 / f"{trigger}.yml").read_bytes() == \
             (ROOT / "templates" / "workflows" / f"{trigger}.yml").read_bytes()
@@ -175,12 +177,35 @@ def test_manifest_lists_installed_files(tmp_path, project):
     assert files == [f"{INSTALL_DIR}/git-cicd",
                      f"{INSTALL_DIR}/templates/workflows/open.yml",
                      f"{INSTALL_DIR}/templates/workflows/merge.yml",
+                     f"{INSTALL_DIR}/templates/workflows/cron.yml",
                      f"{INSTALL_DIR}/templates/workflows/manual.yml",
                      ".vendored/manifests/git-cicd.schema", WORKFLOW, MERGE,
                      MANUAL]
+    assert not (project / CRON).exists()
     assert CONFIG not in files
     for f in files:
         assert (project / f).is_file()
+
+
+def test_manifest_lists_the_cron_workflow_once_a_job_has_cron(tmp_path,
+                                                             project):
+    """The cron template is always installed; the generated cron workflow is
+    in the manifest only when generate wrote it."""
+    ci = project / "ci" / "n.sh"
+    ci.parent.mkdir()
+    ci.write_text("#!/bin/sh\n")
+    ci.chmod(0o755)
+    (project / ".vendored/configs").mkdir(parents=True)
+    (project / CONFIG).write_text(json.dumps({"jobs": {"n": {
+        "on": ["cron"], "branches": ["main"], "cron": "0 4 * * *",
+        "steps": ["ci/n.sh"]}}}))
+    manifest = tmp_path / "manifest.txt"
+    result = run_install(project, stub_install_sh(tmp_path),
+                         env={"VENDOR_MANIFEST": str(manifest)})
+    assert result.returncode == 0, result.stdout + result.stderr
+    files = manifest.read_text().splitlines()
+    assert files[-4:] == [WORKFLOW, MERGE, CRON, MANUAL]
+    assert '    - cron: "0 4 * * *"' in (project / CRON).read_text()
 
 
 def _vendor_check_allows(path, allowed):

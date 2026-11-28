@@ -273,17 +273,6 @@ def test_report_command_missing_decisions(config, repo, tmp_path):
     assert "no decisions" in result.stdout
 
 
-def test_report_cron_trigger_not_built(config, repo, tmp_path):
-    repo.install_tool()
-    summary = tmp_path / "summary.md"
-    result = repo.run("report", "--trigger", "cron", "--decisions", "x",
-                      "--results", "y",
-                      env={"GITHUB_STEP_SUMMARY": str(summary)})
-    assert result.returncode == 2
-    assert "the cron trigger is not built yet" in result.stderr
-    assert "FAILED" in summary.read_text()
-
-
 def test_report_command_merge(config, repo, tmp_path):
     repo.install_tool()
     assert repo.run("generate").returncode == 0
@@ -399,17 +388,6 @@ def test_verdict_out_stale_workflow_fails(config, repo, tmp_path):
                       "--verdict-out", str(out))
     assert result.returncode == 1
     assert out.read_text().splitlines()[0] == "failure"
-
-
-def test_verdict_out_trigger_not_built(config, repo, tmp_path):
-    repo.install_tool()
-    out = tmp_path / "verdict.txt"
-    result = repo.run("report", "--trigger", "cron", "--decisions", "x",
-                      "--results", "y", "--verdict-out", str(out))
-    assert result.returncode == 2
-    state, description = out.read_text().splitlines()
-    assert state == "failure"
-    assert "the cron trigger is not built yet" in description
 
 
 def test_verdict_out_invalid_config(repo, tmp_path):
@@ -605,3 +583,146 @@ def test_rows_and_step_lines_title_case_default_and_written_name(
     assert "  mypy / medici:types " in text
     assert "Mypy" not in text and "Pypi" not in text and "unit-tests /" \
         not in text
+
+
+# ── cron: one verdict per branch head ───────────────────────────────────────
+
+@pytest.fixture
+def cron_config(repo):
+    for name in ("ci/a.sh", "ci/b.sh"):
+        repo.script(name)
+    repo.config({"jobs": {
+        "nightly": {"on": ["cron"], "branches": ["main", "dev"],
+                    "cron": "0 3 * * *", "steps": ["ci/a.sh"]},
+        "test": {"on": ["open"], "branches": ["**"], "steps": ["ci/b.sh"]},
+    }})
+    repo.install_tool()
+    assert repo.run("generate").returncode == 0
+    return git_cicd.load_config(str(repo.path))
+
+
+MAIN_SHA = "a" * 40
+DEV_SHA = "b" * 40
+
+
+def cron_decision(heads=None):
+    heads = heads if heads is not None else {"main": MAIN_SHA, "dev": DEV_SHA}
+    runs, missing = [], []
+    for n, (branch, sha) in enumerate(heads.items(), 1):
+        if sha:
+            runs.append({"key": f"nightly-{n}", "job": "nightly",
+                         "branch": branch, "sha": sha})
+        else:
+            missing.append({"job": "nightly", "branch": branch,
+                            "reason": f"branch {branch} does not exist"})
+    return {"trigger": "cron", "cron": "0 3 * * *", "target": None,
+            "source": None, "base": None, "head": None, "changed_files": [],
+            "heads": heads, "runs": runs, "missing": missing,
+            "jobs": [{"name": "nightly", "title": "Nightly", "needed": True,
+                      "reason": "scheduled 0 3 * * *", "blocking": True},
+                     {"name": "test", "title": "Test", "needed": False,
+                      "reason": "not a cron job", "blocking": True}],
+            "max_parallel": 3}
+
+
+def cron_result(branch, sha, state="passed"):
+    res = passed_result("nightly", steps=("ci/a.sh",), setup=False)
+    res.update(target=branch, head=sha, state=state)
+    if state == "failed":
+        res.update(failed_step="ci/a.sh", exit_code=1)
+    return res
+
+
+def run_cron_report(repo, tmp_path, dec, results):
+    (tmp_path / "d.json").write_text(json.dumps(dec))
+    for i, res in enumerate(results):
+        d = tmp_path / "r" / f"git-cicd-result-{i}"
+        d.mkdir(parents=True)
+        (d / "result.json").write_text(json.dumps(res))
+    (tmp_path / "r").mkdir(exist_ok=True)
+    out = tmp_path / "verdict.txt"
+    result = repo.run("report", "--trigger=cron", "--decisions",
+                      str(tmp_path / "d.json"), "--results",
+                      str(tmp_path / "r"), "--verdict-out", str(out))
+    lines = [l.split("\t") for l in out.read_text().splitlines()] \
+        if out.exists() else None
+    return result, lines
+
+
+def test_cron_one_verdict_per_branch(cron_config, repo, tmp_path):
+    result, lines = run_cron_report(repo, tmp_path, cron_decision(), [
+        cron_result("main", MAIN_SHA),
+        cron_result("dev", DEV_SHA, state="failed")])
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert lines == [
+        [MAIN_SHA, "success", "PASSED - 1 of 2 jobs needed, 1 passed"],
+        [DEV_SHA, "failure", "FAILED - 1 of 2 jobs needed, 1 failed"]]
+    assert "git-cicd report: repository on main at aaaaaaa" in result.stdout \
+        or " on main at aaaaaaa" in result.stdout
+    assert " on dev at bbbbbbb" in result.stdout
+    assert result.stdout.splitlines()[-1] == (
+        "FAILED - schedule 0 3 * * * on 2 branches, failed on dev")
+
+
+def test_cron_all_passed(cron_config, repo, tmp_path):
+    result, lines = run_cron_report(repo, tmp_path, cron_decision(), [
+        cron_result("main", MAIN_SHA), cron_result("dev", DEV_SHA)])
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert [l[1] for l in lines] == ["success", "success"]
+    assert result.stdout.splitlines()[-1] == \
+        "PASSED - schedule 0 3 * * * on 2 branches"
+
+
+def test_cron_missing_result_fails_its_branch(cron_config, repo, tmp_path):
+    result, lines = run_cron_report(repo, tmp_path, cron_decision(), [
+        cron_result("main", MAIN_SHA)])
+    assert result.returncode == 1
+    assert lines[1] == [DEV_SHA, "failure",
+                        "FAILED - 1 of 2 jobs needed, 1 could not run"]
+
+
+def test_cron_missing_branch_fails(cron_config, repo, tmp_path):
+    result, lines = run_cron_report(
+        repo, tmp_path, cron_decision({"main": MAIN_SHA, "dev": None}),
+        [cron_result("main", MAIN_SHA)])
+    assert result.returncode == 1
+    assert lines == [[MAIN_SHA, "success",
+                      "PASSED - 1 of 2 jobs needed, 1 passed"]]
+    assert "could not run (branch dev does not exist)" in result.stdout
+    assert "FAILED - branch dev does not exist" in result.stdout
+    assert result.stdout.splitlines()[-1].endswith("failed on dev")
+
+
+def test_cron_branches_at_one_commit_share_a_failed_status(cron_config, repo,
+                                                           tmp_path):
+    dec = cron_decision({"main": MAIN_SHA, "dev": MAIN_SHA})
+    result, lines = run_cron_report(repo, tmp_path, dec, [
+        cron_result("main", MAIN_SHA, state="failed"),
+        cron_result("dev", MAIN_SHA)])
+    assert lines == [[MAIN_SHA, "failure",
+                      "FAILED - 1 of 2 jobs needed, 1 failed"]]
+
+
+def test_cron_nothing_scheduled_passes_without_statuses(cron_config, repo,
+                                                        tmp_path):
+    dec = cron_decision({})
+    dec["jobs"][0].update(needed=False, reason="scheduled at 0 4 * * *")
+    result, lines = run_cron_report(repo, tmp_path, dec, [])
+    assert result.returncode == 0, result.stdout
+    assert lines == []
+    assert result.stdout.splitlines()[-1].startswith("PASSED - 0 of 2 jobs")
+
+
+def test_cron_invalid_config_fails_every_head(repo, tmp_path):
+    repo.install_tool()
+    repo.config({"jobs": {"x": {"steps": ["ci/missing.sh"]}}})
+    (tmp_path / "d.json").write_text(json.dumps(cron_decision()))
+    out = tmp_path / "verdict.txt"
+    result = repo.run("report", "--trigger=cron", "--decisions",
+                      str(tmp_path / "d.json"), "--results", "y",
+                      "--verdict-out", str(out))
+    assert result.returncode == 2
+    lines = [l.split("\t") for l in out.read_text().splitlines()]
+    assert [l[:2] for l in lines] == [[MAIN_SHA, "failure"],
+                                      [DEV_SHA, "failure"]]
+    assert lines[0][2].startswith("FAILED - the config is invalid")
