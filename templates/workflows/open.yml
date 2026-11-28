@@ -49,6 +49,15 @@
 # (the one write permission on `open`); the job that runs the config's
 # scripts gets none and inherits the read-only top level.
 #
+# Secrets: a job gets only the secrets its config job declares (`secrets`,
+# from the documented set CICD_WRITE_TOKEN, CICD_READ_TOKEN and the
+# deprecated VENDOR_PAT). The step that runs a job has one fixed env line per
+# documented name, which gives the secret only to a matrix entry whose job
+# declares it (decide's `secrets` output, job -> declared names) and the empty
+# string otherwise; the tool removes every undeclared or empty one, so a
+# script sees a secret only when its job declares it and it is set. No config
+# value is written into this file. GITHUB_TOKEN reaches every job.
+#
 # Overlap rule for `open`: a newer push supersedes an older run. There is no
 # workflow-level `concurrency`: a run waiting on one would have no job, so no
 # check and no status, until the run it supersedes had finished cancelling.
@@ -77,6 +86,7 @@ jobs:
     outputs:
       jobs: ${{ steps.decide.outputs.jobs }}
       names: ${{ steps.decide.outputs.names }}
+      secrets: ${{ steps.decide.outputs.secrets }}
       any: ${{ steps.decide.outputs.any }}
       max_parallel: ${{ steps.decide.outputs.max_parallel }}
     steps:
@@ -159,6 +169,9 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           GITHUB_TOKEN: ${{ github.token }}
+          CICD_WRITE_TOKEN: ${{ contains(fromJSON(needs.decide.outputs.secrets)[matrix.job], 'CICD_WRITE_TOKEN') && secrets.CICD_WRITE_TOKEN || '' }}
+          CICD_READ_TOKEN: ${{ contains(fromJSON(needs.decide.outputs.secrets)[matrix.job], 'CICD_READ_TOKEN') && secrets.CICD_READ_TOKEN || '' }}
+          VENDOR_PAT: ${{ contains(fromJSON(needs.decide.outputs.secrets)[matrix.job], 'VENDOR_PAT') && secrets.VENDOR_PAT || '' }}
         run: |
           mkdir -p "$RUNNER_TEMP/git-cicd"
           python3 __TOOL__ run-job "$JOB" --trigger=open --target="$TARGET" \

@@ -57,7 +57,13 @@ DEFAULT_MAX_PARALLEL = 3
 
 TOP_LEVEL_FIELDS = ("_vendor", "jobs", "needs_nothing", "max_parallel")
 JOB_FIELDS = ("name", "on", "branches", "paths", "setup", "steps", "cron", "manual",
-              "blocking", "inputs")
+              "blocking", "inputs", "secrets")
+# The secrets a job may declare. A script's environment holds one of them if
+# and only if its job declares it and it is set non-empty, on every trigger
+# and in a local check. CICD_WRITE_TOKEN pushes branches, opens pull requests
+# and writes workflow files; CICD_READ_TOKEN reads private repositories;
+# VENDOR_PAT is the deprecated name CICD_WRITE_TOKEN replaces.
+DECLARABLE_SECRETS = ("CICD_WRITE_TOKEN", "CICD_READ_TOKEN", "VENDOR_PAT")
 INPUT_FIELDS = ("description", "required", "default", "choices")
 
 JOB_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -480,6 +486,23 @@ def _validate_job(root, name, job):
         input_errors, inputs = _validate_inputs(prefix, job["inputs"])
         errors.extend(input_errors)
 
+    # secrets
+    secrets = job.get("secrets", [])
+    if "secrets" in job:
+        if not _is_str_list(secrets):
+            errors.append(f"{prefix}: secrets must be an array of secret "
+                          f"names ({', '.join(DECLARABLE_SECRETS)})")
+            secrets = []
+        else:
+            for secret in secrets:
+                if secret not in DECLARABLE_SECRETS:
+                    errors.append(f"{prefix}: unknown secret {secret!r} in "
+                                  "secrets (allowed: "
+                                  f"{', '.join(DECLARABLE_SECRETS)})")
+            for dupe in sorted({s for s in secrets if secrets.count(s) > 1}):
+                errors.append(f"{prefix}: secret {dupe} listed more than "
+                              "once in secrets")
+
     # flags
     for flag in ("manual", "blocking"):
         if flag in job and not isinstance(job[flag], bool):
@@ -497,6 +520,7 @@ def _validate_job(root, name, job):
         "manual": job.get("manual", True) is not False,
         "blocking": job.get("blocking", True) is not False,
         "inputs": inputs,
+        "secrets": list(dict.fromkeys(secrets)),
     }
     return errors, normalized
 
@@ -935,7 +959,12 @@ def format_decision(decision):
     return "\n".join(lines)
 
 
-def write_github_output(decision):
+def job_secrets(config):
+    """{job: [declared secret names]} for every job, in config order."""
+    return {n: list(j.get("secrets") or []) for n, j in config["jobs"].items()}
+
+
+def write_github_output(decision, config):
     """Append the outputs the generated workflow reads, when in Actions."""
     path = os.environ.get("GITHUB_OUTPUT")
     if not path:
@@ -948,6 +977,10 @@ def write_github_output(decision):
                  for j in decision["jobs"]}
         names[NOTHING_JOB] = NOTHING_TITLE
         f.write(f"names={json.dumps(names)}\n")
+        # the secrets each job declares, for the run step's env: a documented
+        # name is given its secret only for a matrix entry whose job declares
+        # it (names only, never a value)
+        f.write(f"secrets={json.dumps(job_secrets(config))}\n")
         any_run = decision["runs"] if decision["trigger"] == "cron" \
             else needed_jobs(decision)
         f.write(f"any={'true' if any_run else 'false'}\n")
@@ -968,26 +1001,30 @@ def write_changed_files(path, files):
 
 # ── Run ─────────────────────────────────────────────────────────────────────
 
-# secrets a script on open never sees: the Open workflow does not pass them
-# and a local check (an open run) removes them from the caller's environment
-OPEN_WITHHELD_ENV = frozenset({"VENDOR_PAT"})
+def absent_secrets(declared):
+    """The declared secrets that are unset or empty in the caller's
+    environment (names only)."""
+    return [n for n in declared if not os.environ.get(n)]
 
 
-def script_env(job_name, facts, changed_files_path, inputs=None):
+def script_env(job_name, facts, changed_files_path, inputs=None,
+               secrets=()):
     """The inherited environment plus the CICD_ facts about the change and
     one CICD_INPUT_<NAME> per declared input.
 
     Inherited CICD_INPUT_ variables and the manual run's raw form values
     (CICD_MANUAL_FORM) are removed, so the declared inputs are the only
-    channel. GITHUB_TOKEN reaches scripts unchanged through the inherited
-    environment, and so does VENDOR_PAT on every trigger but open: a pull
-    request's code never gets the write-capable secret, in CI (the Open
-    workflow does not pass it) or locally (check runs on open), so both give
-    a script the same environment. git-cicd itself never reads or logs them.
+    channel. Every name of DECLARABLE_SECRETS the job does not declare in
+    `secrets` is removed, on every trigger (open, merge, cron, manual) and so
+    in a local check, and so is a declared one that is empty: a script sees
+    a documented secret if and only if its job declares it and it is set,
+    never as an empty string it could mistake for a value. GITHUB_TOKEN
+    reaches scripts unchanged through the inherited environment. git-cicd
+    itself never prints a secret's value.
     """
     dropped = {MANUAL_FORM_ENV}
-    if facts["trigger"] == "open":
-        dropped |= OPEN_WITHHELD_ENV
+    dropped |= {n for n in DECLARABLE_SECRETS
+                if n not in secrets or not os.environ.get(n)}
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(INPUT_ENV_PREFIX) and k not in dropped}
     for key, value in (inputs or {}).items():
@@ -1002,6 +1039,11 @@ def script_env(job_name, facts, changed_files_path, inputs=None):
         "CICD_CHANGED_FILES": changed_files_path,
     })
     return env
+
+
+def secret_notes(absent):
+    """One note per declared secret that was not set (names only)."""
+    return [f"declared secret {n} is not set" for n in absent]
 
 
 def _run_script(argv, root, env, header):
@@ -1048,12 +1090,18 @@ def run_job(config, root, name, facts, setup=False, files=None):
                                         suffix=".txt")
     os.close(fd)
     write_changed_files(changed_path, files or [])
-    env = script_env(name, facts, os.path.abspath(changed_path), inputs)
+    declared = job.get("secrets") or []
+    env = script_env(name, facts, os.path.abspath(changed_path), inputs,
+                     declared)
+    absent = absent_secrets(declared)
+    for note in secret_notes(absent):
+        print(f"==> git-cicd: job {name}: {note}", flush=True)
 
     result = {"job": name, "target": facts["target"], "head": facts["head"],
               "state": "passed", "failed_step": None,
               "exit_code": 0, "error": None, "setup": None,
               "setup_skipped": bool(job["setup"]) and not setup,
+              "absent_secrets": absent,
               "steps": [], "seconds": 0.0}
     start = time.monotonic()
     try:
@@ -1445,7 +1493,7 @@ def job_rows(config, decision, results, root=None, repo=None):
         row = {"name": name, "title": title,
                "display": row_name(title, repo, name),
                "blocking": job["blocking"], "seconds": None,
-               "children": [], "setup_skipped": False}
+               "children": [], "setup_skipped": False, "notes": []}
         if d is None:
             row.update(state="could not run", detail="no decision")
         elif not d["needed"]:
@@ -1457,6 +1505,10 @@ def job_rows(config, decision, results, root=None, repo=None):
             else:
                 row["seconds"] = r.get("seconds")
                 row["setup_skipped"] = bool(r.get("setup_skipped"))
+                absent = r.get("absent_secrets")
+                if isinstance(absent, list):
+                    row["notes"] = secret_notes(
+                        [n for n in absent if n in DECLARABLE_SECRETS])
                 setup = r.get("setup")
                 if setup:
                     path = setup.get("script") or job["setup"] or "setup"
@@ -1562,6 +1614,7 @@ def format_report(rows, verdict, workflow_text, setup_note=False,
             lines.append(f"    {label}  {result}  {_secs(seconds)}")
         if setup_note and r["setup_skipped"]:
             lines.append("    setup skipped (pass --setup to run it)")
+        lines += [f"    {note}" for note in r.get("notes", ())]
     lines += [f"  {note}" for note in notes]
     lines.append(workflow_text)
     lines.append(verdict)
@@ -1599,6 +1652,8 @@ def format_markdown(rows, verdict, workflow_text, setup_note=False,
         if setup_note and r["setup_skipped"]:
             lines.append("| &nbsp;&nbsp;↳ setup | skipped | | pass --setup "
                          "to run it |")
+        for note in r.get("notes", ()):
+            lines.append(f"| &nbsp;&nbsp;↳ secrets | {_md(note)} | | |")
     if notes:
         lines.append("")
         lines += [f"- {_md(note)}" for note in notes]
@@ -1839,7 +1894,7 @@ def cmd_decide(args, root):
                       args.base, args.head, job=args.job, cron=args.cron)
     if args.changed_files_out:
         write_changed_files(args.changed_files_out, decision["changed_files"])
-    write_github_output(decision)
+    write_github_output(decision, config)
     if args.json:
         print(json.dumps(decision, indent=2))
     else:

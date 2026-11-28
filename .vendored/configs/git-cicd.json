@@ -35,6 +35,7 @@
       "cron": "0 9 * * 1",
       "branches": ["main"],
       "steps": ["ci/update-vendored.sh"],
+      "secrets": ["VENDOR_PAT"],
       "inputs": {
         "vendor": {"description": "Vendor to update (or all)", "default": "all"},
         "version": {"description": "Version to install (default: latest)", "default": "latest"},

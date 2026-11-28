@@ -608,3 +608,38 @@ def test_expressions_are_refused_in_manual_jobs_form_values(scripts, decl,
             '"manual": false')
     scripts.config({"jobs": {"t": job(inputs={"x": decl}, manual=False)}})
     assert scripts.run("validate").returncode == 0
+
+
+# ── secrets ─────────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("name", git_cicd.DECLARABLE_SECRETS)
+def test_each_documented_secret_accepted(scripts, name):
+    scripts.config({"jobs": {"t": job(secrets=[name])}})
+    config = git_cicd.load_config(str(scripts.path))
+    assert config["jobs"]["t"]["secrets"] == [name]
+
+
+def test_secrets_default_empty(scripts):
+    scripts.config({"jobs": {"t": job()}})
+    config = git_cicd.load_config(str(scripts.path))
+    assert config["jobs"]["t"]["secrets"] == []
+
+
+def test_unknown_secret_refused(scripts):
+    refused(scripts, {"jobs": {"t": job(secrets=["NPM_TOKEN"])}},
+            "job t: unknown secret 'NPM_TOKEN' in secrets (allowed: "
+            "CICD_WRITE_TOKEN, CICD_READ_TOKEN, VENDOR_PAT)")
+
+
+@pytest.mark.parametrize("value", ["CICD_READ_TOKEN", {"a": 1}, None,
+                                   ["CICD_READ_TOKEN", 3]])
+def test_malformed_secrets_refused(scripts, value):
+    refused(scripts, {"jobs": {"t": job(secrets=value)}},
+            "job t: secrets must be an array of secret names "
+            "(CICD_WRITE_TOKEN, CICD_READ_TOKEN, VENDOR_PAT)")
+
+
+def test_duplicate_secret_refused(scripts):
+    refused(scripts, {"jobs": {"t": job(
+        secrets=["CICD_READ_TOKEN", "CICD_READ_TOKEN"])}},
+        "job t: secret CICD_READ_TOKEN listed more than once in secrets")

@@ -87,15 +87,45 @@ def test_no_expressions_inside_run_blocks(tool_repo, path, count):
         assert "${{" not in block, block
 
 
-def test_vendor_pat_reaches_every_trigger_but_open():
-    """VENDOR_PAT may write; only open runs a pull request's own code."""
-    templates = ROOT / "templates" / "workflows"
-    assert "VENDOR_PAT" not in (templates / "open.yml").read_text()
-    assert "VENDOR_PAT" not in (
-        ROOT / ".github" / "workflows" / "git-cicd-open.yml").read_text()
-    for trigger in ("merge", "cron", "manual"):
-        text = (templates / f"{trigger}.yml").read_text()
-        assert "VENDOR_PAT: ${{ secrets.VENDOR_PAT }}" in text, trigger
+def secret_lines(matrix_job):
+    """The one env line per documented secret that every run step carries:
+    the secret only for a matrix entry whose job declares it."""
+    return [f"          {n}: ${{{{ contains(fromJSON(needs.decide.outputs."
+            f"secrets)[{matrix_job}], '{n}') && secrets.{n} || '' }}}}"
+            for n in git_cicd.DECLARABLE_SECRETS]
+
+
+@pytest.mark.parametrize("trigger", git_cicd.GENERATED_TRIGGERS)
+def test_run_step_selects_only_declared_secrets(trigger):
+    """Every run job's step env carries exactly the selection lines for the
+    documented set; no template reads `secrets.` anywhere else."""
+    text = (TEMPLATES / f"{trigger}.yml").read_text()
+    matrix_job = "matrix.entry.job" if trigger == "cron" else "matrix.job"
+    lines = text.splitlines()
+    expected = secret_lines(matrix_job)
+    for line in expected:
+        assert lines.count(line) == 1, line
+    used = [line for line in lines if "secrets." in line]
+    assert used and all(line in expected for line in used), used
+    assert "secrets: ${{ steps.decide.outputs.secrets }}" in text
+    # the step's env lines come right after GITHUB_TOKEN, in the set's order
+    i = lines.index("          GITHUB_TOKEN: ${{ github.token }}")
+    assert lines[i + 1:i + 1 + len(expected)] == expected
+
+
+def test_secret_declarations_write_nothing_into_the_workflows(tool_repo):
+    """A declaration changes no generated file: the names reach the workflow
+    as decide's output, never as text from the config."""
+    plain = {t: generate(tool_repo, base_config()) for t in ("open",)}
+    texts = {}
+    for path in (WORKFLOW, MERGE, MANUAL):
+        texts[path] = (tool_repo.path / path).read_text()
+    config = base_config()
+    config["jobs"]["test"]["secrets"] = ["CICD_READ_TOKEN"]
+    config["jobs"]["release"]["secrets"] = ["CICD_WRITE_TOKEN", "VENDOR_PAT"]
+    assert generate(tool_repo, config) == plain["open"]
+    for path in (MERGE, MANUAL):
+        assert (tool_repo.path / path).read_text() == texts[path]
 
 
 def test_template_run_blocks_have_no_expressions():
@@ -121,8 +151,10 @@ def test_workflow_contract(tool_repo):
     assert "job: ${{ fromJSON(needs.decide.outputs.jobs) }}" in text
     assert "fail-fast: false" in text
     assert "GITHUB_TOKEN: ${{ github.token }}" in text
-    # a pull request's code never gets the write-capable VENDOR_PAT
-    assert "VENDOR_PAT" not in text
+    # a secret reaches the step only through the selection lines
+    for line in text.splitlines():
+        if "secrets." in line:
+            assert line in secret_lines("matrix.job"), line
     assert "--setup --result=" in text
     assert "name: git-cicd-result-${{ matrix.job }}" in text
     uses = re.findall(r"(?m)^\s*(?:- )?uses:\s*(\S+)", text)
