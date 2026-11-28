@@ -57,6 +57,11 @@
       "type": "string",
       "required": false,
       "description": "The repository's name as rows and the generated Manual form show it (<repo> in <name> / <repo>:<job>; letters, digits, ., - and _). Default: the last path segment of the origin remote's URL without .git, else the checkout's directory name; no environment variable is read. Changing it means running generate and committing."
+    },
+    "manual_role": {
+      "type": "string",
+      "required": false,
+      "description": "Who may start a manual run: admin (default; only someone with the admin role on the repository) or write (anyone who can write to it). decide refuses a manual run from someone below it, and one whose role could not be read; the generated Manual workflow reads the role of whoever started the run. The check lives in the workflow file of the branch the run is started on, so a writer can remove it on a branch of their own."
     }
   }
 }

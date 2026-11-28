@@ -54,6 +54,7 @@ Top level:
 | `needs_nothing` | array of patterns | `[]` | files that need no job: documents, tracker records |
 | `max_parallel` | positive integer | `3` | how many job runners run at once |
 | `repository` | string (letters, digits, `.`, `-`, `_`) | none | the repository's name as rows show it (`<repo>` in `<name> / <repo>:<job>`); without it, the last path segment of the `origin` remote's URL, else the checkout's directory name (see [Rows](#rows)) |
+| `manual_role` | `"admin"` or `"write"` | `"admin"` | who may start a manual run: only an admin of the repository, or anyone who can write to it; see [Who can start a manual run](#who-can-start-a-manual-run) |
 | `_vendor` | anything | | git-vendored's registry key; ignored by git-cicd |
 
 Any other key is refused, including `_comment_*` keys: comments belong here,
@@ -333,7 +334,8 @@ any sequence without `/` (so `*.md` is Markdown at the repository root only),
   Every job may be run by hand unless it says `"manual": false`; `branches`
   still binds, against the branch the run is started on; `paths` and
   `needs_nothing` are ignored (a manual run has no change). An unknown job, a
-  job with `"manual": false` or a branch that does not match is refused, and
+  job with `"manual": false`, a branch that does not match or a person below
+  the config's `manual_role` is refused, and
   the run's verdict is FAILED with the reason in the report, never silently.
 - A change affects **every** `open` or `merge` job whose `branches` match when it touches
   the git-cicd config or any script any job names (setup or step, whatever
@@ -751,7 +753,9 @@ The manual workflow (`Manual`):
   varies. `decide --trigger manual --job NAME` decides (`NAME` is the
   option's row name or the bare config key; anything else is an unknown
   job, refused with the reason): the job is needed
-  (`manual run`) when it exists, allows manual runs and its `branches` match
+  (`manual run`) when the person who started the run holds the config's
+  `manual_role` (see [Who can start a manual run](#who-can-start-a-manual-run)),
+  and the job exists, allows manual runs and its `branches` match
   the branch; every other job is `not needed (not the job asked for)`.
   Inputs that fail (see [Declared inputs](#declared-inputs)) are refused the
   same way. A refusal is recorded in the decisions (`refused`), needs no job,
@@ -769,6 +773,45 @@ The manual workflow (`Manual`):
 - Token, checkout, queue and verdict as on `Merge`: write permissions only on
   the job that runs the config's scripts, full history and tags, and manual
   and merge runs on one branch go one at a time, never cancelled.
+
+### Who can start a manual run
+
+The tool holds the rule and the config names it in words that belong to no
+platform (`manual_role`); only the generated `Manual` workflow, the
+platform's adapter, knows how GitHub says who started a run and what they may
+do.
+
+- **The default, `"manual_role": "admin"`**: only someone with the admin role
+  on the repository starts a manual run. `"write"` lets anyone with write
+  access start one (what every version before 0.4.0 did).
+- **How.** The `Decide` job of the `Manual` workflow reads the repository
+  permission of the person who started the run (`github.triggering_actor`)
+  with the workflow's own token, and passes it to `decide` in
+  `CICD_ACTOR_ROLE` (`admin`, `write`, `read`, or empty when it could not be
+  read or is anything else), with the name in `CICD_ACTOR`; both are fixed
+  `env:` lines, never part of a command. `decide --trigger manual` refuses
+  the run when the role is below `manual_role`, and always when the role is
+  empty or unknown (fail closed): the reason names the person and the role
+  required (`octo has role write; a manual run needs role admin
+  ("manual_role": "admin")`, or `the role of octo could not be read; ...`),
+  the run needs no job and the verdict is `FAILED - <reason>`.
+  `run-job --trigger manual` on a laptop is not a manual run in this sense
+  and is not asked for a role; `decide --trigger manual` run by hand needs
+  `CICD_ACTOR_ROLE` set, or it refuses.
+- **What it protects against.** The public can never start a manual run:
+  GitHub lets only people with write access start one. So the default closes
+  the remaining gap, a collaborator who can write but is not an admin
+  starting a job that holds the write token (a release, `update-vendored`)
+  on a branch whose workflow file has the check, such as a protected
+  default branch.
+- **What it does not.** A manual run uses the workflow file **of the branch
+  it is started on**. A writer can push a branch of their own whose workflow
+  (or tool) drops the check and start the run there; the check binds only
+  where the workflow file cannot be changed without review.
+- **Upgrading to 0.4.0.** The default changed: a repository whose writers
+  who are not admins start manual runs sets `"manual_role": "write"`. Either
+  way, run `generate` and commit `git-cicd-manual.yml` (`verify` fails until
+  you do).
 
 **Upgrading from a version with the two free-text fields** (`job` and
 `inputs`): run `generate` and commit the new `git-cicd-manual.yml` (`verify`

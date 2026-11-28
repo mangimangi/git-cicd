@@ -89,7 +89,7 @@ def test_generate_writes_file(tool_repo):
 
 
 @pytest.mark.parametrize("path,count", [(WORKFLOW, 8), (MERGE, 8),
-                                        (MANUAL, 8)])
+                                        (MANUAL, 9)])
 def test_no_expressions_inside_run_blocks(tool_repo, path, count):
     generate(tool_repo, base_config())
     blocks = run_blocks((tool_repo.path / path).read_text())
@@ -896,7 +896,7 @@ def test_manual_file_carries_the_form_as_json_through_env(tool_repo):
         assert "\n      inputs:\n" not in t  # no free-text inputs field
     jobs = job_blocks(text)
     entry = "          CICD_MANUAL_FORM: ${{ toJSON(inputs) }}\n"
-    assert entry in steps_of(jobs["decide"])[3]
+    assert entry in steps_of(jobs["decide"])[4]
     assert entry in steps_of(jobs["run"])[1]
     header = text.split("\nname: Manual\n")[0]
     assert text.count("CICD_MANUAL_FORM") == 2 + header.count(
@@ -1479,3 +1479,62 @@ def test_render_without_a_repo_uses_the_config_or_a_placeholder():
     config["repository"] = "named"
     text = git_cicd.render_workflows(config, "git-cicd")[MANUAL]
     assert '- "T / named:t"' in text
+
+
+def test_manual_decide_reads_the_role_with_the_workflows_own_token(tool_repo):
+    """The Manual workflow supplies the fact: the repository permission of
+    whoever started the run, read with the workflow's own token, mapped to
+    admin, write, read or empty, and passed to decide only through env."""
+    text = generate_manual(tool_repo)
+    jobs = job_blocks(text)
+    steps = steps_of(jobs["decide"])
+    role, decide = steps[3], steps[4]
+    assert role.startswith("Read the role of the person who started the run")
+    assert "          GH_TOKEN: ${{ github.token }}\n" in role
+    assert "          ACTOR: ${{ github.triggering_actor }}\n" in role
+    assert ('gh api "repos/$GITHUB_REPOSITORY/collaborators/$ACTOR/permission"'
+            in role)
+    assert "admin|write|read) ROLE=\"$PERMISSION\" ;;" in role
+    assert '*) ROLE="" ;;' in role
+    assert "secrets." not in role
+    assert decide.startswith("Decide whether the job may run")
+    assert ("          CICD_ACTOR_ROLE: ${{ steps.role.outputs.role }}\n"
+            in decide)
+    assert "          CICD_ACTOR: ${{ github.triggering_actor }}\n" in decide
+    for block in run_blocks(text):
+        assert "${{" not in block
+        assert "triggering_actor" not in block
+
+
+@pytest.mark.parametrize("answer,code,role", [
+    ("admin", 0, "admin"), ("write", 0, "write"), ("read", 0, "read"),
+    ("maintain", 0, ""), ("none", 0, ""), ("", 0, ""),
+    ("admin\nwrite", 0, ""), ("$(id)", 0, ""), ("admin", 1, ""),
+])
+def test_manual_role_step_maps_the_permission(tmp_path, answer, code, role):
+    """The role step's shell, run with a fake gh (no token, no network):
+    only admin, write and read pass through; anything else, or a failed
+    read, is empty."""
+    import subprocess
+    text = (TEMPLATES / "manual.yml").read_text()
+    (block,) = [b for b in run_blocks(text) if "collaborators" in b]
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    calls = tmp_path / "calls"
+    gh = fake / "gh"
+    gh.write_text("#!/bin/sh\n"
+                  f"printf '%s\\n' \"$@\" > '{calls}'\n"
+                  f"printf '%s\\n' \"$GH_ANSWER\"\n"
+                  f"exit {code}\n")
+    gh.chmod(0o755)
+    out = tmp_path / "output"
+    env = {"PATH": f"{fake}:/usr/bin:/bin", "GITHUB_OUTPUT": str(out),
+           "GITHUB_REPOSITORY": "owner/repo", "ACTOR": "octo",
+           "GH_TOKEN": "", "GH_ANSWER": answer}
+    result = subprocess.run(["bash", "-e", "-c", block], env=env,
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert out.read_text() == f"role={role}\n"
+    assert calls.read_text().splitlines() == [
+        "api", "repos/owner/repo/collaborators/octo/permission",
+        "--jq", ".permission"]

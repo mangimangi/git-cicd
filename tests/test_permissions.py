@@ -331,7 +331,8 @@ def test_manual_decide_puts_the_chosen_job_in_its_group(tool_repo, tmp_path):
     result = tool_repo.run("decide", "--trigger=manual", "--job=publish",
                            "--target=main", "--source=main",
                            f"--base={sha}", f"--head={sha}",
-                           env={"GITHUB_OUTPUT": str(out)})
+                           env={"GITHUB_OUTPUT": str(out),
+                                "CICD_ACTOR_ROLE": "admin"})
     assert result.returncode == 0, result.stderr
     values = outputs(out)
     assert json.loads(values["jobs"]) == ["(nothing)"]
