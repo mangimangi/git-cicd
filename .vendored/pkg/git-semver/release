@@ -28,6 +28,11 @@ per new tag. It never bumps, commits, pushes to the branch or consults the
 commit-subject rules, and refuses (non-zero) a version that the merge set
 but that is already tagged at another commit.
 
+Only a commit on the default branch is tagged or released: every path asks
+`git-semver releasable` (or `git-semver tag`, which asks it) first and fails,
+with nothing tagged, pushed or released, for a commit that is not reachable
+from the default branch's tip as the remote has it.
+
 No path creates, moves or pushes a `latest` tag, and tags are never
 force-pushed: each new version tag is pushed by name. A `latest` tag left
 in a repository by an older git-semver is left alone and never released.
@@ -78,6 +83,7 @@ DEFAULT_VERSION_FILE = "VERSION"
 # (git-semver's RESERVED_KEYS).
 SEMVER_RESERVED_KEYS = frozenset({
     "version_file", "files", "updates", "changelog", "install", "bump_on",
+    "push_bump", "default_branch",
 })
 ZERO_SHA = "0" * 40
 
@@ -144,6 +150,11 @@ def sync_branch():
 def git_semver(*args):
     """Call .semver/git-semver with arguments."""
     return run(SEMVER_SCRIPT, *args, capture=False)
+
+
+def require_releasable(rev="HEAD"):
+    """Exit non-zero (git-semver says why) unless `rev` is on the default branch."""
+    git_semver("releasable", rev)
 
 
 def create_pr(branch, title, body, base="main"):
@@ -227,6 +238,9 @@ def handle_push_bump(automerge, before=None):
 
     configure_git()
     sync_branch()
+    if automerge:
+        # The bump is pushed and tagged here: refuse before committing.
+        require_releasable()
 
     # Always bump without push — we handle push separately
     pre_bump_sha = run("git", "rev-parse", "HEAD", capture=True).stdout.strip()
@@ -259,6 +273,9 @@ def handle_dispatch_bump(automerge):
     description = read_input("CHANGELOG_DESCRIPTION")
 
     configure_git()
+    if automerge:
+        # The bump is pushed and tagged here: refuse before committing.
+        require_releasable()
 
     # Always bump without push — we handle push separately
     args = [bump_type, "--no-push"]
@@ -521,6 +538,7 @@ def handle_tag_landed(trigger):
     if not new:
         print("Nothing to release: every version is already tagged")
         return
+    require_releasable(landed)
 
     configure_git()
     for tag in new:

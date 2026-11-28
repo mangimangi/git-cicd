@@ -15,6 +15,12 @@ Usage:
     registered updates it. Surrounding whitespace is trimmed from the
     arguments.
 
+    `all` and `git-vendored` also cover a git-vendored that is installed
+    (.vendored/install or .vendored/manifests/git-vendored.version) but not
+    registered, as after a bootstrap with install.sh: it is updated first
+    and registered (.vendored/manifests/git-vendored.registry, and
+    .vendored/configs/git-vendored.json as `{}` when missing).
+
 Output (key=value lines for workflow consumption):
     vendor=<name>
     old_version=<version>
@@ -43,6 +49,15 @@ Environment:
     VENDORED_VENDOR  - target, used when no positional target is given
     VENDORED_VERSION - version, used when --version is not given
     VENDORED_PRIVATE - true/1/yes sets --private; false/0/no/empty does not
+
+Handover: run as the installed .vendored/install for the normal update
+(`all`, `git-vendored`, or git-vendored's repo), it first resolves the
+target git-vendored (--version, default latest) through git and, when that
+is not the installed version, runs that version's installer with the same
+arguments instead of its own code, so a defect in an installed version
+does not stop the update.
+    GIT_VENDORED_HANDOVER - Set (to the target version) for the target's
+                            run; when set, no handover is made
 """
 
 import argparse
@@ -1983,6 +1998,65 @@ def _is_repo_spec(arg):
     return "/" in arg or _is_url(arg)
 
 
+# git-vendored's own registry, as this repository's install carries it
+# (.vendored/manifests/git-vendored.registry). Used to register a
+# git-vendored that is installed but has no registry or config: install.sh
+# does not self-register, so a bootstrapped repository has none.
+GIT_VENDORED = "git-vendored"
+GIT_VENDORED_REGISTRY = {
+    "repo": "mangimangi/git-vendored",
+    "install_branch": "chore/install-git-vendored",
+    "protected": [".vendored/**", ".github/workflows/install-vendored.yml",
+                  ".github/workflows/check-vendor.yml"],
+    "allowed": [".vendored/config.json"],
+}
+
+
+def _repo_key(repo):
+    """A repo spec compared loosely: its git URL, `.git` and `/` stripped."""
+    url = vendor_git_url(str(repo or "").strip()).rstrip("/")
+    if url.endswith(".git"):
+        url = url[:-4]
+    return url.lower()
+
+
+def unregistered_git_vendored(vendors):
+    """git-vendored's registry when it is installed but not registered.
+
+    Installed: .vendored/install is a file or
+    .vendored/manifests/git-vendored.version exists. Registered: a vendor
+    has the key `git-vendored` (whatever its repo: it is not overwritten) or
+    a repo naming git-vendored. Returns None when there is nothing to
+    register.
+    """
+    installed = (os.path.isfile(".vendored/install") or os.path.isfile(
+        os.path.join(MANIFESTS_DIR, f"{GIT_VENDORED}.version")))
+    if not installed or GIT_VENDORED in vendors:
+        return None
+    ours = _repo_key(GIT_VENDORED_REGISTRY["repo"])
+    for vcfg in vendors.values():
+        if _repo_key(vcfg.get("repo")) == ours:
+            return None
+    return dict(GIT_VENDORED_REGISTRY)
+
+
+def register_git_vendored(registry):
+    """Register git-vendored: its .registry and a `{}` config when missing.
+
+    Written before the update, so it is registered also when it is already
+    at the target version (and skipped); an update then makes the registry
+    that of the installed version (refresh_registry).
+    """
+    print(f"{GIT_VENDORED} is installed but not registered; registering it "
+          f"({registry['repo']})")
+    write_registry(GIT_VENDORED, registry)
+    config_path = os.path.join(CONFIGS_DIR, f"{GIT_VENDORED}.json")
+    if not os.path.isfile(config_path):
+        os.makedirs(CONFIGS_DIR, exist_ok=True)
+        with open(config_path, "w") as f:
+            f.write("{}\n")
+
+
 def list_vendors():
     """List installed vendors in dependency order, one per line.
 
@@ -2126,12 +2200,24 @@ def main():
         registered_name = registered_vendor_for_repo(args.target, vendors,
                                                      args.name)
 
+    # An installed git-vendored with no registry or config is treated as
+    # registered: `all` and `git-vendored` by name update and register it.
+    gv_registry = None
+    if args.target in ("all", GIT_VENDORED):
+        gv_registry = unregistered_git_vendored(vendors)
+    if gv_registry:
+        register_git_vendored(gv_registry)
+
     if args.target == "all":
         # Update all registered vendors
-        if not vendors:
+        if not vendors and not gv_registry:
             print("No vendors configured in .vendored/config.json")
             sys.exit(0)
         sorted_names = topological_sort(vendors)
+        if gv_registry:
+            # git-vendored first, before the rest in dependency order
+            vendors = {GIT_VENDORED: gv_registry, **vendors}
+            sorted_names = [GIT_VENDORED] + sorted_names
         results = []
         for name in sorted_names:
             vcfg = vendors[name]
@@ -2158,6 +2244,14 @@ def main():
                                     private=args.private)
         output_result(result)
         results = [result]
+    elif gv_registry:
+        # git-vendored by name, installed but just registered — update path
+        result = install_existing_vendor(
+            GIT_VENDORED, gv_registry, args.version, args.force,
+            deps_mode=args.deps
+        )
+        output_result(result)
+        results = [result]
     elif args.target in vendors:
         # Existing vendor by name — update path
         result = install_existing_vendor(
@@ -2181,5 +2275,247 @@ def main():
         create_pull_request(results)
 
 
+# ── Handover to the target git-vendored ───────────────────────────────────
+#
+# Run from the __main__ block before main(): before argparse, the config
+# migrations and load_config. The repository's normal update (`all`, or
+# git-vendored by name or by its repo) brings git-vendored to the target
+# version and installs everything with *that* version's code, so a defect
+# in this installer proper (version resolution, fetching vendors, manifests,
+# pull requests) cannot stop the update. Deliberately self-contained (stdlib
+# only): it calls nothing above this line, and has its own tag listing,
+# version pick, shallow clone and auth environment.
+
+HANDOVER_ENV = "GIT_VENDORED_HANDOVER"
+_HV_NAME = "git-vendored"
+_HV_DEFAULT_REPO = "mangimangi/git-vendored"
+_HV_INSTALLED = ".vendored/install"
+_HV_VERSION_FILE = ".vendored/manifests/git-vendored.version"
+_HV_REGISTRY_FILE = ".vendored/manifests/git-vendored.registry"
+_HV_CONFIG_FILE = ".vendored/configs/git-vendored.json"
+# Options of main() that take a value (the handover reads only --version).
+_HV_VALUE_OPTIONS = {"--version", "--name", "--deps"}
+_HV_SKIP_OPTIONS = {"--list", "--post-install-only", "-h", "--help"}
+_HV_REPAIR = (
+    "Repair with the bootstrap installer, from the repository's root:\n"
+    "  git clone --depth 1 --branch v<X.Y.Z> <git-vendored URL> <tmpdir>\n"
+    "  VENDOR_CHECKOUT=<tmpdir> bash <tmpdir>/install.sh <X.Y.Z>"
+)
+
+
+def _hv_parse(argv):
+    """(target, version, force) from main()'s argv, or None to skip.
+
+    Mirrors main()'s arguments without argparse: the first positional is
+    the target (else VENDORED_VENDOR), --version (else VENDORED_VERSION,
+    else latest). None for --list, --post-install-only, --help or no target.
+    """
+    target = None
+    version = None
+    force = False
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        name = arg.split("=", 1)[0]
+        if name in _HV_SKIP_OPTIONS:
+            return None
+        if arg == "--force":
+            force = True
+        elif name in _HV_VALUE_OPTIONS:
+            if "=" in arg:
+                value = arg.split("=", 1)[1]
+            else:
+                i += 1
+                value = argv[i] if i < len(argv) else ""
+            if name == "--version":
+                version = value
+        elif not arg.startswith("-") and target is None:
+            target = arg
+        i += 1
+    if target is None:
+        target = os.environ.get("VENDORED_VENDOR")
+    if version is None:
+        version = os.environ.get("VENDORED_VERSION") or ""
+    target = (target or "").strip()
+    version = version.strip() or "latest"
+    if not target:
+        return None
+    return target, version, force
+
+
+def _hv_url(repo):
+    """owner/repo means github.com; any other spec is a URL git takes."""
+    repo = repo.strip()
+    if "://" not in repo and ":" not in repo and repo.count("/") == 1:
+        return f"https://github.com/{repo}.git"
+    return repo
+
+
+def _hv_registry():
+    """git-vendored's registry: the .registry file, else its config's."""
+    for path, key in ((_HV_REGISTRY_FILE, None), (_HV_CONFIG_FILE, "_vendor")):
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        if key:
+            data = data.get(key) if isinstance(data.get(key), dict) else data
+        if data.get("repo"):
+            return data
+    return {}
+
+
+def _hv_token(private):
+    """The token to read git-vendored with, as get_auth_token picks it."""
+    names = ("GH_TOKEN", "GITHUB_TOKEN")
+    if private:
+        names = ("CICD_READ_TOKEN", "CICD_WRITE_TOKEN", "VENDOR_PAT") + names
+    for name in names:
+        if os.environ.get(name):
+            return os.environ[name]
+    return ""
+
+
+def _hv_git_env(token, url):
+    """Env for one git command: only the handover's own header, if any.
+
+    As _auth_env: GIT_CONFIG_PARAMETERS is dropped, then an empty
+    `http.<url>.extraHeader` resets every inherited header (actions/checkout
+    leaves one in the repository's local config) and the token's header
+    follows. The token never goes in argv, a URL or a config file.
+    """
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env.pop("GIT_CONFIG_PARAMETERS", None)
+    try:
+        n = int(env.get("GIT_CONFIG_COUNT", "0"))
+    except ValueError:
+        n = 0
+    values = [""]
+    if token:
+        basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+        values.append(f"Authorization: Basic {basic}")
+    for i, value in enumerate(values):
+        env[f"GIT_CONFIG_KEY_{n + i}"] = f"http.{url}.extraHeader"
+        env[f"GIT_CONFIG_VALUE_{n + i}"] = value
+    env["GIT_CONFIG_COUNT"] = str(n + len(values))
+    return env
+
+
+def _hv_scrub(text, token):
+    """git's message with the token (and its header form) removed."""
+    text = (text or "").strip()
+    if token:
+        basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+        text = text.replace(basic, "***").replace(token, "***")
+    return text
+
+
+def _hv_fail(repo, what, detail):
+    print(f"::error::git-vendored handover: cannot {what} {repo}")
+    if detail:
+        print(detail)
+    print("The installed installer is not used in its place.")
+    print(_HV_REPAIR)
+    sys.exit(1)
+
+
+def _hv_pick(stdout, requested):
+    """X.Y.Z of the tag to hand over to, or None: highest vX.Y.Z, or exact."""
+    tags = set()
+    for line in stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) == 2 and parts[1].startswith("refs/tags/"):
+            tags.add(parts[1][len("refs/tags/"):].removesuffix("^{}"))
+    if requested != "latest":
+        bare = requested[1:] if requested.startswith("v") else requested
+        return bare if f"v{bare}" in tags else None
+    best = None
+    for tag in tags:
+        parts = tag[1:].split(".")
+        if (tag.startswith("v") and len(parts) == 3
+                and all(p.isdigit() for p in parts)):
+            key = tuple(int(p) for p in parts)
+            if best is None or key > best[0]:
+                best = (key, tag[1:])
+    return best[1] if best else None
+
+
+def handover(argv=None):
+    """Hand the update over to the target git-vendored; None when not needed.
+
+    Only the installed .vendored/install hands over, only for the normal
+    update (`all`, `git-vendored`, or git-vendored's repo), not when
+    GIT_VENDORED_HANDOVER is set (it is set for the target's run, so there
+    is no loop). The target version is the requested one (latest by
+    default); when it is the installed version (and no --force) nothing is
+    fetched. Otherwise git-vendored is cloned at v<X.Y.Z> into a temporary
+    directory outside the repository, its templates/install runs with the
+    same arguments in this directory, the checkout is removed and its exit
+    code is this run's. A failure to list or fetch exits non-zero naming the
+    bootstrap repair; it never falls back to this installer.
+    """
+    if argv is None:
+        argv = sys.argv[1:]
+    if os.environ.get(HANDOVER_ENV):
+        return None
+    running = os.path.realpath(__file__)
+    if running != os.path.realpath(_HV_INSTALLED):
+        return None
+    parsed = _hv_parse(argv)
+    if parsed is None:
+        return None
+    target, requested, force = parsed
+    registry = _hv_registry()
+    repo = str(registry.get("repo") or _HV_DEFAULT_REPO)
+    url = _hv_url(repo)
+    if target not in ("all", _HV_NAME) and _hv_url(target) != url:
+        return None
+    try:
+        with open(_HV_VERSION_FILE) as f:
+            installed = f.read().strip()
+    except OSError:
+        installed = ""
+    bare = requested[1:] if requested.startswith("v") else requested
+    if requested != "latest" and bare == installed and not force:
+        return None
+    token = _hv_token(bool(registry.get("private")))
+    listed = subprocess.run(["git", "ls-remote", "--tags", url],
+                            capture_output=True, text=True,
+                            env=_hv_git_env(token, url))
+    if listed.returncode != 0:
+        _hv_fail(repo, "list the tags of", _hv_scrub(listed.stderr, token))
+    version = _hv_pick(listed.stdout, requested)
+    if version is None:
+        _hv_fail(repo, f"find version {requested} in", "")
+    if version == installed and not force:
+        return None
+    checkout = tempfile.mkdtemp(prefix="gv-handover-")
+    try:
+        cloned = subprocess.run(
+            ["git", "clone", "--depth", "1", "--branch", f"v{version}",
+             "--quiet", "-c", "advice.detachedHead=false", url, checkout],
+            capture_output=True, text=True, env=_hv_git_env(token, url))
+        if cloned.returncode != 0:
+            _hv_fail(repo, f"fetch v{version} of",
+                     _hv_scrub(cloned.stderr, token))
+        script = os.path.join(checkout, "templates", "install")
+        if not os.path.isfile(script):
+            _hv_fail(repo, f"find templates/install at v{version} of", "")
+        print(f"git-vendored {installed or '(none)'} -> {version}: handing "
+              f"the update over to git-vendored v{version}")
+        sys.stdout.flush()
+        env = dict(os.environ, **{HANDOVER_ENV: version})
+        code = subprocess.run([sys.executable, script, *argv],
+                              env=env).returncode
+    finally:
+        shutil.rmtree(checkout, ignore_errors=True)
+    sys.exit(code)
+
+
 if __name__ == "__main__":
+    handover()
     main()

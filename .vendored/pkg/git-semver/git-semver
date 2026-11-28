@@ -8,6 +8,10 @@ Subcommands:
     bump-all --since <commit> [opts] Check all components, bump all triggered
     tag [--push] [--subdir <name>]   Create version tags from VERSION files
     released [<ref>]                 Print the version tags at a commit (read-only)
+    releasable [<ref>]               Exit 0 when a commit is on the default branch
+                                     (the only commits a version may tag)
+    build-name [<ref>] [--semver]    Print the name of a build of an unreleased
+                                     commit: dev-<12 hex> (0.0.0-dev.<12 hex>)
     label <version> defect --reason "..." [--fixed-in <version>]
                                      Label a released version in git-deps.labels.json
     unlabel <version> <name>         Withdraw a label
@@ -38,7 +42,7 @@ DEFAULT_VERSION_FILE = "VERSION"
 # Keys reserved for root-level config (not subdirectory names)
 RESERVED_KEYS = frozenset({
     "version_file", "files", "updates", "changelog", "install", "bump_on",
-    "push_bump",
+    "push_bump", "default_branch",
 })
 
 
@@ -825,6 +829,137 @@ PUSH_REMOTE = "origin"
 TOKEN_HEADER_KEY = "http.https://github.com/.extraheader"
 
 
+# ── Default branch ──────────────────────────────────────────────────────────
+#
+# A version exists only for a commit on the default branch: every path that
+# creates a version tag first asks require_on_default_branch. The default
+# branch is the config's "default_branch" when stated, else origin/HEAD (the
+# local symbolic ref, else the remote's own HEAD), and its tip is as the
+# remote has it. Reachability is `git merge-base --is-ancestor`. There is no
+# switch that turns the refusal off.
+
+DEFAULT_BRANCH_KEY = "default_branch"
+REMOTE_HEAD_REF = f"refs/remotes/{PUSH_REMOTE}/"
+
+
+def stated_default_branch(config):
+    """The config's "default_branch", or None when it is not stated."""
+    value = config.get(DEFAULT_BRANCH_KEY)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip() or \
+            value.startswith("refs/") or any(c.isspace() for c in value):
+        raise SemverError(
+            f"{CONFIG_PATH}: {DEFAULT_BRANCH_KEY} is {value!r}; it must be "
+            'a branch name such as "main"')
+    return value
+
+
+def default_branch(config):
+    """The default branch's name: config, else origin/HEAD. Refuses to guess."""
+    stated = stated_default_branch(config)
+    if stated:
+        return stated
+    local = git("symbolic-ref", "--quiet", f"{REMOTE_HEAD_REF}HEAD", check=False)
+    ref = local.stdout.strip()
+    if local.returncode == 0 and ref.startswith(REMOTE_HEAD_REF):
+        return ref[len(REMOTE_HEAD_REF):]
+    remote = git("ls-remote", "--symref", PUSH_REMOTE, "HEAD", check=False)
+    if remote.returncode == 0:
+        for line in remote.stdout.splitlines():
+            target, _, name = line.partition("\t")
+            if name == "HEAD" and target.startswith("ref: refs/heads/"):
+                return target[len("ref: refs/heads/"):]
+    raise SemverError(
+        f"cannot tell the default branch: {PUSH_REMOTE}/HEAD is not set and "
+        f"{PUSH_REMOTE} does not say; set \"{DEFAULT_BRANCH_KEY}\" in "
+        f"{CONFIG_PATH} (for example \"main\")")
+
+
+def default_branch_tip(branch):
+    """The commit the remote's `branch` points at.
+
+    Asks the remote first; when it cannot be reached, the remote-tracking
+    ref from the last fetch answers.
+    """
+    ref = f"refs/heads/{branch}"
+    remote = git("ls-remote", PUSH_REMOTE, ref, check=False)
+    if remote.returncode == 0:
+        for line in remote.stdout.splitlines():
+            sha, _, name = line.partition("\t")
+            if name == ref:
+                return sha
+        raise SemverError(f"the default branch {branch} is not on {PUSH_REMOTE}")
+    tracking = git("rev-parse", "--verify", "--quiet",
+                   f"{REMOTE_HEAD_REF}{branch}^{{commit}}", check=False)
+    if tracking.returncode == 0:
+        return tracking.stdout.strip()
+    raise SemverError(
+        f"cannot read the tip of the default branch {branch}: {PUSH_REMOTE} "
+        f"cannot be reached and {PUSH_REMOTE}/{branch} was never fetched")
+
+
+def has_commit(sha):
+    return git("cat-file", "-e", f"{sha}^{{commit}}", check=False).returncode == 0
+
+
+def is_ancestor(sha, tip):
+    return git("merge-base", "--is-ancestor", sha, tip,
+               check=False).returncode == 0
+
+
+def reachable_from(sha, tip, branch):
+    """Is `sha` the remote branch's tip or an ancestor of it?
+
+    Fetches the tip when this clone lacks it, and the rest of the history
+    when a shallow clone cannot answer.
+    """
+    if sha == tip:
+        return True
+    if not has_commit(tip):
+        git("fetch", "--quiet", PUSH_REMOTE, f"refs/heads/{branch}", check=False)
+    if is_ancestor(sha, tip):
+        return True
+    shallow = git("rev-parse", "--is-shallow-repository", check=False)
+    if shallow.stdout.strip() == "true":
+        git("fetch", "--quiet", "--unshallow", PUSH_REMOTE,
+            f"refs/heads/{branch}", check=False)
+        return is_ancestor(sha, tip)
+    return False
+
+
+def require_on_default_branch(config, rev="HEAD"):
+    """Raise SemverError unless `rev` is on the default branch. Returns its name."""
+    verify_commit(rev)
+    sha = git("rev-parse", f"{rev}^{{commit}}").stdout.strip()
+    branch = default_branch(config)
+    tip = default_branch_tip(branch)
+    if not reachable_from(sha, tip, branch):
+        raise SemverError(
+            f"refusing to tag or release {sha[:12]}: it is not on the default "
+            f"branch {branch} ({PUSH_REMOTE}/{branch} is at {tip[:12]}); a "
+            f"version exists only for a commit on {branch} (name a build of "
+            f"it with `git-semver build-name`)")
+    return branch
+
+
+def require_bump_tags_default_branch(config):
+    """Before a bump that tags: HEAD on the default branch, checked out as it.
+
+    The bump commit is made on the current branch and pushed to it, so that
+    branch must be the default branch and HEAD must already be on it.
+    """
+    branch = require_on_default_branch(config, "HEAD")
+    current = git("symbolic-ref", "--quiet", "--short", "HEAD",
+                  check=False).stdout.strip()
+    if current != branch:
+        where = f"branch {current}" if current else "a detached HEAD"
+        raise SemverError(
+            f"refusing to tag: the bump commit would be made on {where}, not "
+            f"on the default branch {branch}; bump with --no-push and tag "
+            f"after it lands on {branch}")
+
+
 def token_header(token):
     """The extraheader value actions/checkout writes for a token."""
     basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
@@ -1007,6 +1142,9 @@ def cmd_bump(args):
     subdir = getattr(args, "subdir", None)
     bump_type = args.bump_type or "patch"
 
+    if not args.no_commit and not args.no_push:
+        require_bump_tags_default_branch(config)
+
     _, _, new_version, tag = bump_component(
         config, subdir=subdir, bump_type=bump_type, description=args.description
     )
@@ -1051,7 +1189,7 @@ def cmd_bump_all(args):
         print("No files changed")
         return
 
-    bumps = []  # list of (subdir, old_ver, new_ver, tag)
+    triggered = []  # root (None) and subdirectory names, in config order
 
     # Check root config
     if config.get("files"):
@@ -1059,11 +1197,7 @@ def cmd_bump_all(args):
         if matches:
             for filepath, pattern in matches:
                 print(f"Root matched: {filepath} (pattern: {pattern})")
-            result = bump_component(
-                config, subdir=None, bump_type=bump_type,
-                description=args.description,
-            )
-            bumps.append(result)
+            triggered.append(None)
 
     # Check subdirectories
     for name, subconfig in get_subdirectories(config).items():
@@ -1072,15 +1206,20 @@ def cmd_bump_all(args):
             if matches:
                 for filepath, pattern in matches:
                     print(f"{name} matched: {filepath} (pattern: {pattern})")
-                result = bump_component(
-                    config, subdir=name, bump_type=bump_type,
-                    description=args.description,
-                )
-                bumps.append(result)
+                triggered.append(name)
 
-    if not bumps:
+    if not triggered:
         print("No components triggered")
         return
+
+    if not args.no_commit and not args.no_push:
+        require_bump_tags_default_branch(config)
+
+    bumps = [  # list of (subdir, old_ver, new_ver, tag)
+        bump_component(config, subdir=name, bump_type=bump_type,
+                       description=args.description)
+        for name in triggered
+    ]
 
     if args.no_commit:
         print(f"\nBumped {len(bumps)} component(s) (files only, no commit)")
@@ -1143,18 +1282,24 @@ def cmd_tag(args):
         print("No version files found")
         return
 
-    tags_created = []
+    to_create = []  # list of (label, tag_name)
     for comp_subdir, version, tag_name in components:
         # If a tag for this version already exists (at any commit), skip it.
         # In a monorepo only the bumped component has a new version; untouched
         # components still point at their prior tag, which is expected — not an error.
+        label = comp_subdir or "root"
         result = git("tag", "-l", tag_name, check=False)
         if result.stdout.strip() == tag_name:
-            label = comp_subdir or "root"
             print(f"Tag {tag_name} already exists ({label}), skipping")
             continue
+        to_create.append((label, tag_name))
+
+    if to_create:
+        require_on_default_branch(config, "HEAD")
+
+    tags_created = []
+    for label, tag_name in to_create:
         git("tag", "-a", tag_name, "-m", tag_name)
-        label = comp_subdir or "root"
         print(f"Tagged {label}: {tag_name}")
         tags_created.append(tag_name)
 
@@ -1182,11 +1327,52 @@ def cmd_released(args):
     other non-version tag are never printed.
     """
     ref = getattr(args, "ref", None) or "HEAD"
+    for tag in version_tags_at(ref):
+        print(tag)
+
+
+def version_tags_at(ref):
+    """The version tags pointing at commit `ref`, sorted."""
     verify_commit(ref)
     result = git("tag", "--points-at", ref)
-    tags = sorted(t for t in result.stdout.split("\n") if VERSION_TAG_RE.match(t))
-    for tag in tags:
-        print(tag)
+    return sorted(t for t in result.stdout.split("\n") if VERSION_TAG_RE.match(t))
+
+
+def cmd_releasable(args):
+    """Exit 0 when a commit (default HEAD) is on the default branch, else refuse.
+
+    The check every tagging path makes, for a script that tags or releases
+    by other means. Reads the config when there is one.
+    """
+    ref = getattr(args, "ref", None) or "HEAD"
+    path = args.config or CONFIG_PATH
+    config = load_config(path) if args.config or Path(path).exists() else {}
+    branch = require_on_default_branch(config, ref)
+    sha = git("rev-parse", f"{ref}^{{commit}}").stdout.strip()
+    print(f"{sha[:12]} is on the default branch {branch}")
+
+
+BUILD_NAME_LENGTH = 12
+
+
+def cmd_build_name(args):
+    """Print the name of a build of an unreleased commit, from the commit alone.
+
+    dev-<12 hex>, or with --semver 0.0.0-dev.<12 hex> (a pre-release of
+    0.0.0, below every release). Never a git tag, nothing from VERSION, a
+    branch, a user or the environment. A released commit is refused: its
+    name is its version (`git-semver released`).
+    """
+    ref = getattr(args, "ref", None) or "HEAD"
+    tags = version_tags_at(ref)
+    sha = git("rev-parse", f"{ref}^{{commit}}").stdout.strip()
+    if tags:
+        raise SemverError(
+            f"{sha[:12]} is released as {', '.join(tags)}: a released commit "
+            f"has no build name (`git-semver released {ref}` prints its "
+            f"version)")
+    short = sha[:BUILD_NAME_LENGTH]
+    print(f"0.0.0-dev.{short}" if args.semver else f"dev-{short}")
 
 
 # The one label git-semver makes; others in the file are kept, not made.
@@ -1415,6 +1601,27 @@ def build_parser():
         "ref", nargs="?", default="HEAD", help="Commit to ask about (default: HEAD)",
     )
 
+    # releasable
+    releasable_parser = subparsers.add_parser(
+        "releasable",
+        help="Exit 0 when a commit is on the default branch (may be tagged)",
+    )
+    releasable_parser.add_argument(
+        "ref", nargs="?", default="HEAD", help="Commit to ask about (default: HEAD)",
+    )
+
+    # build-name
+    build_name_parser = subparsers.add_parser(
+        "build-name", help="Print the name of a build of an unreleased commit",
+    )
+    build_name_parser.add_argument(
+        "ref", nargs="?", default="HEAD", help="Commit to name (default: HEAD)",
+    )
+    build_name_parser.add_argument(
+        "--semver", action="store_true",
+        help="Print the version-shaped form 0.0.0-dev.<12 hex>",
+    )
+
     # label / unlabel / labels
     label_parser = subparsers.add_parser(
         "label", help=f"Label a released version in {LABELS_FILE}",
@@ -1493,6 +1700,8 @@ def main():
         "bump-all": cmd_bump_all,
         "tag": cmd_tag,
         "released": cmd_released,
+        "releasable": cmd_releasable,
+        "build-name": cmd_build_name,
         "label": cmd_label,
         "unlabel": cmd_unlabel,
         "labels": cmd_labels,
