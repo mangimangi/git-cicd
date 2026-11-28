@@ -72,6 +72,8 @@ in the README.
 | `manual` | boolean | `true` | the job can be run by hand: it is listed in the `Manual` workflow's `job` dropdown and its inputs are fields of that form |
 | `blocking` | boolean | `true` | `false` makes the job non-blocking: its failure is reported and does not fail the verdict |
 | `inputs` | object | `{}` | the inputs a manual run of the job takes, input name → declaration; see [Declared inputs](#declared-inputs) |
+| `secrets` | array of `CICD_WRITE_TOKEN`, `CICD_READ_TOKEN`, `VENDOR_PAT` | `[]` | the secrets the job's scripts receive; nothing undeclared is passed; see [Declared secrets and permissions](#declared-secrets-and-permissions) |
+| `permissions` | object, scope → `read` or `write` | `{}` | permissions of the workflow's own token beyond the trigger's default (`{"packages": "write"}`); see [Declared secrets and permissions](#declared-secrets-and-permissions) |
 
 **Title case by convention and by default, never by rewriting.** A job
 without `name` is shown under its job name with `-` and `_` as spaces and each
@@ -97,6 +99,95 @@ Steps share a machine, run in order and stop at the first failure.
 naming the job and the reason (for example `job test: missing required field
 branches`), and exits 2. Every other command refuses an invalid config the same
 way.
+
+### Declared secrets and permissions
+
+**A job gets what it declares.** Which secrets a job's scripts see and which
+permissions its workflow token has are the job's own declaration, not its
+trigger's.
+
+`secrets` lists, by name, the secrets the job's scripts receive as
+environment variables, from a documented set:
+
+| Secret | What it is for | Fine-grained personal access token |
+|---|---|---|
+| `CICD_READ_TOKEN` | reads private repositories (a pull request job that checks a private repository's contract, a setup that clones a private vendor); it cannot write | Repository permissions **Contents: Read-only** (and **Metadata: Read-only**, which GitHub always includes) on the private repositories it reads |
+| `CICD_WRITE_TOKEN` | proposes changes: pushes branches, opens pull requests, writes workflow files (an install or update job, a job that pushes a version bump) | **Contents: Read and write**, **Pull requests: Read and write**, **Workflows: Read and write** (to write files under `.github/workflows/`), plus **Metadata: Read-only**, on the repositories it changes |
+| `VENDOR_PAT` | **deprecated**: the old name of `CICD_WRITE_TOKEN`, still declarable so a repository can upgrade before it renames its secret | as `CICD_WRITE_TOKEN` |
+
+(The permission names are those of GitHub's fine-grained token settings,
+"Repository permissions".) Add each secret under the repository's *Settings →
+Secrets and variables → Actions* with exactly that name.
+
+- **Nothing is passed undeclared, on any trigger.** A script's environment
+  holds a documented secret if and only if its job declares it and it is set
+  non-empty, on `open`, `merge`, `cron`, manual runs and in a local `check`:
+  a documented name the job does not declare is removed from the inherited
+  environment before the script runs.
+- **A declared secret that is not set** (not added in the repository, or
+  empty) reaches the script **unset**, never as an empty string it could
+  mistake for a value. `run-job` prints `declared secret <NAME> is not set`
+  before the steps, and the report shows the same note under the job's row,
+  by name only.
+- `GITHUB_TOKEN` (the workflow's own token) reaches every job, declared or
+  not.
+- No secret value is ever printed, in a log, the report or an error.
+- `validate` refuses a name outside the set, a duplicate and anything but an
+  array of strings, naming the job (`job release: unknown secret 'NPM_TOKEN'
+  in secrets (allowed: CICD_WRITE_TOKEN, CICD_READ_TOKEN, VENDOR_PAT)`).
+
+`permissions` declares what the workflow's own token (`GITHUB_TOKEN`) needs
+beyond the trigger's default, in GitHub's own syntax (scope → level):
+
+| Scopes | Levels | Trigger defaults |
+|---|---|---|
+| `contents`, `pull-requests`, `issues`, `packages` | `read`, `write` | `open`: `contents: read`; `merge`, `cron`, manual: `contents: write`, `pull-requests: write` |
+
+- The job runs with its trigger's default merged with its declaration, the
+  higher level winning, so a job on several triggers declares one set; a
+  declaration that adds nothing changes nothing. A job that declares none
+  keeps its trigger's default.
+- **No other job gains anything from it**: two jobs on the same trigger with
+  different declarations run with different permissions (each distinct set
+  gets a run job of its own in the generated workflow; see
+  [The generated workflows](#the-generated-workflows)). Changing a
+  declaration means running `generate` and committing; `verify` fails until
+  you do.
+- **No `write` on a job with `open` in `on`.** `open` runs a pull request's
+  own code (and GitHub gives a fork's pull request a read-only token
+  anyway). A pull request job that must write, such as one that pushes a
+  version bump to the pull request's branch, declares the
+  `CICD_WRITE_TOKEN` secret instead of a write permission.
+- `validate` refuses a scope outside the set, a level other than `read` or
+  `write`, a value that is not an object of strings and a `write` on an
+  `open` job, naming the job and the reason.
+
+The three needs, declared:
+
+```json
+"release": {
+  "on": ["merge"], "branches": ["main"],
+  "steps": [".vendored/pkg/git-semver/release", "ci/publish-image.sh"],
+  "permissions": {"packages": "write"}
+},
+"contract": {
+  "on": ["open"], "branches": ["**"],
+  "steps": ["ci/check-contract.sh"],
+  "secrets": ["CICD_READ_TOKEN"]
+},
+"update-vendored": {
+  "on": ["cron"], "cron": "0 9 * * 1", "branches": ["main"],
+  "steps": ["ci/update-vendored.sh"],
+  "secrets": ["CICD_WRITE_TOKEN"]
+}
+```
+
+`release` publishes a container image as a later step of the release (a tag
+or release made with the workflow's own token starts no other workflow) with
+`packages: write` on its own token, while a sibling `merge` job keeps the
+default; `contract` reads a private repository on a pull request with
+`CICD_READ_TOKEN` and gets nothing else; `update-vendored` proposes changes
+(pushes a branch, opens a pull request) with `CICD_WRITE_TOKEN`.
 
 ### Declared inputs
 
@@ -270,26 +361,16 @@ Every decision carries a reason, and the report shows it.
 | `CICD_CHANGED_FILES` | absolute path of a file listing the changed files, one per line (empty when the diff cannot be computed, and always on `cron` and manual) |
 | `CICD_INPUT_<NAME>` | one per [declared input](#declared-inputs): the manual run's value, else the default, else empty; no other `CICD_INPUT_` variable is set |
 
-- Secrets, by trigger. git-cicd itself never reads or logs them.
-
-  | Trigger | `GITHUB_TOKEN` | `VENDOR_PAT` |
-  |---|---|---|
-  | `open` | passed through unchanged (read-only: `contents: read`) | **not passed**, and removed from the environment when set |
-  | `merge`, `cron`, manual | passed through unchanged (the workflow's write permissions) | passed through unchanged |
-
-  `VENDOR_PAT` is not only a read token for private vendor repositories: it
-  is also the identity automation uses to propose changes, and may push
-  branches, open pull requests and write workflow files. `open` runs a pull
-  request's own code with a token that is read-only on purpose, and no `open`
-  job writes anything, so a pull request's code never gets the write-capable
-  secret. The `Open` workflow does not pass it, and `run-job --trigger=open`
-  (which is what `check` runs) drops a `VENDOR_PAT` inherited from the
-  caller, so a local check and CI give a script the same environment.
-
-  **An `open` job that read a private vendor with `VENDOR_PAT`** (for example
-  a setup that cloned a private repository) no longer can: move that step to
-  a job on `merge`, `cron` or a manual run, which still get `VENDOR_PAT`, or
-  make what the `open` job needs readable without it.
+- Secrets: **a job gets what it declares** (its `secrets`; see
+  [Declared secrets and permissions](#declared-secrets-and-permissions)).
+  `GITHUB_TOKEN` is passed through unchanged to every job, with the
+  permissions of its trigger's default plus the job's `permissions`. Every
+  documented secret (`CICD_WRITE_TOKEN`, `CICD_READ_TOKEN`, `VENDOR_PAT`) the
+  job does not declare is removed from the caller's environment on every
+  trigger, including a local `check`, so a local check and CI give a script
+  the same environment. A declared secret that is not set reaches the script
+  unset and the report names it. git-cicd itself never prints a secret's
+  value.
 - Exit 0 passes. Anything else fails the job and stops its remaining steps.
 - Setup runs first, on the same machine. What it installs on disk is its only
   channel to the steps; nothing else is passed between setup and steps or
@@ -483,16 +564,47 @@ not a kind of job.
 
 `git-cicd generate` writes every generated file. **Every generated file is
 fixed text except the cron workflow's schedule block** (one entry per distinct
-cron expression in the config) **and the Manual workflow's form** (which jobs
-its `job` dropdown lists and which named input fields it has), and the tool
-path, which follows where git-cicd is installed. Jobs are decided when a
-workflow runs, so `Open` and `Merge` never change with the config, and two
-configs that differ only in jobs that are neither `cron` nor manual (or only
-in their `paths`, `branches`, `steps` or `name`) generate the same files.
-(The comments at the top of the `open`, `merge` and `cron` templates still
-read "fixed text except the cron workflow's schedule block": they are left as
-they are so those files stay byte-identical; this section and the `manual`
-template carry the rule.)
+cron expression in the config), **the Manual workflow's form** (which jobs
+its `job` dropdown lists and which named input fields it has) **and the run
+job of each permission group** (below), and the tool path, which follows
+where git-cicd is installed. Jobs are decided when a workflow runs, so
+without a `permissions` declaration beyond a trigger's default `Open` and
+`Merge` never change with the config, and two configs that differ only in
+jobs that are neither `cron` nor manual (or only in their `paths`,
+`branches`, `steps`, `name` or `secrets`) generate the same files.
+
+**Permissions per job.** The job that runs the config's scripts, `run`, has
+its trigger's default permissions (on `open` the read-only top level; on
+`merge`, `cron` and manual `contents: write` and `pull-requests: write`). A
+job's `permissions` cannot be an expression in GitHub and applies to every
+entry of a matrix, so for every distinct effective permission set on a
+trigger that differs from the default, `generate` writes one more run job,
+`run-<scope>-<level>...` for each scope and level beyond the default (for
+example `run-packages-write`), in first-seen config order. It is the
+template's `run` job with three things changed: its `permissions` (the
+default plus the declaration, written literally from the validated scope and
+level words), its matrix (that group's entry of decide's `groups` output) and
+its placeholder entry (`(nothing:<group>)`, see [Rows](#rows)). Jobs with the
+same effective set share one; `run` keeps every other job, and the report
+job `needs` every group job. Each config job's rows, result artifacts
+(`git-cicd-result-<job>`) and report are unchanged. A config without such a
+declaration generates no group job, so its files are what they were.
+`generate` writes the group jobs and `verify` fails when a declaration was
+added, changed or removed without regenerating.
+
+**Secrets per job.** The step that runs a job has one fixed env line per
+documented secret,
+
+```yaml
+CICD_WRITE_TOKEN: ${{ contains(fromJSON(needs.decide.outputs.secrets)[matrix.job], 'CICD_WRITE_TOKEN') && secrets.CICD_WRITE_TOKEN || '' }}
+```
+
+(and likewise `CICD_READ_TOKEN` and `VENDOR_PAT`), so a matrix entry gets a
+secret's value only when its job declares it (decide's `secrets` output, job
+→ declared names), and the empty string otherwise; the tool then removes
+every undeclared or empty name before a script runs. The names are a fixed
+set, so these lines are fixed text: no config value is written into a
+workflow, and no secret appears anywhere else in it.
 
 The `open` workflow (`Open`):
 
@@ -502,18 +614,20 @@ The `open` workflow (`Open`):
   `Report / git-cicd:report` also get `statuses: write`, the one write
   permission on `open`, and only to set the `Verdict / git-cicd:verdict`
   status (pending at the start, the verdict at the end); the job that runs the
-  config's scripts has no permission of its own (only the read-only top level).
-- Secrets: that job gets `GITHUB_TOKEN` (read-only) and **not**
-  `VENDOR_PAT`, which may write (see
-  [What a script is given](#what-a-script-is-given)); `Merge`, `Cron` and
-  `Manual` pass both.
+  config's scripts has no permission of its own (only the read-only top level),
+  and a job's `permissions` may add only `read` levels on `open` (in a group
+  run job; see above).
+- Secrets: that job gets `GITHUB_TOKEN` (read-only) and only the secrets its
+  config job declares, as on every trigger (see
+  [What a script is given](#what-a-script-is-given)).
 - Overlap: a newer push to the same pull request supersedes the older run.
   It cancels the older run's jobs that run the config's scripts (a
   `concurrency` group per pull request and job on the `run` job only; there is
   none on the workflow or on the status-posting jobs, so the newer run's
   pending status never waits for the older run).
-- `decide` works out the needed jobs and their display names (its `jobs`
-  and `names` outputs); `run` gives each needed job its own
+- `decide` works out the needed jobs, their display names and their
+  declared secrets (its `jobs`, `names` and `secrets` outputs, and `groups`
+  when there is a permission group); `run` gives each needed job its own
   runner (`ubuntu-latest`), at most `max_parallel` at once, always with setup;
   `verdict` (`Report / git-cicd:report`) collects the results, verifies the
   workflows, reports and sets the `Verdict / git-cicd:verdict` status.
@@ -529,7 +643,8 @@ The `merge` workflow (`Merge`):
   commit to run on or to put a status on.
 - Token: `contents: read` at the top level. The job that runs the config's
   scripts gets `contents: write` and `pull-requests: write` (a release pushes
-  a commit and tags, or opens a pull request), and checks out the landed
+  a commit and tags, or opens a pull request), plus what a job declares in
+  `permissions`, in its group's run job; it checks out the landed
   commit on its branch with full history and tags (`fetch-depth: 0`,
   `fetch-tags: true`). `Decide / git-cicd:decide` and
   `Report / git-cicd:report` get `statuses: write` and `pull-requests: read`
@@ -657,7 +772,8 @@ The cron workflow (`Cron`):
   job on a branch runs on the same commit, and a branch that does not exist
   is reported as failed. Its matrix output is the cron-only `runs`, a list of
   `{key, job, branch, sha}`.
-- Token: write permissions (`contents: write`, `pull-requests: write`) only
+- Token: write permissions (`contents: write`, `pull-requests: write`, plus a
+  job's declared `permissions` in its group's run job) only
   on the job that runs the config's scripts, which checks out its branch's
   head with full history and tags; decide and report get `statuses: write`
   and `pull-requests: read`.
@@ -694,6 +810,28 @@ install pull request of an upgrade does this for you when it may carry workflow
 files; otherwise run `generate` and commit from any branch. Then point
 branch protection and anything else that waited on `git-cicd verdict` at
 `Verdict / git-cicd:verdict`.
+
+### Upgrading to 0.2.0: a job declares its secrets and permissions
+
+0.2.0 passes nothing undeclared: a job on `merge`, `cron` or a manual run that
+used `VENDOR_PAT` without declaring it no longer receives it, and a
+documented secret in the environment of a job that does not declare it is
+removed, locally too. In order:
+
+1. **Declare** on each job what it needs: `"secrets": ["VENDOR_PAT"]` on a job
+   that used `VENDOR_PAT` (or `CICD_WRITE_TOKEN` for one that proposes
+   changes, `CICD_READ_TOKEN` for one that only reads private repositories),
+   and `"permissions"` on a job whose token needs more than its trigger's
+   default (see
+   [Declared secrets and permissions](#declared-secrets-and-permissions)).
+2. **Add the renamed secrets** `CICD_WRITE_TOKEN` and `CICD_READ_TOKEN` in the
+   repository's settings (*Settings → Secrets and variables → Actions*), with
+   the fine-grained permissions above, and switch the declarations to them; a
+   job may declare both `CICD_WRITE_TOKEN` and `VENDOR_PAT` (and its script
+   use the first that is set) until `VENDOR_PAT` is removed.
+3. **Run `generate`** (`.vendored/pkg/git-cicd/git-cicd generate`).
+4. **Commit** the config and the generated workflows together, in one pull
+   request; `verify` fails the verdict until the workflows match.
 
 ## Installing
 
@@ -814,9 +952,11 @@ left the target.
   Add `--force` to run it regardless of its `paths` (`branches` still binds).
   An unknown job name exits 2.
 - Scripts get the same environment as in CI: every `CICD_` variable, and
-  `GITHUB_TOKEN` passed through unchanged when it is set. `check` runs on
-  `open`, so a `VENDOR_PAT` in the caller's environment is removed, as the
-  `Open` workflow does not pass it.
+  `GITHUB_TOKEN` passed through unchanged when it is set. A documented secret
+  (`CICD_WRITE_TOKEN`, `CICD_READ_TOKEN`, `VENDOR_PAT`) in the caller's
+  environment reaches a script only when its job declares it and it is
+  non-empty; every other one is removed, as on every trigger in CI, and a
+  declared one that is not set is named in the report.
 
 Exit codes:
 
@@ -831,7 +971,7 @@ Exit codes:
 | Command | What |
 |---|---|
 | `validate [--config PATH]` | load and validate the config: `config ok: N jobs` or every error |
-| `decide --trigger open\|merge\|manual --target B --source B --base SHA --head SHA [--job NAME] [--json] [--changed-files-out PATH]`, or `decide --trigger cron --cron EXPR [--json]` | one decision per declared job, with the reason; `--job` names the job of a manual run (required with `--trigger manual`, refused with any other); `--cron` is the schedule that fired (required with `--trigger cron`, refused with any other); in Actions also writes `jobs`, `names`, `any`, `max_parallel` (and on cron `runs`) to `GITHUB_OUTPUT`, where `jobs` (and `runs`) is the placeholder `(nothing)` when no job is needed |
+| `decide --trigger open\|merge\|manual --target B --source B --base SHA --head SHA [--job NAME] [--json] [--changed-files-out PATH]`, or `decide --trigger cron --cron EXPR [--json]` | one decision per declared job, with the reason; `--job` names the job of a manual run (required with `--trigger manual`, refused with any other); `--cron` is the schedule that fired (required with `--trigger cron`, refused with any other); in Actions also writes `jobs`, `names`, `secrets`, `any`, `max_parallel` (and on cron `runs`, and `groups` when a job on the trigger declares `permissions` beyond its default) to `GITHUB_OUTPUT`, where `jobs` (and `runs`) is the default `run` job's matrix, the placeholder `(nothing)` when it has nothing to run, and `groups` each permission group's matrix |
 | `run-job JOB --trigger open\|merge\|cron\|manual --target … --head SHA [--setup] [--result PATH]` | setup when asked, then the steps; result JSON with the times |
 | `generate` / `verify` | write / check the generated workflows (`.github/workflows/git-cicd-open.yml`, `.github/workflows/git-cicd-merge.yml`, `.github/workflows/git-cicd-manual.yml` when a job allows manual runs, and `.github/workflows/git-cicd-cron.yml` when a job has `cron` in `on`); `generate` removes, and `verify` fails on, the old `.github/workflows/git-cicd.yml` |
 | `report --decisions FILE --results DIR [--trigger open\|merge\|cron\|manual] [--verdict-out PATH]` | the report and verdict from `decide --json` and `run-job --result` files; `--verdict-out` writes the status state (`success`/`failure`) and description, one per line (on cron one line per branch head: `<sha> TAB <state> TAB <description>`) |
@@ -839,8 +979,8 @@ Exit codes:
 
 ## Not built yet
 
-- Secrets beyond `GITHUB_TOKEN` and `VENDOR_PAT` (which `open` does not
-  get).
+- Secrets outside the documented set (`CICD_WRITE_TOKEN`, `CICD_READ_TOKEN`,
+  `VENDOR_PAT`), and a GitHub App as the identity behind a token.
 - An image or runtime per job.
 
 ## Developing git-cicd
@@ -855,7 +995,11 @@ config declares five jobs:
 | `vendor-check` | `Open / Check Vendor Files / git-cicd:vendor-check` | `open`, every branch; not by hand (`"manual": false`) | `ci/vendor-check.sh` | `python3 .vendored/check --base "$CICD_BASE"`; it sets `GITHUB_HEAD_REF` from `CICD_SOURCE_BRANCH` when unset, so a local `check` lets `chore/install-*` branches through like Actions does |
 | `version-check` | `Open / Version Check / git-cicd:version-check` | `open`, pull requests into `main`; not by hand (`"manual": false`) | `.vendored/pkg/git-semver/git-semver check-bump` | fails a pull request that changes a file in git-semver's `files` (`.vendored/configs/git-semver.json`) without raising `VERSION` above the base's |
 | `release` | `Merge / Release / git-cicd:release` | `merge` on `main`; by hand (no inputs) | `.vendored/pkg/git-semver/release` | git-semver's `release` with no subcommand; with `"bump_on": "pull_request"` it tags the landed commit with the version in `VERSION` when that version has no tag yet, pushes the tag and creates its GitHub release. It never bumps, commits or pushes to `main` |
-| `update-vendored` | `Cron / Install Vendored / git-cicd:update-vendored` | `cron` `0 9 * * 1` on `main`; by hand with the inputs `vendor` (default all), `version` (default latest), `private` (true or false; default false) | `ci/update-vendored.sh` | `python3 .vendored/install <vendor> --version <version> --pr --deps=install` (plus `--private`), with `GH_TOKEN` set to `VENDOR_PAT` when set, else `GITHUB_TOKEN`; only CI runs it |
+| `update-vendored` | `Cron / Install Vendored / git-cicd:update-vendored` | `cron` `0 9 * * 1` on `main`; by hand with the inputs `vendor` (default all), `version` (default latest), `private` (true or false; default false) | `ci/update-vendored.sh` | `python3 .vendored/install <vendor> --version <version> --pr --deps=install` (plus `--private`), with `GH_TOKEN` set to `CICD_WRITE_TOKEN` when set, else `VENDOR_PAT`, else `GITHUB_TOKEN`; the job declares the secrets `CICD_WRITE_TOKEN` and `VENDOR_PAT` (kept until the repository's secret is renamed); only CI runs it |
+
+`update-vendored` declares the secrets `CICD_WRITE_TOKEN` and `VENDOR_PAT`;
+`test`, `vendor-check`, `version-check` and `release` declare no secrets and
+no permissions, so `release` runs with `merge`'s default token and no secret.
 
 **How a release happens.** git-cicd's version is raised in the pull request,
 not after the merge (`"bump_on": "pull_request"` in
