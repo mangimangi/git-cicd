@@ -609,44 +609,84 @@ def test_job_refused_for_other_triggers(repo, trigger):
 
 # ── manual: declared inputs ─────────────────────────────────────────────────
 
-INPUT_JOBS = {"release": {"branches": ["main"], "steps": ["ci/bump.sh"],
-                          "inputs": {
-                              "bump_type": {"choices": ["patch", "minor",
-                                                        "major"],
-                                            "default": "patch"},
-                              "note": {"required": True}}}}
+INPUT_JOBS = {
+    "release": {"branches": ["main"], "steps": ["ci/bump.sh"],
+                "inputs": {
+                    "bump_type": {"choices": ["patch", "minor", "major"],
+                                  "default": "patch"},
+                    "note": {"required": True}}},
+    "update": {"branches": ["main"], "steps": ["ci/bump.sh"],
+               "inputs": {"vendor": {"default": "all"},
+                          "private": {"choices": ["false", "true"]},
+                          "free": {}}},
+    "hidden": {"branches": ["main"], "steps": ["ci/bump.sh"],
+               "manual": False, "inputs": {"secret": {"default": "s"}}},
+}
 
 
-def decide_inputs(repo, inputs):
+def decide_inputs(repo, form, job="release"):
     head = repo.git("rev-parse", "HEAD")
-    result = repo.run("decide", "--trigger=manual", "--job=release",
+    env = {} if form is None else {"CICD_MANUAL_FORM": form}
+    result = repo.run("decide", "--trigger=manual", f"--job={job}",
                       "--target=main", "--source=main", f"--base={head}",
-                      f"--head={head}", "--json",
-                      env={"CICD_MANUAL_INPUTS": inputs})
+                      f"--head={head}", "--json", env=env)
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
 
 
 def test_manual_inputs_accepted(repo):
     setup_repo(repo, jobs=INPUT_JOBS)
-    data = decide_inputs(repo, '{"bump_type": "minor", "note": "x"}')
+    data = decide_inputs(repo, json.dumps({
+        "job": "release", "bump_type": "minor", "note": "x",
+        "vendor": "all", "private": "false", "free": ""}))
     assert data["refused"] is None
+    assert data["ignored"] == []
     assert data["jobs"][0]["needed"] is True
 
 
-@pytest.mark.parametrize("inputs,reason", [
+def test_manual_fields_of_other_jobs_are_ignored_and_noted(repo):
+    setup_repo(repo, jobs=INPUT_JOBS)
+    data = decide_inputs(repo, json.dumps({
+        "job": "release", "bump_type": "major", "note": "x",
+        "vendor": "mangimangi/git-semver", "private": "true", "free": "",
+        "unknown": "u", "blank": ""}))
+    assert data["refused"] is None
+    assert data["ignored"] == [
+        "ignored input vendor (job release does not declare it)",
+        "ignored input private (job release does not declare it)",
+        "ignored input unknown (job release does not declare it)"]
+    assert data["jobs"][0]["needed"] is True
+    head = repo.git("rev-parse", "HEAD")
+    text = repo.run("decide", "--trigger=manual", "--job=release",
+                    "--target=main", "--source=main", f"--base={head}",
+                    f"--head={head}", env={"CICD_MANUAL_FORM": json.dumps(
+                        {"note": "x", "vendor": "v"})}).stdout
+    assert "  ignored input vendor (job release does not declare it)\n" in text
+
+
+def test_manual_without_the_form_takes_the_defaults(repo):
+    setup_repo(repo, jobs=INPUT_JOBS)
+    data = decide_inputs(repo, None, job="update")
+    assert data["refused"] is None and data["ignored"] == []
+    data = decide_inputs(repo, None)
+    assert data["refused"] == "job release: input note is required"
+
+
+@pytest.mark.parametrize("form,reason", [
     ("", "job release: input note is required"),
+    ('{"note": ""}', "job release: input note is required"),
     ('{"note": "x", "bump_type": "huge"}',
      "job release: input bump_type: 'huge' is not one of the choices "
      "(patch, minor, major)"),
-    ('{"note": "x", "extra": "y"}',
-     "job release declares no input 'extra' (declared: bump_type, note)"),
-    ("not json", "the inputs are not valid JSON"),
-    ('{"note": ["x"]}', "the inputs must be a JSON object of string values"),
+    ("not json", "the manual run's form values are not valid JSON"),
+    ('["x"]', "the manual run's form values must be a JSON object of "
+              "string values"),
+    ('{"note": ["x"]}', "the manual run's form values must be a JSON object "
+                        "of string values"),
 ])
-def test_manual_input_failures_are_refusals(repo, inputs, reason):
+def test_manual_input_failures_are_refusals(repo, form, reason):
     setup_repo(repo, jobs=INPUT_JOBS)
-    data = decide_inputs(repo, inputs)
+    data = decide_inputs(repo, form)
     assert data["refused"].startswith(reason), data["refused"]
     assert not data["jobs"][0]["needed"]
 

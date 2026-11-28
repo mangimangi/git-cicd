@@ -570,7 +570,7 @@ def test_incompatible_inputs_of_a_job_not_run_by_hand_validate(scripts):
     assert scripts.run("validate").returncode == 0
 
 
-@pytest.mark.parametrize("name", ["job", "inputs"])
+@pytest.mark.parametrize("name", ["job"])
 def test_form_field_names_are_reserved_on_manual_jobs(scripts, name):
     refused(scripts, {"jobs": {"t": job(inputs={name: {}})}},
             f"job t: input {name}: the name {name} is reserved for the "
@@ -592,4 +592,19 @@ def test_form_limit(scripts):
             "at most 25 inputs", "at most 24 distinct input names",
             "use fewer distinct input names, or set \"manual\": false")
     scripts.config({"jobs": {"a": job(inputs=inputs, manual=False)}})
+    assert scripts.run("validate").returncode == 0
+
+
+@pytest.mark.parametrize("decl,what", [
+    ({"description": "say ${{ github.token }}"}, "description"),
+    ({"default": "${{ secrets.X }}"}, "default"),
+    ({"choices": ["a", "b${{ x }}"]}, "choice"),
+])
+def test_expressions_are_refused_in_manual_jobs_form_values(scripts, decl,
+                                                            what):
+    refused(scripts, {"jobs": {"t": job(inputs={"x": decl})}},
+            f"job t: input x: the {what} contains ${{{{, which GitHub would "
+            "evaluate in the Manual workflow's form",
+            '"manual": false')
+    scripts.config({"jobs": {"t": job(inputs={"x": decl}, manual=False)}})
     assert scripts.run("validate").returncode == 0

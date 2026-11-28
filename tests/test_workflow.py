@@ -689,21 +689,122 @@ def test_verify_fails_on_a_hand_edit_of_the_manual_file(tool_repo):
     assert f"{MANUAL} (committed)" in result.stdout
 
 
-def test_manual_file_carries_inputs_as_json_through_env(tool_repo):
+def test_manual_file_carries_the_form_as_json_through_env(tool_repo):
     text = generate_manual(tool_repo)
-    on = text.split("\non:\n", 1)[1].split("\npermissions:")[0]
-    assert ("      inputs:\n        description: 'The job''s declared inputs as "
-            "a JSON object of strings") in on
-    assert "        required: false\n        default: ''\n        type: string\n" \
-        in on
+    template = (TEMPLATES / "manual.yml").read_text()
+    for t in (text, template):
+        assert "CICD_MANUAL_INPUTS" not in t and "inputs.inputs" not in t
+        assert "\n      inputs:\n" not in t  # no free-text inputs field
     jobs = job_blocks(text)
-    entry = "          CICD_MANUAL_INPUTS: ${{ inputs.inputs }}\n"
+    entry = "          CICD_MANUAL_FORM: ${{ toJSON(inputs) }}\n"
     assert entry in steps_of(jobs["decide"])[3]
     assert entry in steps_of(jobs["run"])[1]
-    assert text.count("CICD_MANUAL_INPUTS") == text.count(entry) + \
-        text.split("\nname: Manual\n")[0].count("CICD_MANUAL_INPUTS")
+    header = text.split("\nname: Manual\n")[0]
+    assert text.count("CICD_MANUAL_FORM") == 2 + header.count(
+        "CICD_MANUAL_FORM")
     for block in run_blocks(text):
-        assert "${{" not in block and "CICD_MANUAL_INPUTS" not in block
+        assert "${{" not in block and "CICD_MANUAL_FORM" not in block
+
+
+HOSTILE = [
+    "it's \"quoted\": # not a comment",
+    "  $HOME `id` $(id) {{ braces }} ${ x }  ",
+    "- a: [b, {c: d}] & *anchor !tag | > %",
+]
+HOSTILE_LINES = ["two\nlines: x", "\n# leading newline", "back\\slash\t\r"]
+
+
+def hostile_config():
+    return {"jobs": {
+        "zz-hostile_job": {
+            "on": ["open"], "branches": ["main"], "steps": ["ci/test.sh"],
+            "inputs": {
+                "first": {"description": HOSTILE[0], "default": HOSTILE[1]},
+                "second": {"description": HOSTILE[1],
+                           "choices": HOSTILE + HOSTILE_LINES,
+                           "default": HOSTILE_LINES[0]},
+                "third": {"description": HOSTILE[2],
+                          "default": HOSTILE_LINES[1]}}},
+        "true": {"on": ["merge"], "branches": ["main"],
+                 "steps": ["ci/bump.sh"],
+                 "inputs": {"fourth": {"description": HOSTILE[2],
+                                       "default": HOSTILE_LINES[2]}}},
+        "nightly-hostile": {"on": ["cron"], "branches": ["main"],
+                            "cron": "0 3 * * *", "steps": ["ci/test.sh"]},
+    }}
+
+
+def form_fields(text):
+    """{field: {key: value}} of the Manual workflow's workflow_dispatch
+    inputs, each scalar read with json.loads; asserts every line of the
+    block has the shape the generator writes."""
+    on = text.split("\non:\n  workflow_dispatch:\n    inputs:\n", 1)[1]
+    block = on.split("\npermissions:")[0].rstrip("\n").split("\n")
+    fields, field, key = {}, None, None
+    for line in block:
+        if not line:
+            continue
+        m = re.fullmatch(r"      ([a-z][a-z0-9_]*):", line)
+        if m:
+            field = fields.setdefault(m.group(1), {})
+            continue
+        m = re.fullmatch(r"        (description|default): (\".*\")", line)
+        if m:
+            field[m.group(1)] = json.loads(m.group(2))
+            continue
+        m = re.fullmatch(r"        (required): (true|false)", line)
+        if m:
+            field["required"] = m.group(2) == "true"
+            continue
+        m = re.fullmatch(r"        type: (choice|string)", line)
+        if m:
+            field["type"] = m.group(1)
+            continue
+        if line == "        options:":
+            field["options"] = []
+            continue
+        m = re.fullmatch(r"          - (\".*\")", line)
+        assert m, line
+        field["options"].append(json.loads(m.group(1)))
+    return fields
+
+
+def test_hostile_declarations_cannot_change_the_files(tool_repo):
+    config = hostile_config()
+    generate(tool_repo, config)
+    files = generated_files(tool_repo)
+    fields = form_fields(files["git-cicd-manual.yml"])
+    assert list(fields) == ["job", "first", "second", "third", "fourth"]
+    assert fields["job"]["options"] == ["zz-hostile_job", "true",
+                                        "nightly-hostile"]
+    assert fields["first"]["description"] == \
+        f"{HOSTILE[0]} (job zz-hostile_job)"
+    assert fields["first"]["default"] == HOSTILE[1]
+    assert fields["second"]["options"] == HOSTILE + HOSTILE_LINES
+    assert fields["second"]["default"] == HOSTILE_LINES[0]
+    assert fields["third"]["default"] == HOSTILE_LINES[1]
+    assert fields["fourth"]["default"] == HOSTILE_LINES[2]
+    # every value stays on its one line
+    manual = files["git-cicd-manual.yml"]
+    for value in HOSTILE_LINES:
+        assert value not in manual
+    # the rest of the file is the template's
+    form = git_cicd.form_block(git_cicd.load_config(str(tool_repo.path)))
+    assert manual.replace(form, "__FORM__\n", 1) == \
+        (TEMPLATES / "manual.yml").read_text().replace("__TOOL__", TOOL)
+    # no run: block of any generated file holds a value from the config
+    values = set(HOSTILE + HOSTILE_LINES) | {"zz-hostile_job",
+                                            "nightly-hostile"}
+    values |= {v.strip() for v in values}
+    assert sorted(files) == ["git-cicd-cron.yml", "git-cicd-manual.yml",
+                             "git-cicd-merge.yml", "git-cicd-open.yml"]
+    for name, text in files.items():
+        for block in run_blocks(text):
+            for value in values:
+                assert value not in block, (name, value)
+                for line in value.split("\n"):
+                    assert not line.strip() or line not in block, (name, line)
+    assert tool_repo.run("verify").returncode == 0
 
 
 def test_declared_inputs_change_only_the_manual_form(tool_repo):

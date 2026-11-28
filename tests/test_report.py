@@ -833,3 +833,28 @@ def test_decisions_that_are_not_a_decision_record_fail(config, repo, tmp_path,
     assert out.read_text().splitlines() == [
         "failure", "FAILED - no decisions: the decide step failed or did "
         "not run (see its log)"]
+
+
+def test_report_names_ignored_form_fields(config, repo, tmp_path,
+                                          monkeypatch):
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    note = "ignored input vendor (job docs does not declare it)"
+    dec = decision(docs=(True, "manual run"))
+    dec.update(trigger="manual", job="docs", refused=None, ignored=[note])
+    results = {"docs": passed_result("docs", steps=("ci/docs.sh",),
+                                     setup=False)}
+    ok, verdict, text = run_report(config, repo, dec, results)
+    assert ok
+    assert f"\n  {note}\nworkflows match config\n" in text
+    assert f"\n- {note}\n" in summary.read_text()
+
+
+@pytest.mark.parametrize("ignored", [None, "not a list", []])
+def test_report_without_ignored_fields_has_no_notes(config, repo, ignored):
+    dec = decision(docs=(True, "manual run"))
+    dec.update(trigger="manual", job="docs", refused=None, ignored=ignored)
+    results = {"docs": passed_result("docs", steps=("ci/docs.sh",),
+                                     setup=False)}
+    _, _, text = run_report(config, repo, dec, results)
+    assert "ignored" not in text and "not a list" not in text

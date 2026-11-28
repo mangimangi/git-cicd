@@ -93,7 +93,7 @@ def run_job(repo, job, trigger, head, base=None, branch="main", inputs=None,
     run_env = {"LOG": str(repo.log), "GITHUB_TOKEN": "ghs_token"}
     run_env.update(env)
     if inputs is not None:
-        run_env["CICD_MANUAL_INPUTS"] = json.dumps(inputs)
+        run_env["CICD_MANUAL_FORM"] = json.dumps(inputs)
     result = repo.run("run-job", job, f"--trigger={trigger}",
                       f"--target={branch}", f"--source={branch}",
                       f"--base={base or head}", f"--head={head}", env=run_env)
