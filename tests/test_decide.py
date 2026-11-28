@@ -870,3 +870,83 @@ def test_cron_text_lists_each_branch_and_run(repo):
     assert f"  branch main: {heads['main']}" in lines
     assert "  branch dev: does not exist" in lines
     assert f"  run nightly on main at {heads['main']}" in lines
+
+
+# ── manual: the form's options are row names ────────────────────────────────
+
+ROW_JOBS = {
+    # no `name`: the row shows the job name in title case
+    "update-vendored": {"branches": ["main"], "steps": ["ci/bump.sh"],
+                        "inputs": {"vendor": {"default": "all"}}},
+    # a written `name`, sharing the input with the job above
+    "release": {"name": "Ship It", "branches": ["main"],
+                "steps": ["ci/bump.sh"],
+                "inputs": {"vendor": {"default": "all"}}},
+    "lint": {"on": ["open"], "branches": ["**"], "steps": ["ci/lint.sh"],
+             "manual": False},
+}
+
+
+def test_manual_form_options_map_to_jobs_both_ways(repo):
+    """Each option of the generated form is the job's row name; choosing it
+    runs that job, and the bare config key still does. A job without `name`
+    and two jobs sharing an input are both covered."""
+    setup_repo(repo, jobs=ROW_JOBS)
+    repo.install_tool()
+    assert repo.run("generate").returncode == 0
+    from tests.test_workflow import form_fields
+    fields = form_fields(
+        (repo.path / ".github/workflows/git-cicd-manual.yml").read_text())
+    rows = ["Update Vendored / repo:update-vendored",
+            "Ship It / repo:release"]
+    assert fields["job"]["options"] == rows
+    # the shared input is used by every manual job: no names appended
+    assert fields["vendor"]["description"] == ""
+    config = git_cicd.load_config(str(repo.path))
+    for row, key in zip(rows, ("update-vendored", "release")):
+        # option -> job, and job -> option
+        assert git_cicd.manual_job_key(config, "repo", row) == key
+        assert git_cicd.job_row(config, "repo", key) == row
+        for value in (row, key):
+            data, jobs = decide_manual(repo, value)
+            assert data["job"] == key and data["refused"] is None
+            assert jobs[key]["needed"] is True
+            assert [n for n, j in jobs.items() if j["needed"]] == [key]
+
+
+@pytest.mark.parametrize("value,reason", [
+    ("Lint / repo:lint", "unknown job 'Lint / repo:lint' (declared: "
+                         "update-vendored, release, lint)"),
+    ("Ship It / other:release", "unknown job 'Ship It / other:release' "
+                                "(declared: update-vendored, release, lint)"),
+    ("lint", 'job lint cannot be run by hand ("manual": false)'),
+])
+def test_manual_values_the_form_does_not_offer_are_refused(repo, value,
+                                                           reason):
+    setup_repo(repo, jobs=ROW_JOBS)
+    data, jobs = decide_manual(repo, value)
+    assert data["refused"] == reason
+    assert not any(j["needed"] for j in jobs.values())
+
+
+def test_manual_row_name_uses_the_configured_repository(repo):
+    setup_repo(repo, jobs=ROW_JOBS, repository="medici")
+    data, jobs = decide_manual(repo, "Ship It / medici:release")
+    assert data["job"] == "release" and jobs["release"]["needed"] is True
+    data, _ = decide_manual(repo, "Ship It / repo:release")
+    assert data["refused"].startswith("unknown job")
+
+
+def test_run_job_maps_a_row_name_to_its_job(repo):
+    setup_repo(repo, jobs=ROW_JOBS)
+    head = repo.git("rev-parse", "HEAD")
+    result = repo.run("run-job", "Ship It / repo:release", "--trigger=manual",
+                      "--target=main", "--source=main", f"--base={head}",
+                      f"--head={head}")
+    assert result.returncode == 0, result.stderr
+    assert "==> git-cicd: job release: passed" in result.stdout
+    result = repo.run("run-job", "Ship It / x:release", "--trigger=manual",
+                      "--target=main", "--source=main", f"--base={head}",
+                      f"--head={head}")
+    assert result.returncode == 2
+    assert "unknown job 'Ship It / x:release'" in result.stderr

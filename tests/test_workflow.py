@@ -305,7 +305,8 @@ def test_non_cron_differences_generate_identical_files(tool_repo):
     assert files_b["git-cicd-merge.yml"] == files_a["git-cicd-merge.yml"]
     # the Manual form lists the manual jobs: both configs have two
     assert files_b["git-cicd-manual.yml"] == files_a[
-        "git-cicd-manual.yml"].replace('- "test"', '- "other"')
+        "git-cicd-manual.yml"].replace('- "Test / repo:test"',
+                                       '- "Something Else / repo:other"')
 
 
 def test_cron_jobs_do_not_change_the_open_file(tool_repo):
@@ -423,6 +424,7 @@ def test_this_repository_is_migrated():
     assert not (ROOT / LEGACY).exists()
     config = git_cicd.load_config(str(ROOT))
     rendered = git_cicd.render_workflows(config, "git-cicd")
+    assert config["repository"] == "git-cicd"
     assert list(rendered) == [WORKFLOW, MERGE, CRON, MANUAL]
     for path, text in rendered.items():
         assert (ROOT / path).read_text() == text, path
@@ -686,7 +688,8 @@ def test_manual_file_is_written_with_the_dispatch_and_job_input(tool_repo):
         '  workflow_dispatch:\n    inputs:\n      job:\n'
         '        description: "The config job to run"\n'
         '        required: true\n        type: choice\n        options:\n'
-        '          - "test"\n          - "release"\n')
+        '          - "Test / repo:test"\n'
+        '          - "Release / repo:release"\n')
     assert "push" not in on and "schedule" not in on
     assert "JOB: ${{ inputs.job }}" in text
     assert (f'python3 {TOOL} decide --trigger=manual --job="$JOB"') in text
@@ -828,10 +831,11 @@ def test_hostile_declarations_cannot_change_the_files(tool_repo):
     files = generated_files(tool_repo)
     fields = form_fields(files["git-cicd-manual.yml"])
     assert list(fields) == ["job", "first", "second", "third", "fourth"]
-    assert fields["job"]["options"] == ["zz-hostile_job", "true",
-                                        "nightly-hostile"]
+    assert fields["job"]["options"] == [
+        "Zz Hostile Job / repo:zz-hostile_job", "True / repo:true",
+        "Nightly Hostile / repo:nightly-hostile"]
     assert fields["first"]["description"] == \
-        f"{HOSTILE[0]} (job zz-hostile_job)"
+        f"{HOSTILE[0]} (Zz Hostile Job / repo:zz-hostile_job)"
     assert fields["first"]["default"] == HOSTILE[1]
     assert fields["second"]["options"] == HOSTILE + HOSTILE_LINES
     assert fields["second"]["default"] == HOSTILE_LINES[0]
@@ -842,7 +846,8 @@ def test_hostile_declarations_cannot_change_the_files(tool_repo):
     for value in HOSTILE_LINES:
         assert value not in manual
     # the rest of the file is the template's
-    form = git_cicd.form_block(git_cicd.load_config(str(tool_repo.path)))
+    form = git_cicd.form_block(git_cicd.load_config(str(tool_repo.path)),
+                               "repo")
     assert manual.replace(form, "__FORM__\n", 1) == \
         bare((TEMPLATES / "manual.yml").read_text())
     # no run: block of any generated file holds a value from the config
@@ -873,7 +878,7 @@ def test_declared_inputs_change_only_the_manual_form(tool_repo):
         if name != "git-cicd-manual.yml":
             assert files_b[name] == files_a[name], name
     field = ('      bump_type:\n'
-             '        description: "(job release)"\n'
+             '        description: "(Release / repo:release)"\n'
              '        required: false\n        default: "patch"\n'
              '        type: choice\n        options:\n'
              '          - "patch"\n          - "minor"\n')
@@ -911,10 +916,10 @@ FORM = (
     '        required: true\n'
     '        type: choice\n'
     '        options:\n'
-    '          - "release"\n'
-    '          - "update"\n'
+    '          - "Release / repo:release"\n'
+    '          - "Update / repo:update"\n'
     '      bump_type:\n'
-    '        description: "Version bump type (job release)"\n'
+    '        description: "Version bump type (Release / repo:release)"\n'
     '        required: false\n'
     '        default: "patch"\n'
     '        type: choice\n'
@@ -931,16 +936,16 @@ FORM = (
     '          - "true"\n'
     '          - "false"\n'
     '      note:\n'
-    '        description: "A note (job release)"\n'
+    '        description: "A note (Release / repo:release)"\n'
     '        required: false\n'
     '        type: string\n'
     '      vendor:\n'
-    '        description: "(job update)"\n'
+    '        description: "(Update / repo:update)"\n'
     '        required: false\n'
     '        default: "all"\n'
     '        type: string\n'
     '      token:\n'
-    '        description: "(job update)"\n'
+    '        description: "(Update / repo:update)"\n'
     '        required: false\n'
     '        type: string\n')
 
@@ -950,7 +955,7 @@ def test_manual_form_lists_manual_jobs_and_their_inputs(tool_repo):
     text = (tool_repo.path / MANUAL).read_text()
     on = text.split("\non:\n", 1)[1].split("\npermissions:")[0]
     assert on.startswith("  workflow_dispatch:\n    inputs:\n" + FORM)
-    assert "only" not in on and '- "test"' not in on
+    assert "only" not in on and "repo:test" not in on
     assert tool_repo.run("verify").returncode == 0
 
 
@@ -962,12 +967,13 @@ def test_manual_form_names_every_job_of_a_shared_input(tool_repo):
                        "b": job({"shared": {"description": "S"}, "b": {}}),
                        "c": job({})}}
     tool_repo.config(config)
-    form = git_cicd.form_block(git_cicd.load_config(str(tool_repo.path)))
-    assert '      shared:\n        description: "S (jobs a, b)"\n' in form
-    assert '      a:\n        description: "(job a)"\n' in form
+    form = git_cicd.form_block(git_cicd.load_config(str(tool_repo.path)), "r")
+    assert ('      shared:\n        description: "S (A / r:a, B / r:b)"\n'
+            in form)
+    assert '      a:\n        description: "(A / r:a)"\n' in form
     del config["jobs"]["c"]
     tool_repo.config(config)
-    form = git_cicd.form_block(git_cicd.load_config(str(tool_repo.path)))
+    form = git_cicd.form_block(git_cicd.load_config(str(tool_repo.path)), "r")
     assert '      shared:\n        description: "S"\n' in form
 
 
@@ -1234,6 +1240,99 @@ def test_run_job_is_never_skipped_and_skips_the_placeholder(tool_repo, path,
 def test_form_block_is_empty_without_manual_jobs():
     config = {"jobs": {"t": {"manual": False, "inputs": {}, "on": ["open"],
                              "cron": None}}}
-    assert git_cicd.form_block(config) == ""
+    assert git_cicd.form_block(config, "r") == ""
     assert git_cicd.rendered_triggers(config) == ["open", "merge"]
     assert git_cicd.stale_triggers(config) == ["cron", "manual"]
+
+
+# ── the repository's name in the Manual form ────────────────────────────────
+
+def test_form_uses_the_configured_repository_over_origin(tool_repo):
+    tool_repo.git("remote", "add", "origin",
+                  "https://example.invalid/someone/from-origin.git")
+    generate(tool_repo, base_config())
+    text = (tool_repo.path / MANUAL).read_text()
+    assert '          - "Test / from-origin:test"\n' in text
+    generate(tool_repo, base_config(repository="chosen"))
+    text = (tool_repo.path / MANUAL).read_text()
+    assert '          - "Test / chosen:test"\n' in text
+    assert "from-origin" not in text
+
+
+def test_no_environment_variable_names_the_repository(tool_repo):
+    """generate and verify resolve the name the same way with or without
+    the platform's variables: a file generated outside CI verifies inside."""
+    generate(tool_repo, base_config())
+    before = (tool_repo.path / MANUAL).read_text()
+    env = {"GITHUB_REPOSITORY": "someone/else", "GITHUB_ACTIONS": "true",
+           "CI": "true"}
+    result = tool_repo.run("verify", env=env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert tool_repo.run("generate", env=env).returncode == 0
+    assert (tool_repo.path / MANUAL).read_text() == before
+    assert "/ else:" not in before and "/ repo:test" in before
+
+
+def test_verify_says_when_only_the_repository_name_differs(tool_repo):
+    generate(tool_repo, base_config())
+    tool_repo.git("remote", "add", "origin", "git@example.invalid:o/moved.git")
+    result = tool_repo.run("verify")
+    assert result.returncode == 1
+    assert (f"{MANUAL} differs only in the repository's name: it was "
+            "generated for 'repo', and this checkout's name is 'moved' (the "
+            "origin remote's URL). The name never comes from the "
+            "environment; when the file is right, set \"repository\": "
+            "\"repo\" in the config, otherwise run "
+            f"{TOOL} generate and commit {MANUAL}") in result.stdout
+    # following the advice makes verify pass
+    tool_repo.config(base_config(repository="repo"))
+    assert tool_repo.run("verify").returncode == 0
+
+
+def test_verify_gives_a_diff_when_more_than_the_name_differs(tool_repo):
+    generate(tool_repo, base_config())
+    path = tool_repo.path / MANUAL
+    path.write_text(path.read_text().replace("name: Manual", "name: Other"))
+    tool_repo.git("remote", "add", "origin", "git@example.invalid:o/moved.git")
+    result = tool_repo.run("verify")
+    assert result.returncode == 1
+    assert "differs only in the repository's name" not in result.stdout
+    assert "-name: Other" in result.stdout
+
+
+def test_committed_repo_reads_the_first_option():
+    config = {"jobs": {
+        "a": {"title": "A", "manual": True},
+        "b": {"title": "B", "manual": True}}}
+    text = ('          - "not \\q json"\n'
+            '          - "Other / x:a"\n'
+            '          - 7\n'
+            '          - "B / old:b"\n'
+            '          - "A / old:a"\n')
+    assert git_cicd._committed_repo(config, text, "new") == "old"
+    assert git_cicd._committed_repo(config, text, "old") is None
+    assert git_cicd._committed_repo(config, '          - "A / :a"\n',
+                                    "new") is None
+    assert git_cicd._committed_repo(config, "", "new") is None
+    assert git_cicd._committed_repo(
+        {"jobs": {"a": {"title": "A", "manual": False}}}, text, "n") is None
+
+
+@pytest.mark.parametrize("name", ["${{ github.token }}", "a\nb"])
+def test_a_repository_name_that_cannot_be_written_is_refused(name):
+    config = {"jobs": {"t": {"title": "T", "manual": True, "inputs": {},
+                             "on": [], "cron": None, "permissions": {}}},
+              "repository": None}
+    with pytest.raises(git_cicd.UsageError,
+                       match="cannot be written into a workflow"):
+        git_cicd.render_workflows(config, "git-cicd", repo=name)
+
+
+def test_render_without_a_repo_uses_the_config_or_a_placeholder():
+    config = {"jobs": {"t": {"title": "T", "manual": True, "inputs": {},
+                             "on": [], "cron": None, "permissions": {}}}}
+    text = git_cicd.render_workflows(config, "git-cicd")[MANUAL]
+    assert '- "T / repository:t"' in text
+    config["repository"] = "named"
+    text = git_cicd.render_workflows(config, "git-cicd")[MANUAL]
+    assert '- "T / named:t"' in text

@@ -107,8 +107,16 @@ TOKEN_NAMES = ("CICD_WRITE_TOKEN", "CICD_READ_TOKEN", "VENDOR_PAT", "GH_TOKEN",
 
 @pytest.fixture(autouse=True)
 def no_tokens(monkeypatch):
+    """Before every test, remove the tokens and every GITHUB_* and CICD_*
+    variable the caller's environment holds (a test sets its own with
+    monkeypatch), so no test passes locally and fails in CI, where Actions
+    sets GITHUB_REPOSITORY, GITHUB_ACTIONS and the rest, or the other way
+    round."""
     for key in TOKEN_NAMES:
         monkeypatch.delenv(key, raising=False)
+    for key in list(os.environ):
+        if key.startswith(("GITHUB_", "CICD_")):
+            monkeypatch.delenv(key)
 
 
 @pytest.fixture

@@ -70,16 +70,21 @@ def test_the_manual_form_lists_release_and_update_vendored():
     fields = form_fields(text)
     assert fields == {
         "job": {"description": "The config job to run", "required": True,
-                "type": "choice", "options": ["release", "update-vendored"]},
+                "type": "choice",
+                "options": ["Release / git-cicd:release",
+                            "Install Vendored / git-cicd:update-vendored"]},
         "vendor": {"description": "Vendor to update (or all) "
-                                  "(job update-vendored)",
+                                  "(Install Vendored / "
+                                  "git-cicd:update-vendored)",
                    "required": False, "default": "all", "type": "string"},
         "version": {"description": "Version to install (default: latest) "
-                                   "(job update-vendored)",
+                                   "(Install Vendored / "
+                                   "git-cicd:update-vendored)",
                     "required": False, "default": "latest",
                     "type": "string"},
-        "private": {"description": "Vendor repo is private (use CICD_WRITE_TOKEN) "
-                                   "(job update-vendored)",
+        "private": {"description": "Vendor repo is private (only needed when "
+                                   "adding a new vendor) (Install Vendored / "
+                                   "git-cicd:update-vendored)",
                     "required": False, "default": "false", "type": "choice",
                     "options": ["true", "false"]},
     }

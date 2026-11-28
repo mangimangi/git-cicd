@@ -150,7 +150,10 @@ def test_explicit_base_and_head(project):
 
 
 def test_target_from_origin_head(project, tmp_path):
-    remote = tmp_path / "remote.git"
+    # the remote's last path component names the repository (repo_name):
+    # the one the workflows were generated for
+    (tmp_path / "remote").mkdir()
+    remote = tmp_path / "remote" / "repo.git"
     project.git("init", "-q", "--bare", str(remote))
     project.git("remote", "add", "origin", str(remote))
     project.git("push", "-q", "origin", "main")
