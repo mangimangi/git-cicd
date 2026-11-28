@@ -24,9 +24,11 @@
 #     vendor check lets a pull request regenerate every per-trigger workflow,
 #     the ones still to come included)
 #   - Always (re)generates the per-trigger workflows
-#     (.github/workflows/git-cicd-<trigger>.yml) from the config, so an upgrade
-#     reaches them in the install pull request, and removes the single
-#     .github/workflows/git-cicd.yml of earlier versions
+#     (.github/workflows/git-cicd-<trigger>.yml) from the config, and removes
+#     the single .github/workflows/git-cicd.yml of earlier versions. The
+#     generated workflows are the repository's to commit (allowed, never
+#     protected), so they are not in the manifest: it lists only what
+#     git-cicd owns, the tool, its templates and the schema
 #
 set -euo pipefail
 
@@ -84,14 +86,9 @@ fetch_file "templates/config.schema" ".vendored/manifests/git-cicd.schema"
 INSTALLED_FILES+=(".vendored/manifests/git-cicd.schema")
 
 # Workflows - regenerated on every install from the config (generate also
-# removes the single workflow file of earlier versions)
+# removes the single workflow file of earlier versions). They are the
+# repository's to commit, not git-cicd's, so they stay out of the manifest.
 python3 "$INSTALL_DIR/git-cicd" generate
-# (only the files generate wrote: there is no cron workflow without a cron job)
-for trigger in "${TRIGGERS[@]}"; do
-    if [ -f ".github/workflows/git-cicd-$trigger.yml" ]; then
-        INSTALLED_FILES+=(".github/workflows/git-cicd-$trigger.yml")
-    fi
-done
 
 # Write manifest when requested by the framework
 if [ -n "${VENDOR_MANIFEST:-}" ]; then
