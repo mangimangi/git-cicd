@@ -270,8 +270,26 @@ Every decision carries a reason, and the report shows it.
 | `CICD_CHANGED_FILES` | absolute path of a file listing the changed files, one per line (empty when the diff cannot be computed, and always on `cron` and manual) |
 | `CICD_INPUT_<NAME>` | one per [declared input](#declared-inputs): the manual run's value, else the default, else empty; no other `CICD_INPUT_` variable is set |
 
-- `GITHUB_TOKEN` and `VENDOR_PAT`, passed through unchanged. git-cicd itself
-  never reads or logs them.
+- Secrets, by trigger. git-cicd itself never reads or logs them.
+
+  | Trigger | `GITHUB_TOKEN` | `VENDOR_PAT` |
+  |---|---|---|
+  | `open` | passed through unchanged (read-only: `contents: read`) | **not passed**, and removed from the environment when set |
+  | `merge`, `cron`, manual | passed through unchanged (the workflow's write permissions) | passed through unchanged |
+
+  `VENDOR_PAT` is not only a read token for private vendor repositories: it
+  is also the identity automation uses to propose changes, and may push
+  branches, open pull requests and write workflow files. `open` runs a pull
+  request's own code with a token that is read-only on purpose, and no `open`
+  job writes anything, so a pull request's code never gets the write-capable
+  secret. The `Open` workflow does not pass it, and `run-job --trigger=open`
+  (which is what `check` runs) drops a `VENDOR_PAT` inherited from the
+  caller, so a local check and CI give a script the same environment.
+
+  **An `open` job that read a private vendor with `VENDOR_PAT`** (for example
+  a setup that cloned a private repository) no longer can: move that step to
+  a job on `merge`, `cron` or a manual run, which still get `VENDOR_PAT`, or
+  make what the `open` job needs readable without it.
 - Exit 0 passes. Anything else fails the job and stops its remaining steps.
 - Setup runs first, on the same machine. What it installs on disk is its only
   channel to the steps; nothing else is passed between setup and steps or
@@ -479,6 +497,10 @@ The `open` workflow (`Open`):
   permission on `open`, and only to set the `Verdict / git-cicd:verdict`
   status (pending at the start, the verdict at the end); the job that runs the
   config's scripts has no permission of its own (only the read-only top level).
+- Secrets: that job gets `GITHUB_TOKEN` (read-only) and **not**
+  `VENDOR_PAT`, which may write (see
+  [What a script is given](#what-a-script-is-given)); `Merge`, `Cron` and
+  `Manual` pass both.
 - Overlap: a newer push to the same pull request supersedes the older run.
   It cancels the older run's jobs that run the config's scripts (a
   `concurrency` group per pull request and job on the `run` job only; there is
@@ -786,7 +808,9 @@ left the target.
   Add `--force` to run it regardless of its `paths` (`branches` still binds).
   An unknown job name exits 2.
 - Scripts get the same environment as in CI: every `CICD_` variable, and
-  `GITHUB_TOKEN` and `VENDOR_PAT` passed through unchanged when they are set.
+  `GITHUB_TOKEN` passed through unchanged when it is set. `check` runs on
+  `open`, so a `VENDOR_PAT` in the caller's environment is removed, as the
+  `Open` workflow does not pass it.
 
 Exit codes:
 
@@ -809,7 +833,8 @@ Exit codes:
 
 ## Not built yet
 
-- Secrets beyond `GITHUB_TOKEN` and `VENDOR_PAT`.
+- Secrets beyond `GITHUB_TOKEN` and `VENDOR_PAT` (which `open` does not
+  get).
 - An image or runtime per job.
 
 ## Developing git-cicd

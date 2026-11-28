@@ -161,7 +161,9 @@ def test_environment_reaches_step(repo, log):
         "CICD_TARGET_BRANCH": "main", "CICD_SOURCE_BRANCH": "feature",
         "CICD_BASE": base, "CICD_HEAD": head,
         "CICD_CHANGED_FILES": values["CICD_CHANGED_FILES"],
-        "GITHUB_TOKEN": "ghs_tok", "VENDOR_PAT": "pat value $x",
+        # open runs a pull request's code: VENDOR_PAT (which may write) is
+        # dropped even when the caller has it
+        "GITHUB_TOKEN": "ghs_tok", "VENDOR_PAT": "",
     }
     assert os.path.isabs(values["CICD_CHANGED_FILES"])
     assert (log.parent / "log.txt.changed").read_text() == "src/app.py\n"
@@ -169,6 +171,18 @@ def test_environment_reaches_step(repo, log):
     # the changed-files file is cleaned up after the job
     assert not os.path.exists(values["CICD_CHANGED_FILES"])
     assert "ghs_tok" not in result.stdout + result.stderr
+    assert "pat value" not in result.stdout + result.stderr
+
+
+def test_open_step_has_no_vendor_pat_variable(repo, log):
+    """VENDOR_PAT is removed on open, not set empty."""
+    repo.script("ci/env.sh", 'echo "${VENDOR_PAT-unset}" >> "$LOG"\n')
+    base, head = setup_repo(repo, {"envjob": {
+        "on": ["open"], "branches": ["**"], "steps": ["ci/env.sh"]}}, log)
+    result = run_job(repo, "envjob", base, head,
+                     env=env_for(log, VENDOR_PAT="pat_token"))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert logged(log) == ["unset"]
 
 
 def test_merge_environment_reaches_step(repo, log):
@@ -183,10 +197,12 @@ def test_merge_environment_reaches_step(repo, log):
     landed = repo.commit("landed")
     result = repo.run("run-job", "envjob", "--trigger=merge", "--target=main",
                       "--source=main", f"--base={before}", f"--head={landed}",
-                      env=env_for(log))
+                      env=env_for(log, GITHUB_TOKEN="ghs_tok",
+                                  VENDOR_PAT="pat_token"))
     assert result.returncode == 0, result.stdout + result.stderr
-    values = dict(line.split("=", 1) for line in logged(log)[:7])
+    values = dict(line.split("=", 1) for line in logged(log)[:9])
     assert values == {
+        "GITHUB_TOKEN": "ghs_tok", "VENDOR_PAT": "pat_token",
         "CICD_TRIGGER": "merge", "CICD_JOB": "envjob",
         "CICD_TARGET_BRANCH": "main", "CICD_SOURCE_BRANCH": "main",
         "CICD_BASE": before, "CICD_HEAD": landed,
