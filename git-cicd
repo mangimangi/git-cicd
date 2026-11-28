@@ -1192,6 +1192,8 @@ def step_owner(root, path, repo):
     if rel.startswith(VENDOR_PKG_PREFIX):
         vendor = rel[len(VENDOR_PKG_PREFIX):].split("/", 1)[0]
         if vendor:
+            if root is None:
+                return vendor, None
             return vendor, _read_version(
                 root, VENDOR_VERSION_PATH.format(vendor=vendor))
     if root is None:

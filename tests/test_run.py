@@ -475,3 +475,16 @@ def test_run_job_function(repo, log):
              "base": "HEAD~1", "head": "HEAD"}
     result = git_cicd.run_job(config, str(repo.path), "t", facts)
     assert result["state"] == "passed"
+
+
+def test_a_step_that_removes_the_changed_files_list_still_passes(repo, log,
+                                                                  tmp_path):
+    repo.script("ci/a.sh", 'rm "$CICD_CHANGED_FILES"\n' + LOG_STEP)
+    base, head = setup_repo(repo, {"t": {
+        "on": ["open"], "branches": ["**"], "steps": ["ci/a.sh"]}}, log)
+    out = tmp_path / "result.json"
+    result = run_job(repo, "t", base, head, "--result", str(out),
+                     env=env_for(log))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert logged(log) == ["a.sh"]
+    assert json.loads(out.read_text())["state"] == "passed"

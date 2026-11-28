@@ -11,13 +11,26 @@ interface it implements is described in `README.md`.
 The checks run with the tool itself, the same way CI runs them:
 
 ```bash
-./git-cicd check --setup   # the first time: ci/setup.sh installs pytest for the Python floor (3.11)
+./git-cicd check --setup   # the first time: ci/setup.sh installs pytest and coverage for the Python floor (3.11), and bats
 ./git-cicd check           # afterwards
 ```
 
 `check` compares the current branch against its target (upstream, else
 `origin/HEAD`, else `main`), runs the needed jobs one after another and exits
 non-zero on a failed verdict. Run a single job with `--job test`.
+The `test` job measures line coverage of `git-cicd`, including the runs tests
+start as subprocesses (`pyproject.toml` `[tool.coverage]`), and prints one
+`git-cicd` row with the missing lines. It fails below 99% line coverage of
+`git-cicd` (`fail_under` in `pyproject.toml`): a change that lowers coverage
+below 99% fails the verdict and adds its tests in the same pull request. A
+line is excluded (`# pragma: no cover`) only when no test can reach it, with a
+comment on that line saying why. In CI the step fails when pytest-cov is
+missing; locally without `--setup` it runs and says coverage was not checked.
+After pytest the job runs the bats tests of `install.sh` and the `ci/`
+scripts (`tests/bats/`); either failing fails the step. Setup installs
+bats-core (pinned, into `${XDG_CACHE_HOME:-~/.cache}/git-cicd/bats`) when
+`bats` is not on PATH; without it the step fails in CI and, locally, says how
+to install it.
 
 After changing `.vendored/configs/git-cicd.json` or a template under
 `templates/workflows/`, run `./git-cicd generate` and commit the generated
@@ -68,7 +81,7 @@ undo anything it reports.
 - `templates/workflows/<trigger>.yml` — the workflow templates, one per generated trigger (`open.yml`); `templates/config.json`, `templates/config.schema` — installed config and schema
 - `install.sh` — the git-vendored installer
 - `ci/` — this repository's own job scripts (`setup.sh`, `test.sh`, `vendor-check.sh`, `release.sh`, `update-vendored.sh`); `.vendored/configs/git-cicd.json` — its own config
-- `tests/` — pytest suite
+- `tests/` — pytest suite; `tests/bats/` — bats tests of `install.sh` and the `ci/` scripts (shared `helper.bash`)
 
 ## Planning and issues
 

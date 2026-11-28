@@ -1,6 +1,6 @@
 __pycache__/
 .pytest_cache/
-.coverage
+.coverage*
 # Written by `medici configure` in every session container; not this repository's content
 .claude/skills/
 /commands/

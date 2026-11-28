@@ -667,7 +667,7 @@ config declares four jobs, one per trigger:
 
 | Job | Row | Trigger | Script | What |
 |---|---|---|---|---|
-| `test` | `Open / Unit Tests / git-cicd:test` | `open`, every branch, `paths` the code | `ci/setup.sh`, `ci/test.sh` | setup installs pytest for the Python floor (`>=3.11` in `pyproject.toml`); the step runs the suite |
+| `test` | `Open / Unit Tests / git-cicd:test` | `open`, every branch, `paths` the code | `ci/setup.sh`, `ci/test.sh` | setup installs pytest, pytest-cov and coverage (7.10 or later) for the Python floor (`>=3.11` in `pyproject.toml`), and bats-core when `bats` is not on PATH; the step runs the pytest suite, prints the line coverage of `git-cicd` with its missing lines and fails below 99%, then runs the bats tests of `install.sh` and the `ci/` scripts (`tests/bats/`) |
 | `vendor-check` | `Open / Check Vendor Files / git-cicd:vendor-check` | `open`, every branch | `ci/vendor-check.sh` | `python3 .vendored/check --base "$CICD_BASE"`; it sets `GITHUB_HEAD_REF` from `CICD_SOURCE_BRANCH` when unset, so a local `check` lets `chore/install-*` branches through like Actions does |
 | `release` | `Merge / Release / git-cicd:release` | `merge` on `main`; by hand with the inputs `bump_type` (patch, minor, major; default patch), `subdirectory`, `changelog_description` | `ci/release.sh` | git-semver's `release`: `publish` when the landed commit's subject starts with `chore: bump version`, nothing for `chore: install`, otherwise `bump` (and `bump` on a manual run); it gives `release` `GITHUB_EVENT_NAME`, `GITHUB_EVENT_BEFORE`, `INPUT_BUMP_TYPE`, `INPUT_SUBDIRECTORY`, `INPUT_CHANGELOG_DESCRIPTION` and `GH_TOKEN` |
 | `update-vendored` | `Cron / Install Vendored / git-cicd:update-vendored` | `cron` `0 9 * * 1` on `main`; by hand with the inputs `vendor` (default all), `version` (default latest), `private` (true or false; default false) | `ci/update-vendored.sh` | `python3 .vendored/install <vendor> --version <version> --pr --deps=install` (plus `--private`), with `GH_TOKEN` set to `VENDOR_PAT` when set, else `GITHUB_TOKEN`; only CI runs it |
@@ -683,6 +683,28 @@ workflow* on `main`, job `release` (inputs for example
 The vendor-installed workflows these jobs replace (`version-bump.yml`,
 `check-vendor.yml`, `install-vendored.yml`) are removed from this repository;
 git-semver and git-vendored still install them into other repositories.
+
+The `test` step measures line coverage of `git-cicd` in the pytest process
+and in every `python3 git-cicd …` a test starts as a subprocess, including
+the copies tests install into temporary repositories; `pyproject.toml`
+(`[tool.coverage]`) maps them onto one `git-cicd` row. Each run writes its
+data into a fresh temporary directory, so two runs give the same figure.
+The step fails below 99% line coverage of `git-cicd` (`fail_under` in
+`pyproject.toml`, so a local `coverage report` reads the same rule): a change
+that lowers coverage below 99% fails the verdict and adds its tests in the
+same pull request. A line is excluded (`# pragma: no cover`) only when no test
+can reach it, with a comment on that line saying why. Without pytest-cov the
+step fails in CI; locally (no `--setup`) it runs the suite and says coverage
+was not checked.
+
+The bats tests (`tests/bats/*.bats`, with `tests/bats/helper.bash`) run each
+`ci/` script and `install.sh` in a temporary git repository with fake
+vendored tools that log their arguments and environment, and use no network.
+`ci/setup.sh` installs bats-core 1.11.1 (its npm tarball, checked against a
+pinned sha256) into `${XDG_CACHE_HOME:-~/.cache}/git-cicd/bats` when `bats`
+is not on PATH. The step runs pytest and then bats, and fails when either
+fails; without bats it fails in CI and, locally, says to run
+`./git-cicd check --setup`.
 
 ```bash
 ./git-cicd check --setup     # the first time
