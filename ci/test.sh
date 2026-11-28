@@ -1,5 +1,7 @@
 #!/bin/bash
-# ci/test.sh - the step of git-cicd's own `test` job: run pytest with coverage.
+# ci/test.sh - the step of git-cicd's own `test` job: run pytest with
+# coverage, then the bats tests of install.sh and the ci/ scripts
+# (tests/bats/). Both run; either failing fails the step.
 #
 # Uses the virtualenv ci/setup.sh creates for the Python floor. When setup was
 # skipped (a local `git-cicd check` without --setup), falls back to a python3
@@ -17,7 +19,8 @@
 set -euo pipefail
 
 FLOOR="$(sed -n 's/^requires-python *= *">= *\([0-9][0-9.]*\)".*/\1/p' pyproject.toml | head -n1)"
-VENV="${XDG_CACHE_HOME:-$HOME/.cache}/git-cicd/venv-$FLOOR"
+CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/git-cicd"
+VENV="$CACHE/venv-$FLOOR"
 
 if [ -x "$VENV/bin/python" ]; then
     PYTHON="$VENV/bin/python"
@@ -41,4 +44,20 @@ elif [ -n "${CI:-}" ]; then
 else
     echo "ci/test.sh: pytest-cov is not installed; coverage was not measured or checked (run: ./git-cicd check --setup)"
 fi
-"$PYTHON" -m pytest tests/ -v "${COV[@]}"
+STATUS=0
+"$PYTHON" -m pytest tests/ -v "${COV[@]}" || STATUS=$?
+
+# bats: on PATH, else the copy ci/setup.sh installs into the cache.
+BATS="$(command -v bats 2>/dev/null || true)"
+if [ -z "$BATS" ] && [ -x "$CACHE/bats/bin/bats" ]; then
+    BATS="$CACHE/bats/bin/bats"
+fi
+if [ -n "$BATS" ]; then
+    "$BATS" tests/bats/ || STATUS=$?
+elif [ -n "${CI:-}" ]; then
+    echo "ci/test.sh: bats is not installed, so the shell tests cannot run; run: ./git-cicd check --setup" >&2
+    STATUS=1
+else
+    echo "ci/test.sh: bats is not installed; the shell tests (tests/bats/) did not run (install it with: ./git-cicd check --setup)"
+fi
+exit "$STATUS"

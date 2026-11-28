@@ -11,7 +11,7 @@ interface it implements is described in `README.md`.
 The checks run with the tool itself, the same way CI runs them:
 
 ```bash
-./git-cicd check --setup   # the first time: ci/setup.sh installs pytest and coverage for the Python floor (3.11)
+./git-cicd check --setup   # the first time: ci/setup.sh installs pytest and coverage for the Python floor (3.11), and bats
 ./git-cicd check           # afterwards
 ```
 
@@ -26,6 +26,11 @@ below 99% fails the verdict and adds its tests in the same pull request. A
 line is excluded (`# pragma: no cover`) only when no test can reach it, with a
 comment on that line saying why. In CI the step fails when pytest-cov is
 missing; locally without `--setup` it runs and says coverage was not checked.
+After pytest the job runs the bats tests of `install.sh` and the `ci/`
+scripts (`tests/bats/`); either failing fails the step. Setup installs
+bats-core (pinned, into `${XDG_CACHE_HOME:-~/.cache}/git-cicd/bats`) when
+`bats` is not on PATH; without it the step fails in CI and, locally, says how
+to install it.
 
 After changing `.vendored/configs/git-cicd.json` or a template under
 `templates/workflows/`, run `./git-cicd generate` and commit the generated
@@ -76,7 +81,7 @@ undo anything it reports.
 - `templates/workflows/<trigger>.yml` — the workflow templates, one per generated trigger (`open.yml`); `templates/config.json`, `templates/config.schema` — installed config and schema
 - `install.sh` — the git-vendored installer
 - `ci/` — this repository's own job scripts (`setup.sh`, `test.sh`, `vendor-check.sh`, `release.sh`, `update-vendored.sh`); `.vendored/configs/git-cicd.json` — its own config
-- `tests/` — pytest suite
+- `tests/` — pytest suite; `tests/bats/` — bats tests of `install.sh` and the `ci/` scripts (shared `helper.bash`)
 
 ## Planning and issues
 
