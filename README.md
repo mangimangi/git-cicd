@@ -536,7 +536,9 @@ to install or upgrade it.
 2. The workflow opens the install pull request from the branch
    `chore/install-git-cicd`. That pull request carries the tool, the schema,
    the config when it is missing, and the regenerated per-trigger workflows
-   (`.github/workflows/git-cicd-open.yml`; on the first upgrade from the single
+   (`.github/workflows/git-cicd-open.yml`, `git-cicd-merge.yml`,
+   `git-cicd-manual.yml`, and `git-cicd-cron.yml` when a job has `cron` in
+   `on`; on the first upgrade from the single
    file, also the deletion of `.github/workflows/git-cicd.yml`). Review and
    merge it like any other.
 3. Upgrades are the same run (the workflow's weekly schedule also updates every
@@ -659,10 +661,29 @@ Exit codes:
 
 ## Developing git-cicd
 
-git-cicd checks itself with itself: its own config declares one job, `test`
-(`ci/setup.sh` installs pytest for the Python floor, `>=3.11` in `pyproject.toml`;
-`ci/test.sh` runs it), and its workflow runs the root `./git-cicd`, so CI
-tests the code in the pull request.
+git-cicd checks, releases and updates itself with itself. Its workflows run
+the root `./git-cicd`, so CI tests the code in the pull request. Its own
+config declares four jobs, one per trigger:
+
+| Job | Row | Trigger | Script | What |
+|---|---|---|---|---|
+| `test` | `Open / Unit Tests / git-cicd:test` | `open`, every branch, `paths` the code | `ci/setup.sh`, `ci/test.sh` | setup installs pytest for the Python floor (`>=3.11` in `pyproject.toml`); the step runs the suite |
+| `vendor-check` | `Open / Check Vendor Files / git-cicd:vendor-check` | `open`, every branch | `ci/vendor-check.sh` | `python3 .vendored/check --base "$CICD_BASE"`; it sets `GITHUB_HEAD_REF` from `CICD_SOURCE_BRANCH` when unset, so a local `check` lets `chore/install-*` branches through like Actions does |
+| `release` | `Merge / Release / git-cicd:release` | `merge` on `main`; by hand with the inputs `bump_type` (patch, minor, major; default patch), `subdirectory`, `changelog_description` | `ci/release.sh` | git-semver's `release`: `publish` when the landed commit's subject starts with `chore: bump version`, nothing for `chore: install`, otherwise `bump` (and `bump` on a manual run); it gives `release` `GITHUB_EVENT_NAME`, `GITHUB_EVENT_BEFORE`, `INPUT_BUMP_TYPE`, `INPUT_SUBDIRECTORY`, `INPUT_CHANGELOG_DESCRIPTION` and `GH_TOKEN` |
+| `update-vendored` | `Cron / Install Vendored / git-cicd:update-vendored` | `cron` `0 9 * * 1` on `main`; by hand with the inputs `vendor` (default all), `version` (default latest), `private` (true or false; default false) | `ci/update-vendored.sh` | `python3 .vendored/install <vendor> --version <version> --pr --deps=install` (plus `--private`), with `GH_TOKEN` set to `VENDOR_PAT` when set, else `GITHUB_TOKEN`; only CI runs it |
+
+`release` has no `paths`, so a push that changes only `needs_nothing` files
+does not release, while a `chore: bump version` commit still publishes
+(`VERSION` is in no job's `paths` and not in `needs_nothing`). Start a
+release or an update by hand from the Actions tab: **Manual**, *Run
+workflow* on `main`, job `release` (inputs for example
+`{"bump_type": "minor"}`) or `update-vendored` (for example
+`{"vendor": "mangimangi/git-semver"}`).
+
+On the integration branch the vendor-installed workflows these jobs replace
+(`version-bump.yml`, `check-vendor.yml`, `install-vendored.yml`) still exist
+beside them until the planning session removes them; they are
+vendor-protected, so no session changes them.
 
 ```bash
 ./git-cicd check --setup     # the first time

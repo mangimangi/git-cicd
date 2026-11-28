@@ -363,7 +363,7 @@ def test_this_repository_is_migrated():
     assert not (ROOT / LEGACY).exists()
     config = git_cicd.load_config(str(ROOT))
     rendered = git_cicd.render_workflows(config, "git-cicd")
-    assert list(rendered) == [WORKFLOW, MERGE, MANUAL]
+    assert list(rendered) == [WORKFLOW, MERGE, CRON, MANUAL]
     for path, text in rendered.items():
         assert (ROOT / path).read_text() == text, path
 
