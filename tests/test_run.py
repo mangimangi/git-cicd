@@ -238,6 +238,99 @@ def test_manual_run_job_refusals(repo, log, job, branch, reason):
     assert logged(log) == []
 
 
+# ── declared inputs ─────────────────────────────────────────────────────────
+
+DUMP_INPUTS = """env | grep '^CICD_INPUT_\\|^CICD_MANUAL_INPUTS=' | sort > "$LOG"
+printf '%s' "$CICD_INPUT_TEXT" > "$LOG.text"
+"""
+
+INPUT_JOB = {"on": ["open", "merge"], "branches": ["**"],
+             "steps": ["ci/inputs.sh"],
+             "inputs": {"text": {"default": "the default"},
+                        "kind": {"choices": ["a", "b"], "default": "a"},
+                        "empty": {}}}
+
+
+def setup_inputs(repo, job=None):
+    repo.script("ci/inputs.sh", DUMP_INPUTS)
+    repo.config({"jobs": {"j": job or INPUT_JOB}})
+    return repo.commit("base")
+
+
+def run_inputs(repo, sha, log, trigger="manual", inputs=None, **more):
+    env = env_for(log, **more)
+    if inputs is not None:
+        env["CICD_MANUAL_INPUTS"] = inputs
+    return repo.run("run-job", "j", f"--trigger={trigger}", "--target=main",
+                    "--source=main", f"--base={sha}", f"--head={sha}", env=env)
+
+
+def test_manual_value_reaches_the_step_literally(repo, log):
+    sha = setup_inputs(repo)
+    value = "it's \"q\" $HOME `id` $(id)\nsecond line\\n"
+    result = run_inputs(repo, sha, log, inputs=json.dumps({"text": value,
+                                                           "kind": "b"}))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (log.parent / "log.txt.text").read_bytes() == value.encode()
+    lines = logged(log)
+    assert "CICD_INPUT_KIND=b" in lines
+    assert "CICD_INPUT_EMPTY=" in lines
+    assert not any(l.startswith("CICD_MANUAL_INPUTS=") for l in lines)
+
+
+@pytest.mark.parametrize("trigger", ["open", "merge"])
+def test_other_triggers_get_the_defaults(repo, log, trigger):
+    sha = setup_inputs(repo)
+    result = run_inputs(repo, sha, log, trigger=trigger,
+                        inputs=json.dumps({"kind": "b"}),
+                        CICD_INPUT_STRAY="inherited",
+                        CICD_INPUT_KIND="inherited")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (log.parent / "log.txt.text").read_text() == "the default"
+    lines = logged(log)
+    assert sorted(l for l in lines if not l.startswith("CICD_INPUT_TEXT")) \
+        == ["CICD_INPUT_EMPTY=", "CICD_INPUT_KIND=a"]
+
+
+def test_undeclared_inherited_inputs_are_dropped(repo, log):
+    sha = setup_inputs(repo)
+    result = run_inputs(repo, sha, log, inputs="",
+                        CICD_INPUT_STRAY="inherited")
+    assert result.returncode == 0, result.stdout + result.stderr
+    names = [l.split("=", 1)[0] for l in logged(log)]
+    assert "CICD_INPUT_STRAY" not in names
+    assert sorted(set(names)) == ["CICD_INPUT_EMPTY", "CICD_INPUT_KIND",
+                                  "CICD_INPUT_TEXT"]
+
+
+@pytest.mark.parametrize("inputs,reason", [
+    ("{nope", "the inputs are not valid JSON"),
+    ('["a"]', "the inputs must be a JSON object of string values"),
+    ('{"text": 1}', "the inputs must be a JSON object of string values"),
+    ('{"other": "x"}',
+     "job j declares no input 'other' (declared: text, kind, empty)"),
+    ('{"kind": "c"}', "job j: input kind: 'c' is not one of the choices (a, b)"),
+])
+def test_manual_input_failures_refuse_the_run(repo, log, inputs, reason):
+    sha = setup_inputs(repo)
+    result = run_inputs(repo, sha, log, inputs=inputs)
+    assert result.returncode == 2
+    assert f"manual run refused: {reason}" in result.stderr
+    assert logged(log) == []
+
+
+def test_missing_required_input_refuses_the_run(repo, log):
+    job = dict(INPUT_JOB, inputs={"repo": {"required": True}})
+    sha = setup_inputs(repo, job)
+    result = run_inputs(repo, sha, log, inputs="{}")
+    assert result.returncode == 2
+    assert "job j: input repo is required" in result.stderr
+    # on another trigger a required input is the empty string
+    result = run_inputs(repo, sha, log, trigger="open")
+    assert result.returncode == 0, result.stderr
+    assert logged(log) == ["CICD_INPUT_REPO="]
+
+
 def test_step_receives_trigger_not_moment(repo, log):
     """The step sees CICD_TRIGGER=open; the old name CICD_MOMENT is not set."""
     repo.script("ci/env.sh", 'env >> "$LOG"\n')

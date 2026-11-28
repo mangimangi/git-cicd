@@ -18,12 +18,19 @@
 # and commits what it writes in the same pull request. CI regenerates the
 # files, compares them whole and fails the verdict when they differ.
 #
-# Event: `workflow_dispatch` with one free-text input, `job`: the config job
-# to run, on the branch the run is started on. It reaches the tool only as an
-# environment variable. The job runs when it exists, does not say
+# Event: `workflow_dispatch` with two free-text inputs, as fixed text: `job`,
+# the config job to run on the branch the run is started on, and `inputs`,
+# the values of the job's declared inputs as one JSON object of strings
+# (empty for none). Both reach the tool only as environment variables
+# (`inputs` as CICD_MANUAL_INPUTS, which the tool reads and removes from the
+# scripts' environment); a script gets each declared input as
+# CICD_INPUT_<NAME>. The file cannot list a job's inputs, since it does not
+# vary with the config. The job runs when it exists, does not say
 # `"manual": false` and its `branches` match the branch; `paths` is ignored.
-# Anything else is refused: decide records the reason, needs no job, and the
-# report is FAILED with that reason.
+# Anything else is refused, as are inputs that are not a JSON object of
+# strings, an undeclared input, a missing required one or a value outside
+# its choices: decide records the reason, needs no job, and the report is
+# FAILED with that reason.
 #
 # Permissions: `contents: read` at the top level. The job that runs the
 # config's scripts gets `contents: write` and `pull-requests: write` (a
@@ -63,6 +70,11 @@ on:
       job:
         description: 'The config job to run (a job name in .vendored/configs/git-cicd.json)'
         required: true
+        type: string
+      inputs:
+        description: 'The job''s declared inputs as a JSON object of strings, for example {"bump_type": "minor"} (empty for none)'
+        required: false
+        default: ''
         type: string
 
 permissions:
@@ -126,6 +138,7 @@ jobs:
         id: decide
         env:
           JOB: ${{ inputs.job }}
+          CICD_MANUAL_INPUTS: ${{ inputs.inputs }}
           BRANCH: ${{ github.ref_name }}
           HEAD_SHA: ${{ github.sha }}
         run: |
@@ -166,6 +179,7 @@ jobs:
       - name: Run job
         env:
           JOB: ${{ matrix.job }}
+          CICD_MANUAL_INPUTS: ${{ inputs.inputs }}
           BRANCH: ${{ github.ref_name }}
           HEAD_SHA: ${{ github.sha }}
           GITHUB_TOKEN: ${{ github.token }}

@@ -676,3 +676,30 @@ def test_verify_fails_on_a_hand_edit_of_the_manual_file(tool_repo):
     result = tool_repo.run("verify")
     assert result.returncode == 1
     assert f"{MANUAL} (committed)" in result.stdout
+
+
+def test_manual_file_carries_inputs_as_json_through_env(tool_repo):
+    text = generate_manual(tool_repo)
+    on = text.split("\non:\n", 1)[1].split("\npermissions:")[0]
+    assert ("      inputs:\n        description: 'The job''s declared inputs as "
+            "a JSON object of strings") in on
+    assert "        required: false\n        default: ''\n        type: string\n" \
+        in on
+    jobs = job_blocks(text)
+    entry = "          CICD_MANUAL_INPUTS: ${{ inputs.inputs }}\n"
+    assert entry in steps_of(jobs["decide"])[3]
+    assert entry in steps_of(jobs["run"])[1]
+    assert text.count("CICD_MANUAL_INPUTS") == text.count(entry) + \
+        text.split("\nname: Manual\n")[0].count("CICD_MANUAL_INPUTS")
+    for block in run_blocks(text):
+        assert "${{" not in block and "CICD_MANUAL_INPUTS" not in block
+
+
+def test_declared_inputs_do_not_change_the_files(tool_repo):
+    generate(tool_repo, base_config())
+    files_a = generated_files(tool_repo)
+    config = base_config()
+    config["jobs"]["release"]["inputs"] = {
+        "bump_type": {"choices": ["patch", "minor"], "default": "patch"}}
+    generate(tool_repo, config)
+    assert generated_files(tool_repo) == files_a

@@ -72,6 +72,7 @@ in the README.
 | `cron` | five-field cron expression | | required when `on` contains `cron`, refused otherwise |
 | `manual` | boolean | `true` | the job can be run by hand |
 | `blocking` | boolean | `true` | `false` makes the job non-blocking: its failure is reported and does not fail the verdict |
+| `inputs` | object | `{}` | the inputs a manual run of the job takes, input name → declaration; see [Declared inputs](#declared-inputs) |
 
 **Title case by convention and by default, never by rewriting.** A job
 without `name` is shown under its job name with `-` and `_` as spaces and each
@@ -97,6 +98,64 @@ Steps share a machine, run in order and stop at the first failure.
 naming the job and the reason (for example `job test: missing required field
 branches`), and exits 2. Every other command refuses an invalid config the same
 way.
+
+### Declared inputs
+
+A job may declare the inputs a manual run of it takes:
+
+```json
+"release": {
+  "on": ["merge"], "branches": ["main"], "steps": ["ci/release.sh"],
+  "inputs": {
+    "bump_type": {"description": "Version bump type", "choices": ["patch", "minor", "major"], "default": "patch"},
+    "changelog_description": {"description": "Changelog entry"},
+    "repo": {"required": true}
+  }
+}
+```
+
+An input name is lowercase letters, digits and `_`, starting with a letter
+(`^[a-z][a-z0-9_]*$`). A declaration has:
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `description` | single-line string | `""` | what the input is for |
+| `required` | boolean | `false` | a manual run must give a value |
+| `default` | string | none | the value when none is given; not allowed with `"required": true` (a default would make `required` meaningless) |
+| `choices` | non-empty array of distinct strings | none | the allowed values; a `default` must be one of them |
+
+**Every value is a string**: values reach scripts as environment variables.
+A boolean is a choice of `"true"` and `"false"`. An input that must be given
+but has a usual value (like a bump type of `patch`) is declared not required
+with that default.
+
+**The naming rule.** Every declared input reaches every step and the setup as
+`CICD_INPUT_<NAME upper-cased>` (`bump_type` becomes `CICD_INPUT_BUMP_TYPE`),
+always set: to the manual run's value, else the default, else the empty
+string. Inherited `CICD_INPUT_*` variables the job does not declare are
+removed from the script's environment, so the declared inputs are the only
+channel.
+
+**Giving values.** The `Manual` workflow is fixed text, so it cannot list a
+job's inputs. It has one second free-text field, `inputs`, holding a JSON
+object of string values, for example `{"bump_type": "minor"}` (empty means
+`{}`). JSON carries quotes, `$`, backticks and newlines exactly. The field
+reaches the tool only as the `env:` entry `CICD_MANUAL_INPUTS`, which the tool
+reads on a manual run and removes from the scripts' environment.
+
+**On every other trigger** (`open`, `merge`, `cron`, and local `check`) each
+declared input is its default, or the empty string (a required input too).
+
+**Failures.** A manual run is refused, with the reason in the report and the
+status description, when the `inputs` field is not a JSON object of strings,
+names an input the job does not declare, leaves out a required input or gives
+a value outside the input's `choices`. `validate` refuses a malformed
+declaration naming the job, the input and the reason (for example
+`job release: input bump_type: default 'huge' is not one of the choices
+(patch, minor, major)`): a bad name, an unknown field, a description or
+default that is not a string, a default outside the choices, empty, duplicate
+or non-string choices, a `required` that is not a boolean or comes with a
+default, or `inputs` that is not an object.
 
 ### Patterns
 
@@ -153,6 +212,7 @@ Every decision carries a reason, and the report shows it.
 | `CICD_BASE` | the base commit: on `open` the pull request's base; on `merge` the commit before the push (all zeros when the push created the branch); on manual the run's commit |
 | `CICD_HEAD` | the head commit: on `open` the pull request's head; on `merge` the landed commit; on manual the run's commit (`github.sha`) |
 | `CICD_CHANGED_FILES` | absolute path of a file listing the changed files, one per line (empty when the diff cannot be computed, and always on manual) |
+| `CICD_INPUT_<NAME>` | one per [declared input](#declared-inputs): the manual run's value, else the default, else empty; no other `CICD_INPUT_` variable is set |
 
 - `GITHUB_TOKEN` and `VENDOR_PAT`, passed through unchanged. git-cicd itself
   never reads or logs them.
@@ -166,8 +226,9 @@ Every decision carries a reason, and the report shows it.
 
 - A step is a file plus fixed arguments, run as a list argv, never a shell
   string; nothing is assembled into a command line.
-- Facts about the change (branch names, commits, the changed files) reach a
-  script only as environment variables or a file. The generated workflow
+- Facts about the change (branch names, commits, the changed files) and the
+  values of declared inputs reach a script only as environment variables or
+  a file; an input value never becomes part of a command line. The generated workflow
   follows the same rule: every fact is an `env:` entry, referenced in `run:`
   only as a quoted shell variable, never `${{ }}` inside `run:`.
 - A change to the config or to a job's scripts makes every job run, and the
@@ -381,12 +442,17 @@ The manual workflow (`Manual`):
   pick the branch to run on and type the job name (a key under `jobs` in the
   config) into the `job` field. From the command line:
   `gh workflow run git-cicd-manual.yml --ref main -f job=release`.
-- Event: `workflow_dispatch` with one free-text input, `job`, as fixed text;
-  the input reaches the tool only through an `env:` entry, never `${{ }}`
-  inside `run:`. `decide --trigger manual --job NAME` decides: the job is
+- Event: `workflow_dispatch` with two free-text inputs, as fixed text: `job`
+  and `inputs` (the job's [declared inputs](#declared-inputs) as a JSON
+  object of strings, for example `{"bump_type": "minor"}`; leave it empty for
+  none or for the defaults). They reach the tool only through `env:` entries
+  (`inputs` as `CICD_MANUAL_INPUTS`), never `${{ }}` inside `run:`. From the
+  command line: `gh workflow run git-cicd-manual.yml --ref main -f job=release
+  -f inputs='{"bump_type": "minor"}'`. `decide --trigger manual --job NAME` decides: the job is
   needed (`manual run`) when it exists, allows manual runs and its
   `branches` match the branch; every other job is `not needed (not the job
-  asked for)`. A refusal is recorded in the decisions (`refused`), needs no
+  asked for)`. Inputs that fail (see [Declared inputs](#declared-inputs)) are
+  refused the same way. A refusal is recorded in the decisions (`refused`), needs no
   job, and the report is `FAILED - <reason>` in the report, the job summary
   and the status description.
 - Token, checkout, queue and verdict as on `Merge`: write permissions only on
@@ -546,7 +612,6 @@ Exit codes:
   with `the cron trigger is not built yet` when asked to run it. Its workflow
   (`Cron`) is not generated yet, so nothing triggers it; when it is built, it
   adds its own file under the name above and changes no other file.
-- Declared inputs for manual runs.
 - Secrets beyond `GITHUB_TOKEN` and `VENDOR_PAT`.
 - An image or runtime per job.
 

@@ -603,3 +603,47 @@ def test_job_refused_for_other_triggers(repo, trigger):
     assert result.returncode == 2
     assert (f"--job is for --trigger manual only, not --trigger {trigger}"
             in result.stderr)
+
+
+# ── manual: declared inputs ─────────────────────────────────────────────────
+
+INPUT_JOBS = {"release": {"branches": ["main"], "steps": ["ci/bump.sh"],
+                          "inputs": {
+                              "bump_type": {"choices": ["patch", "minor",
+                                                        "major"],
+                                            "default": "patch"},
+                              "note": {"required": True}}}}
+
+
+def decide_inputs(repo, inputs):
+    head = repo.git("rev-parse", "HEAD")
+    result = repo.run("decide", "--trigger=manual", "--job=release",
+                      "--target=main", "--source=main", f"--base={head}",
+                      f"--head={head}", "--json",
+                      env={"CICD_MANUAL_INPUTS": inputs})
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def test_manual_inputs_accepted(repo):
+    setup_repo(repo, jobs=INPUT_JOBS)
+    data = decide_inputs(repo, '{"bump_type": "minor", "note": "x"}')
+    assert data["refused"] is None
+    assert data["jobs"][0]["needed"] is True
+
+
+@pytest.mark.parametrize("inputs,reason", [
+    ("", "job release: input note is required"),
+    ('{"note": "x", "bump_type": "huge"}',
+     "job release: input bump_type: 'huge' is not one of the choices "
+     "(patch, minor, major)"),
+    ('{"note": "x", "extra": "y"}',
+     "job release declares no input 'extra' (declared: bump_type, note)"),
+    ("not json", "the inputs are not valid JSON"),
+    ('{"note": ["x"]}', "the inputs must be a JSON object of string values"),
+])
+def test_manual_input_failures_are_refusals(repo, inputs, reason):
+    setup_repo(repo, jobs=INPUT_JOBS)
+    data = decide_inputs(repo, inputs)
+    assert data["refused"].startswith(reason), data["refused"]
+    assert not data["jobs"][0]["needed"]
