@@ -43,9 +43,8 @@ install() {
     done
     cmp "$ROOT/templates/config.json" .vendored/configs/git-cicd.json
     cmp "$ROOT/templates/config.schema" .vendored/manifests/git-cicd.schema
-    for trigger in open merge; do
-        [ -f ".github/workflows/git-cicd-$trigger.yml" ]
-    done
+    [ -f .github/workflows/git-cicd-open.yml ]
+    [ ! -e .github/workflows/git-cicd-merge.yml ]  # no job has merge
     [ ! -e .github/workflows/git-cicd-cron.yml ]   # no job has cron
     [ ! -e .github/workflows/git-cicd-manual.yml ] # no job allows manual runs
     [ "$(cat "$MANIFEST")" = "$(printf '%s\n' \
@@ -90,9 +89,10 @@ JSON
     [ ! -e "$INSTALL_DIR/templates/workflow.yml" ]
     [ ! -e .github/workflows/git-cicd.yml ]
     grep -q "0 3 \* \* \*" .github/workflows/git-cicd-cron.yml
-    for trigger in open merge cron manual; do
+    for trigger in open cron manual; do
         [ -f ".github/workflows/git-cicd-$trigger.yml" ]
     done
+    [ ! -e .github/workflows/git-cicd-merge.yml ]  # no job has merge
     grep -qx "$INSTALL_DIR/git-cicd" "$MANIFEST"
     ! grep -q '^\.github/workflows/' "$MANIFEST"
 }
