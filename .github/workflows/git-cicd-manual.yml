@@ -90,23 +90,6 @@ on:
         options:
           - "release"
           - "update-vendored"
-      bump_type:
-        description: "Version bump type (job release)"
-        required: false
-        default: "patch"
-        type: choice
-        options:
-          - "patch"
-          - "minor"
-          - "major"
-      subdirectory:
-        description: "Subdirectory to bump (leave empty for root) (job release)"
-        required: false
-        type: string
-      changelog_description:
-        description: "Changelog entry (what changed in this release) (job release)"
-        required: false
-        type: string
       vendor:
         description: "Vendor to update (or all) (job update-vendored)"
         required: false
