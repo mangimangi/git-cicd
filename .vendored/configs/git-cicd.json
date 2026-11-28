@@ -6,7 +6,8 @@
       "branches": ["**"],
       "paths": ["git-cicd", "install.sh", "templates/**", "tests/**", "pyproject.toml", "ci/**"],
       "setup": "ci/setup.sh",
-      "steps": ["ci/test.sh"]
+      "steps": ["ci/test.sh"],
+      "manual": false
     },
     "release": {
       "name": "Release",
@@ -23,7 +24,8 @@
       "name": "Check Vendor Files",
       "on": ["open"],
       "branches": ["**"],
-      "steps": ["ci/vendor-check.sh"]
+      "steps": ["ci/vendor-check.sh"],
+      "manual": false
     },
     "update-vendored": {
       "name": "Install Vendored",

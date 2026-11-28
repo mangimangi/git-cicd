@@ -23,7 +23,7 @@ executes: `open` (pull requests), `merge` (a change lands on a branch),
 | Path | Owner | What |
 |---|---|---|
 | `.vendored/configs/git-cicd.json` | the repository | the config: jobs, `needs_nothing`, `max_parallel` |
-| `.github/workflows/git-cicd-<trigger>.yml` | generated | the GitHub Actions workflows, one per trigger (`git-cicd-open.yml`, `git-cicd-merge.yml`, `git-cicd-manual.yml`, and `git-cicd-cron.yml` when a job has `cron` in `on`); generated, committed |
+| `.github/workflows/git-cicd-<trigger>.yml` | generated | the GitHub Actions workflows, one per trigger (`git-cicd-open.yml`, `git-cicd-merge.yml`, `git-cicd-manual.yml` when a job allows manual runs, and `git-cicd-cron.yml` when a job has `cron` in `on`); generated, committed |
 | your scripts (e.g. `ci/`) | the repository | setup and step scripts, wherever the repository keeps them; git-cicd installs none |
 | `.vendored/pkg/git-cicd/` | git-cicd | the tool and its workflow template, installed by `install.sh` |
 
@@ -69,7 +69,7 @@ in the README.
 | `setup` | one repository path | none | the job's own setup script |
 | `steps` | non-empty ordered array | **required** | each step is a file (`"ci/test.sh"`) or a file plus fixed arguments (`["ci/test.sh", "--fast"]`), run directly, never through a shell |
 | `cron` | five-field cron expression | | required when `on` contains `cron`, refused otherwise |
-| `manual` | boolean | `true` | the job can be run by hand |
+| `manual` | boolean | `true` | the job can be run by hand: it is listed in the `Manual` workflow's `job` dropdown and its inputs are fields of that form |
 | `blocking` | boolean | `true` | `false` makes the job non-blocking: its failure is reported and does not fail the verdict |
 | `inputs` | object | `{}` | the inputs a manual run of the job takes, input name → declaration; see [Declared inputs](#declared-inputs) |
 
@@ -135,26 +135,78 @@ string. Inherited `CICD_INPUT_*` variables the job does not declare are
 removed from the script's environment, so the declared inputs are the only
 channel.
 
-**Giving values.** The `Manual` workflow is fixed text, so it cannot list a
-job's inputs. It has one second free-text field, `inputs`, holding a JSON
-object of string values, for example `{"bump_type": "minor"}` (empty means
-`{}`). JSON carries quotes, `$`, backticks and newlines exactly. The field
-reaches the tool only as the `env:` entry `CICD_MANUAL_INPUTS`, which the tool
-reads on a manual run and removes from the scripts' environment.
+**Giving values.** The `Manual` workflow's form is generated from the config
+(see [The generated workflows](#the-generated-workflows)): `job` is a dropdown
+of the jobs that allow manual runs, and every declared input of those jobs is
+a named field with its description, its default and, for an input with
+`choices`, a dropdown of them. The owner picks the job and fills the fields;
+from the command line, one `-f <name>=<value>` per input
+(`gh workflow run git-cicd-manual.yml --ref main -f job=release -f bump_type=minor`).
+The form reaches the tool only as one `env:` entry, `CICD_MANUAL_FORM`
+(`${{ toJSON(inputs) }}`, a JSON object of strings), which the tool reads on a
+manual run and removes from the scripts' environment. A value typed into a
+field reaches the script exactly, quotes, `$`, backticks and newlines
+included.
+
+**One form for every job.** The form shows every manual job's fields at once,
+so:
+
+- an input declared under one name by several manual jobs is **one field**.
+  Their declarations must be able to share it: the same `choices` and the
+  same `default` (an absent default and `""` are the same). Their
+  descriptions may differ; the field shows the first job's. A field not used
+  by every manual job says which jobs use it, for example
+  `Version bump type (job release)`;
+- a run passes the chosen job **only the fields it declares**. Any other field
+  is ignored, not an error; when its value is not the field's form default
+  (its default, else the first choice, else empty) the report says so, for
+  example `ignored input vendor (job release does not declare it)`;
+- every input field is optional in the form, since the owner fills only the
+  chosen job's; the tool enforces `required` for the chosen job, and an empty
+  value counts as missing;
+- `job` is the form's own field: a job that allows manual runs cannot declare
+  an input named `job`;
+- GitHub allows at most 25 inputs in a manually started workflow
+  ([changelog, 2025-12-04](https://github.blog/changelog/2025-12-04-actions-workflow-dispatch-workflows-now-support-25-inputs/)),
+  `job` included, so the manual jobs together have at most 24 distinct input
+  names;
+- GitHub evaluates `${{ ... }}` in every workflow string, and YAML has no
+  escape for it, so a description, default or choice of a manual job cannot
+  contain `${{`. Every other character is written safely (as a JSON string).
+
+These rules apply only to jobs that allow manual runs: a job with
+`"manual": false` is not in the form, and its inputs are not checked against
+the others'.
+
+**Changing inputs means regenerating.** Adding, changing or removing a
+manual job's input, adding or removing a job that allows manual runs, or
+changing a job's `manual` changes the `Manual` workflow: run `generate` and
+commit `.github/workflows/git-cicd-manual.yml` in the same pull request;
+`verify` (and with it the verdict) fails until you do.
 
 **On every other trigger** (`open`, `merge`, `cron`, and local `check`) each
 declared input is its default, or the empty string (a required input too).
 
+**Locally**, `decide --trigger manual` and `run-job --trigger manual` read
+the same `CICD_MANUAL_FORM` variable; without it every input is its default
+(and a required input is missing).
+
 **Failures.** A manual run is refused, with the reason in the report and the
-status description, when the `inputs` field is not a JSON object of strings,
-names an input the job does not declare, leaves out a required input or gives
-a value outside the input's `choices`. `validate` refuses a malformed
-declaration naming the job, the input and the reason (for example
+status description, when `CICD_MANUAL_FORM` is not a JSON object of strings,
+a required input of the chosen job is missing or empty, or a value is outside
+the input's `choices`. `validate` refuses a malformed declaration naming the
+job, the input and the reason (for example
 `job release: input bump_type: default 'huge' is not one of the choices
 (patch, minor, major)`): a bad name, an unknown field, a description or
 default that is not a string, a default outside the choices, empty, duplicate
 or non-string choices, a `required` that is not a boolean or comes with a
-default, or `inputs` that is not an object.
+default, or `inputs` that is not an object. For the jobs that allow manual
+runs it also refuses one input name declared with different choices or
+defaults (`input bump_type is declared by jobs release and other with
+different choices; ... give them the same choices and default, or rename
+one`), an input named `job`, `${{` in a description, default or choice, and
+a form of more than 25 fields (it gives the count and the limit); each
+message says what to change, `"manual": false` on a job among the options.
 
 ### Patterns
 
@@ -234,7 +286,12 @@ Every decision carries a reason, and the report shows it.
   values of declared inputs reach a script only as environment variables or
   a file; an input value never becomes part of a command line. The generated workflow
   follows the same rule: every fact is an `env:` entry, referenced in `run:`
-  only as a quoted shell variable, never `${{ }}` inside `run:`.
+  only as a quoted shell variable, never `${{ }}` inside `run:`. The Manual
+  workflow's form passes every value in one `env:` entry,
+  `CICD_MANUAL_FORM`; what the form writes from the config (job and input
+  names, which are validated identifiers, and descriptions, defaults and
+  choices, written as JSON strings, `${{` refused) sits only under
+  `workflow_dispatch`, never in a `run:` block.
 - A change to the config or to a job's scripts makes every job run, and the
   report says so.
 
@@ -393,7 +450,7 @@ overlap rule, and each named for its trigger, so a row reads
 | `open` | `Open` | `.github/workflows/git-cicd-open.yml` | yes |
 | `merge` | `Merge` | `.github/workflows/git-cicd-merge.yml` | yes |
 | `cron` | `Cron` | `.github/workflows/git-cicd-cron.yml` | yes, when a job has `cron` in `on` |
-| manual | `Manual` | `.github/workflows/git-cicd-manual.yml` | yes |
+| manual | `Manual` | `.github/workflows/git-cicd-manual.yml` | yes, when a job allows manual runs |
 
 The names and file names are fixed for good: each trigger was built by
 adding its own file, changing no other. The names are the trigger words
@@ -402,9 +459,16 @@ not a kind of job.
 
 `git-cicd generate` writes every generated file. **Every generated file is
 fixed text except the cron workflow's schedule block** (one entry per distinct
-cron expression in the config), and the tool path, which follows where
-git-cicd is installed. Jobs are decided when a workflow runs, so two configs
-that differ only in jobs that are not `cron` generate the same files.
+cron expression in the config) **and the Manual workflow's form** (which jobs
+its `job` dropdown lists and which named input fields it has), and the tool
+path, which follows where git-cicd is installed. Jobs are decided when a
+workflow runs, so `Open` and `Merge` never change with the config, and two
+configs that differ only in jobs that are neither `cron` nor manual (or only
+in their `paths`, `branches`, `steps` or `name`) generate the same files.
+(The comments at the top of the `open`, `merge` and `cron` templates still
+read "fixed text except the cron workflow's schedule block": they are left as
+they are so those files stay byte-identical; this section and the `manual`
+template carry the rule.)
 
 The `open` workflow (`Open`):
 
@@ -460,33 +524,94 @@ The `merge` workflow (`Merge`):
 The manual workflow (`Manual`):
 
 - Start one from the Actions tab: pick **Manual**, choose *Run workflow*,
-  pick the branch to run on and type the job name (a key under `jobs` in the
-  config) into the `job` field. From the command line:
-  `gh workflow run git-cicd-manual.yml --ref main -f job=release`.
-- Event: `workflow_dispatch` with two free-text inputs, as fixed text: `job`
-  and `inputs` (the job's [declared inputs](#declared-inputs) as a JSON
-  object of strings, for example `{"bump_type": "minor"}`; leave it empty for
-  none or for the defaults). They reach the tool only through `env:` entries
-  (`inputs` as `CICD_MANUAL_INPUTS`), never `${{ }}` inside `run:`. From the
-  command line: `gh workflow run git-cicd-manual.yml --ref main -f job=release
-  -f inputs='{"bump_type": "minor"}'`. `decide --trigger manual --job NAME` decides: the job is
-  needed (`manual run`) when it exists, allows manual runs and its
-  `branches` match the branch; every other job is `not needed (not the job
-  asked for)`. Inputs that fail (see [Declared inputs](#declared-inputs)) are
-  refused the same way. A refusal is recorded in the decisions (`refused`), needs no
-  job, and the report is `FAILED - <reason>` in the report, the job summary
-  and the status description.
+  pick the branch to run on, pick the job in the `job` dropdown and fill the
+  fields of that job (leave the other jobs' fields as they are). From the
+  command line, one `-f` per field:
+  `gh workflow run git-cicd-manual.yml --ref main -f job=release -f bump_type=minor`.
+- Event: `workflow_dispatch` with the form generated from the config: `job`,
+  a required dropdown of the jobs that allow manual runs, in config order,
+  then one optional field per distinct [declared input](#declared-inputs) of
+  those jobs, in first-seen order. For a config with a `release` job (inputs
+  `bump_type` and `changelog_description`) and an `update-vendored` job
+  (input `vendor`) the form is:
+
+  ```yaml
+  on:
+    workflow_dispatch:
+      inputs:
+        job:
+          description: "The config job to run"
+          required: true
+          type: choice
+          options:
+            - "release"
+            - "update-vendored"
+        bump_type:
+          description: "Version bump type (job release)"
+          required: false
+          default: "patch"
+          type: choice
+          options:
+            - "patch"
+            - "minor"
+            - "major"
+        changelog_description:
+          description: "Changelog entry (job release)"
+          required: false
+          type: string
+        vendor:
+          description: "Vendor to update (or all) (job update-vendored)"
+          required: false
+          default: "all"
+          type: string
+  ```
+
+  Names are validated identifiers, written bare; descriptions, defaults and
+  options are JSON strings, so no character in them can change the file
+  (`${{` is refused by `validate`). The values reach the tool only as the
+  one `env:` entry `CICD_MANUAL_FORM: ${{ toJSON(inputs) }}`, never
+  `${{ }}` inside `run:`; the env lines are fixed text, only the form
+  varies. `decide --trigger manual --job NAME` decides: the job is needed
+  (`manual run`) when it exists, allows manual runs and its `branches` match
+  the branch; every other job is `not needed (not the job asked for)`.
+  Inputs that fail (see [Declared inputs](#declared-inputs)) are refused the
+  same way. A refusal is recorded in the decisions (`refused`), needs no job,
+  and the report is `FAILED - <reason>` in the report, the job summary and the
+  status description. Fields the chosen job does not declare are recorded
+  (`ignored`) and listed in the report when not at their form default.
+- **No manual job, no file.** With no job that allows manual runs (every job
+  says `"manual": false`, or there is none), `generate` writes no
+  `git-cicd-manual.yml` and removes an existing one (saying so; commit the
+  removal), and `verify` fails while it is still there: the `job` dropdown
+  needs an option, and a workflow with nothing to run must not exist.
+- `verify` covers the form like the schedule block: a change to a manual
+  job's inputs, a new manual job or a changed `manual` without `generate`
+  fails the verdict with the diff and `run: <tool> generate and commit ...`.
 - Token, checkout, queue and verdict as on `Merge`: write permissions only on
   the job that runs the config's scripts, full history and tags, and manual
   and merge runs on one branch go one at a time, never cancelled.
+
+**Upgrading from a version with the two free-text fields** (`job` and
+`inputs`): run `generate` and commit the new `git-cicd-manual.yml` (`verify`
+fails until you do). The `inputs` field, `-f inputs='{...}'` and
+`CICD_MANUAL_INPUTS` no longer exist: anything that starts a run with
+`gh workflow run git-cicd-manual.yml ... -f inputs='{"bump_type": "minor"}'`
+switches to one `-f <name>=<value>` per input
+(`-f job=release -f bump_type=minor`), and a script that read
+`CICD_MANUAL_INPUTS` reads its `CICD_INPUT_<NAME>` variables. Every job is
+in the `job` dropdown unless it says `"manual": false`: set that on jobs that
+should not be started by hand (for example jobs that only check pull
+requests). If `validate` now refuses the config, two manual jobs declare one
+input name differently, or a job declares an input named `job`: rename one
+or set `"manual": false`.
 
 The cron workflow (`Cron`):
 
 - Event: `schedule`, one entry per distinct `cron` expression among the
   config's jobs with `cron` in `on`, sorted and quoted
-  (`    - cron: "0 9 * * 1"`). This schedule block is the only part of any
-  generated file that varies with the config; `verify` fails when it and the
-  config disagree.
+  (`    - cron: "0 9 * * 1"`). This schedule block and the Manual workflow's
+  form are the only parts of any generated file that vary with the config;
+  `verify` fails when either and the config disagree.
 - **No cron job, no file.** With no job that has `cron` in `on`, `generate`
   writes no `git-cicd-cron.yml` and removes an existing one (saying so; commit
   the removal), and `verify` fails while it is still there: GitHub needs an
@@ -556,8 +681,8 @@ to install or upgrade it.
    templates, the schema and the config when it is missing. The install also
    regenerates the per-trigger workflows
    (`.github/workflows/git-cicd-open.yml`, `git-cicd-merge.yml`,
-   `git-cicd-manual.yml`, and `git-cicd-cron.yml` when a job has `cron` in
-   `on`; on the first upgrade from the single file, also the deletion of
+   `git-cicd-manual.yml` when a job allows manual runs, and
+   `git-cicd-cron.yml` when a job has `cron` in `on`; on the first upgrade from the single file, also the deletion of
    `.github/workflows/git-cicd.yml`), but the pull request may arrive without
    them: one pushed with a token that may not write workflow files leaves
    them out. Review and merge it like any other.
@@ -678,7 +803,7 @@ Exit codes:
 | `validate [--config PATH]` | load and validate the config: `config ok: N jobs` or every error |
 | `decide --trigger open\|merge\|manual --target B --source B --base SHA --head SHA [--job NAME] [--json] [--changed-files-out PATH]`, or `decide --trigger cron --cron EXPR [--json]` | one decision per declared job, with the reason; `--job` names the job of a manual run (required with `--trigger manual`, refused with any other); `--cron` is the schedule that fired (required with `--trigger cron`, refused with any other); in Actions also writes `jobs`, `names`, `any`, `max_parallel` (and on cron `runs`) to `GITHUB_OUTPUT`, where `jobs` (and `runs`) is the placeholder `(nothing)` when no job is needed |
 | `run-job JOB --trigger open\|merge\|cron\|manual --target … --head SHA [--setup] [--result PATH]` | setup when asked, then the steps; result JSON with the times |
-| `generate` / `verify` | write / check the generated workflows (`.github/workflows/git-cicd-open.yml`, `.github/workflows/git-cicd-merge.yml`, `.github/workflows/git-cicd-manual.yml`, and `.github/workflows/git-cicd-cron.yml` when a job has `cron` in `on`); `generate` removes, and `verify` fails on, the old `.github/workflows/git-cicd.yml` |
+| `generate` / `verify` | write / check the generated workflows (`.github/workflows/git-cicd-open.yml`, `.github/workflows/git-cicd-merge.yml`, `.github/workflows/git-cicd-manual.yml` when a job allows manual runs, and `.github/workflows/git-cicd-cron.yml` when a job has `cron` in `on`); `generate` removes, and `verify` fails on, the old `.github/workflows/git-cicd.yml` |
 | `report --decisions FILE --results DIR [--trigger open\|merge\|cron\|manual] [--verdict-out PATH]` | the report and verdict from `decide --json` and `run-job --result` files; `--verdict-out` writes the status state (`success`/`failure`) and description, one per line (on cron one line per branch head: `<sha> TAB <state> TAB <description>`) |
 | `check […]` | the local command above |
 
@@ -695,8 +820,8 @@ config declares four jobs, one per trigger:
 
 | Job | Row | Trigger | Script | What |
 |---|---|---|---|---|
-| `test` | `Open / Unit Tests / git-cicd:test` | `open`, every branch, `paths` the code | `ci/setup.sh`, `ci/test.sh` | setup installs pytest, pytest-cov and coverage (7.10 or later) for the Python floor (`>=3.11` in `pyproject.toml`), and bats-core when `bats` is not on PATH; the step runs the pytest suite, prints the line coverage of `git-cicd` with its missing lines and fails below 99%, then runs the bats tests of `install.sh` and the `ci/` scripts (`tests/bats/`) |
-| `vendor-check` | `Open / Check Vendor Files / git-cicd:vendor-check` | `open`, every branch | `ci/vendor-check.sh` | `python3 .vendored/check --base "$CICD_BASE"`; it sets `GITHUB_HEAD_REF` from `CICD_SOURCE_BRANCH` when unset, so a local `check` lets `chore/install-*` branches through like Actions does |
+| `test` | `Open / Unit Tests / git-cicd:test` | `open`, every branch, `paths` the code; not by hand (`"manual": false`) | `ci/setup.sh`, `ci/test.sh` | setup installs pytest, pytest-cov and coverage (7.10 or later) for the Python floor (`>=3.11` in `pyproject.toml`), and bats-core when `bats` is not on PATH; the step runs the pytest suite, prints the line coverage of `git-cicd` with its missing lines and fails below 99%, then runs the bats tests of `install.sh` and the `ci/` scripts (`tests/bats/`) |
+| `vendor-check` | `Open / Check Vendor Files / git-cicd:vendor-check` | `open`, every branch; not by hand (`"manual": false`) | `ci/vendor-check.sh` | `python3 .vendored/check --base "$CICD_BASE"`; it sets `GITHUB_HEAD_REF` from `CICD_SOURCE_BRANCH` when unset, so a local `check` lets `chore/install-*` branches through like Actions does |
 | `release` | `Merge / Release / git-cicd:release` | `merge` on `main`; by hand with the inputs `bump_type` (patch, minor, major; default patch), `subdirectory`, `changelog_description` | `ci/release.sh` | git-semver's `release`: `publish` when the landed commit's subject starts with `chore: bump version`, nothing for `chore: install`, otherwise `bump` (and `bump` on a manual run); it gives `release` `GITHUB_EVENT_NAME`, `GITHUB_EVENT_BEFORE`, `INPUT_BUMP_TYPE`, `INPUT_SUBDIRECTORY`, `INPUT_CHANGELOG_DESCRIPTION` and `GH_TOKEN` |
 | `update-vendored` | `Cron / Install Vendored / git-cicd:update-vendored` | `cron` `0 9 * * 1` on `main`; by hand with the inputs `vendor` (default all), `version` (default latest), `private` (true or false; default false) | `ci/update-vendored.sh` | `python3 .vendored/install <vendor> --version <version> --pr --deps=install` (plus `--private`), with `GH_TOKEN` set to `VENDOR_PAT` when set, else `GITHUB_TOKEN`; only CI runs it |
 
@@ -704,9 +829,16 @@ config declares four jobs, one per trigger:
 does not release, while a `chore: bump version` commit still publishes
 (`VERSION` is in no job's `paths` and not in `needs_nothing`). Start a
 release or an update by hand from the Actions tab: **Manual**, *Run
-workflow* on `main`, job `release` (inputs for example
-`{"bump_type": "minor"}`) or `update-vendored` (for example
-`{"vendor": "mangimangi/git-semver"}`).
+workflow* on `main`, then pick the job in the `job` dropdown and fill its
+named fields: `release` with `bump_type` (a dropdown of patch, minor, major),
+`subdirectory` and `changelog_description`, or `update-vendored` with
+`vendor` (for example `mangimangi/git-semver`), `version` and `private` (a
+dropdown of true, false). Each field's description names the job that uses
+it; the other job's fields are ignored. From the command line:
+`gh workflow run git-cicd-manual.yml --ref main -f job=release -f bump_type=minor`.
+`test` and `vendor-check` run on pull requests and are not in the dropdown
+(`"manual": false`). A change to a job's inputs (or its `manual`) changes
+the Manual workflow: run `./git-cicd generate` and commit it with the change.
 
 The vendor-installed workflows these jobs replace (`version-bump.yml`,
 `check-vendor.yml`, `install-vendored.yml`) are removed from this repository;

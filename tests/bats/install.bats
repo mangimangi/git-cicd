@@ -43,10 +43,11 @@ install() {
     done
     cmp "$ROOT/templates/config.json" .vendored/configs/git-cicd.json
     cmp "$ROOT/templates/config.schema" .vendored/manifests/git-cicd.schema
-    for trigger in open merge manual; do
+    for trigger in open merge; do
         [ -f ".github/workflows/git-cicd-$trigger.yml" ]
     done
     [ ! -e .github/workflows/git-cicd-cron.yml ]   # no job has cron
+    [ ! -e .github/workflows/git-cicd-manual.yml ] # no job allows manual runs
     [ "$(cat "$MANIFEST")" = "$(printf '%s\n' \
         "$INSTALL_DIR/git-cicd" \
         "$INSTALL_DIR/templates/workflows/open.yml" \

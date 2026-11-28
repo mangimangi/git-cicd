@@ -35,7 +35,7 @@ to install it.
 After changing `.vendored/configs/git-cicd.json` or a template under
 `templates/workflows/`, run `./git-cicd generate` and commit the generated
 workflows (`.github/workflows/git-cicd-<trigger>.yml`, one per trigger;
-`git-cicd-open.yml`, `git-cicd-merge.yml`, `git-cicd-cron.yml` and `git-cicd-manual.yml`; the cron file exists only while a job has `cron` in `on`); the verdict fails while they disagree.
+`git-cicd-open.yml`, `git-cicd-merge.yml`, `git-cicd-cron.yml` and `git-cicd-manual.yml`; the cron file exists only while a job has `cron` in `on`, the manual file only while a job allows manual runs, and the manual file's form lists the manual jobs and their inputs); the verdict fails while they disagree.
 
 ## This repository's jobs
 
@@ -45,10 +45,16 @@ pytest suite), `vendor-check` (`open`; `ci/vendor-check.sh` runs
 publishes with git-semver's `release`) and `update-vendored` (`cron`
 `0 9 * * 1` on `main`; `ci/update-vendored.sh` runs `.vendored/install`).
 Only CI runs `release` and `update-vendored`. The owner starts either by hand
-from the Actions tab: **Manual**, *Run workflow* on `main`, job `release` or
-`update-vendored`, and the `inputs` field as JSON (for example
-`{"bump_type": "minor"}` or `{"vendor": "mangimangi/git-semver"}`; empty for
-the defaults).
+from the Actions tab: **Manual**, *Run workflow* on `main`, then picks the job
+in the `job` dropdown and fills its named fields (left alone, each is its
+default): job `release` with `bump_type` (patch, minor, major; default
+patch), `subdirectory` and `changelog_description`, or job `update-vendored`
+with `vendor` (default all, for example `mangimangi/git-semver`), `version`
+(default latest) and `private` (true, false; default false). `test` and
+`vendor-check` say `"manual": false` and are not in the dropdown. The
+Manual workflow's form is generated from the config: a change to a job's
+inputs or its `manual` means `./git-cicd generate` and committing
+`.github/workflows/git-cicd-manual.yml` in the same pull request.
 
 The old vendor workflows (`version-bump.yml`, `check-vendor.yml`,
 `install-vendored.yml`) are removed from this repository; these jobs replace
@@ -58,7 +64,8 @@ them.
 
 This repository's own vendored tools (git-vendored and git-semver, under
 `.vendored/`) are updated only by the `update-vendored` job: the owner runs it
-from the Actions tab (**Manual**, job `update-vendored`), and its weekly
+from the Actions tab (**Manual**, job `update-vendored` in the dropdown, the
+`vendor` field naming one vendor or `all`), and its weekly
 schedule updates them too; each update arrives as a pull request from
 `chore/install-<vendor>`. git-vendored itself came once from its documented
 bootstrap. Adopting repositories install and upgrade git-cicd the same way

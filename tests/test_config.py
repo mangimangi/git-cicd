@@ -461,7 +461,10 @@ TODAYS_INPUTS = {
 
 
 def test_todays_workflow_inputs_validate(scripts):
-    scripts.config({"jobs": {name: job(inputs=inputs)
+    # validate's version (default "") cannot share update's form field
+    # (default latest), so validate is not run by hand here
+    scripts.config({"jobs": {name: job(inputs=inputs,
+                                       manual=name != "validate")
                              for name, inputs in TODAYS_INPUTS.items()}})
     result = scripts.run("validate")
     assert result.returncode == 0, result.stderr
@@ -527,3 +530,81 @@ def test_outside_a_git_repository_is_a_usage_error(repo, tmp_path):
     assert result.returncode == 2
     assert result.stderr.startswith(
         "git-cicd: not inside a git repository: fatal:")
+
+
+# ── The Manual workflow's form ──────────────────────────────────────────────
+
+def test_shared_identical_inputs_validate(scripts):
+    decl = {"choices": ["a", "b"], "default": "b", "description": "one"}
+    scripts.config({"jobs": {
+        "x": job(inputs={"mode": decl}),
+        "y": job(inputs={"mode": dict(decl, description="another")}),
+        "z": job(inputs={"note": {"default": ""}}),
+        "w": job(inputs={"note": {}}),
+    }})
+    result = scripts.run("validate")
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("a,b,what", [
+    ({"choices": ["a", "b"]}, {"choices": ["a", "c"]}, "choices"),
+    ({"choices": ["a", "b"]}, {}, "choices"),
+    ({"default": "x"}, {"default": "y"}, "defaults"),
+    ({"default": "x"}, {}, "defaults"),
+    ({"choices": ["a", "b"], "default": "a"}, {"default": "b"},
+     "choices and defaults"),
+])
+def test_shared_incompatible_inputs_are_refused(scripts, a, b, what):
+    refused(scripts, {"jobs": {"first": job(inputs={"mode": a}),
+                               "second": job(inputs={"mode": b})}},
+            f"input mode is declared by jobs first and second with "
+            f"different {what}",
+            "give them the same choices and default, or rename one")
+
+
+def test_incompatible_inputs_of_a_job_not_run_by_hand_validate(scripts):
+    scripts.config({"jobs": {
+        "first": job(inputs={"mode": {"default": "x"}}),
+        "second": job(inputs={"mode": {"default": "y"}}, manual=False),
+    }})
+    assert scripts.run("validate").returncode == 0
+
+
+@pytest.mark.parametrize("name", ["job"])
+def test_form_field_names_are_reserved_on_manual_jobs(scripts, name):
+    refused(scripts, {"jobs": {"t": job(inputs={name: {}})}},
+            f"job t: input {name}: the name {name} is reserved for the "
+            "Manual workflow's own field",
+            '"manual": false')
+    scripts.config({"jobs": {"t": job(inputs={name: {}}, manual=False)}})
+    assert scripts.run("validate").returncode == 0
+
+
+def test_form_limit(scripts):
+    inputs = {f"in{i}": {} for i in range(24)}
+    scripts.config({"jobs": {"a": job(inputs=dict(list(inputs.items())[:12])),
+                             "b": job(inputs=dict(list(inputs.items())[12:]))}})
+    assert scripts.run("validate").returncode == 0, "24 inputs fit"
+    inputs["in24"] = {}
+    refused(scripts, {"jobs": {"a": job(inputs=inputs)}},
+            "the Manual workflow's form would have 26 fields (job and 25 "
+            "distinct input names)",
+            "at most 25 inputs", "at most 24 distinct input names",
+            "use fewer distinct input names, or set \"manual\": false")
+    scripts.config({"jobs": {"a": job(inputs=inputs, manual=False)}})
+    assert scripts.run("validate").returncode == 0
+
+
+@pytest.mark.parametrize("decl,what", [
+    ({"description": "say ${{ github.token }}"}, "description"),
+    ({"default": "${{ secrets.X }}"}, "default"),
+    ({"choices": ["a", "b${{ x }}"]}, "choice"),
+])
+def test_expressions_are_refused_in_manual_jobs_form_values(scripts, decl,
+                                                            what):
+    refused(scripts, {"jobs": {"t": job(inputs={"x": decl})}},
+            f"job t: input x: the {what} contains ${{{{, which GitHub would "
+            "evaluate in the Manual workflow's form",
+            '"manual": false')
+    scripts.config({"jobs": {"t": job(inputs={"x": decl}, manual=False)}})
+    assert scripts.run("validate").returncode == 0

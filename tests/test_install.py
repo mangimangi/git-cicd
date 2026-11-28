@@ -87,7 +87,9 @@ def test_code_lands_under_install_dir(tmp_path, project):
         assert (project / INSTALL_DIR / "templates" / "workflows"
                 / f"{trigger}.yml").read_bytes() == \
             (ROOT / "templates" / "workflows" / f"{trigger}.yml").read_bytes()
-    assert (project / MERGE).is_file() and (project / MANUAL).is_file()
+    assert (project / MERGE).is_file()
+    # the starter config declares no job, so none allows a manual run
+    assert not (project / MANUAL).exists()
     assert "Installing git-cicd v1.2.3 from mangimangi/git-cicd" in result.stdout
 
 
@@ -183,9 +185,10 @@ def test_manifest_lists_installed_files(tmp_path, project):
                      f"{INSTALL_DIR}/templates/workflows/manual.yml",
                      ".vendored/manifests/git-cicd.schema"]
     assert not any(f.startswith(".github/workflows/") for f in files)
-    for workflow in (WORKFLOW, MERGE, MANUAL):
+    for workflow in (WORKFLOW, MERGE):
         assert (project / workflow).is_file()
     assert not (project / CRON).exists()
+    assert not (project / MANUAL).exists()
     assert CONFIG not in files
     for f in files:
         assert (project / f).is_file()
