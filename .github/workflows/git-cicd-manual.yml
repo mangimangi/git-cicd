@@ -212,8 +212,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           ACTOR: ${{ github.triggering_actor }}
         run: |
-          PERMISSION="$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$ACTOR/permission" \
-            --jq '.permission' 2>/dev/null || true)"
+          if ! PERMISSION="$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$ACTOR/permission" \
+            --jq '.permission' 2>/dev/null)"; then
+            PERMISSION=""
+          fi
           case "$PERMISSION" in
             admin|write|read) ROLE="$PERMISSION" ;;
             *) ROLE="" ;;

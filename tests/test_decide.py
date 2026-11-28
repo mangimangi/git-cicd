@@ -530,11 +530,16 @@ MANUAL_JOBS = {
 }
 
 
-def decide_manual(repo, job, branch="main"):
+# The role the Manual workflow reads for whoever started the run: an admin,
+# who may start any manual run.
+ADMIN = {"CICD_ACTOR": "octo", "CICD_ACTOR_ROLE": "admin"}
+
+
+def decide_manual(repo, job, branch="main", env=ADMIN):
     head = repo.git("rev-parse", "HEAD")
     result = repo.run("decide", "--trigger=manual", f"--job={job}",
                       f"--target={branch}", f"--source={branch}",
-                      f"--base={head}", f"--head={head}", "--json")
+                      f"--base={head}", f"--head={head}", "--json", env=env)
     assert result.returncode == 0, result.stderr
     data = json.loads(result.stdout)
     return data, {j["name"]: j for j in data["jobs"]}
@@ -583,7 +588,8 @@ def test_manual_refusal_outputs_need_no_job(repo, tmp_path):
     out = tmp_path / "out"
     result = repo.run("decide", "--trigger=manual", "--job=lint",
                       "--target=main", "--source=main", f"--base={head}",
-                      f"--head={head}", env={"GITHUB_OUTPUT": str(out)})
+                      f"--head={head}",
+                      env={"GITHUB_OUTPUT": str(out), **ADMIN})
     assert result.returncode == 0
     assert "refused: job lint cannot be run by hand" in result.stdout
     outputs = dict(line.split("=", 1) for line in out.read_text().splitlines())
@@ -628,7 +634,9 @@ INPUT_JOBS = {
 
 def decide_inputs(repo, form, job="release"):
     head = repo.git("rev-parse", "HEAD")
-    env = {} if form is None else {"CICD_MANUAL_FORM": form}
+    env = dict(ADMIN)
+    if form is not None:
+        env["CICD_MANUAL_FORM"] = form
     result = repo.run("decide", "--trigger=manual", f"--job={job}",
                       "--target=main", "--source=main", f"--base={head}",
                       f"--head={head}", "--json", env=env)
@@ -661,7 +669,7 @@ def test_manual_fields_of_other_jobs_are_ignored_and_noted(repo):
     head = repo.git("rev-parse", "HEAD")
     text = repo.run("decide", "--trigger=manual", "--job=release",
                     "--target=main", "--source=main", f"--base={head}",
-                    f"--head={head}", env={"CICD_MANUAL_FORM": json.dumps(
+                    f"--head={head}", env={**ADMIN, "CICD_MANUAL_FORM": json.dumps(
                         {"note": "x", "vendor": "v"})}).stdout
     assert "  ignored input vendor (job release does not declare it)\n" in text
 
@@ -950,3 +958,130 @@ def test_run_job_maps_a_row_name_to_its_job(repo):
                       f"--head={head}")
     assert result.returncode == 2
     assert "unknown job 'Ship It / x:release'" in result.stderr
+
+
+# ── manual: who may start a run (manual_role) ───────────────────────────────
+
+def role_env(role, actor="octo"):
+    env = {"CICD_ACTOR_ROLE": role}
+    if actor is not None:
+        env["CICD_ACTOR"] = actor
+    return env
+
+
+def test_manual_role_admin_runs_by_default(repo):
+    setup_repo(repo, jobs=MANUAL_JOBS)
+    data, jobs = decide_manual(repo, "release", env=role_env("admin"))
+    assert data["refused"] is None and jobs["release"]["needed"] is True
+
+
+@pytest.mark.parametrize("role,reason", [
+    ("write", 'octo has role write; a manual run needs role admin '
+              '("manual_role": "admin")'),
+    ("read", 'octo has role read; a manual run needs role admin '
+             '("manual_role": "admin")'),
+    ("", 'the role of octo could not be read; a manual run needs role admin '
+         '("manual_role": "admin")'),
+    ("maintain", "octo has the unknown role 'maintain'; a manual run needs "
+                 'role admin ("manual_role": "admin")'),
+    ("ADMIN", "octo has the unknown role 'ADMIN'; a manual run needs "
+              'role admin ("manual_role": "admin")'),
+])
+def test_manual_role_below_admin_is_refused_by_default(repo, role, reason):
+    setup_repo(repo, jobs=MANUAL_JOBS)
+    data, jobs = decide_manual(repo, "release", env=role_env(role))
+    assert data["refused"] == reason
+    assert jobs["release"]["needed"] is False
+    assert jobs["release"]["reason"] == reason
+    assert not any(j["needed"] for j in data["jobs"])
+
+
+def test_manual_without_a_role_is_refused(repo):
+    """Fail closed: a decide that is given no role at all (the variable is
+    unset, as on a laptop) is refused like an empty one."""
+    setup_repo(repo, jobs=MANUAL_JOBS)
+    data, _ = decide_manual(repo, "release", env={})
+    assert data["refused"] == (
+        "the role of the person who started the run could not be read; "
+        'a manual run needs role admin ("manual_role": "admin")')
+
+
+def test_manual_role_refusal_comes_before_the_job(repo):
+    """Someone below the role learns nothing about the jobs."""
+    setup_repo(repo, jobs=MANUAL_JOBS)
+    data, _ = decide_manual(repo, "nope", env=role_env("write"))
+    assert data["refused"].startswith("octo has role write;")
+
+
+@pytest.mark.parametrize("role", ["admin", "write"])
+def test_manual_role_write_lets_writers_run(repo, role):
+    setup_repo(repo, jobs=MANUAL_JOBS, manual_role="write")
+    data, jobs = decide_manual(repo, "release", env=role_env(role))
+    assert data["refused"] is None and jobs["release"]["needed"] is True
+
+
+@pytest.mark.parametrize("role,reason", [
+    ("read", 'octo has role read; a manual run needs role write '
+             '("manual_role": "write")'),
+    ("", 'the role of octo could not be read; a manual run needs role write '
+         '("manual_role": "write")'),
+    ("none", "octo has the unknown role 'none'; a manual run needs role "
+             'write ("manual_role": "write")'),
+])
+def test_manual_role_write_still_refuses_below_write(repo, role, reason):
+    setup_repo(repo, jobs=MANUAL_JOBS, manual_role="write")
+    data, _ = decide_manual(repo, "release", env=role_env(role))
+    assert data["refused"] == reason
+
+
+@pytest.mark.parametrize("actor,shown", [
+    ("dependabot[bot]", "dependabot[bot] has role read"),
+    ("a b; $(id)", "'a b; $(id)' has role read"),
+    (None, "the person who started the run has role read"),
+])
+def test_manual_role_refusal_names_the_person(repo, actor, shown):
+    setup_repo(repo, jobs=MANUAL_JOBS)
+    data, _ = decide_manual(repo, "release", env=role_env("read", actor))
+    assert data["refused"].startswith(shown + ";"), data["refused"]
+
+
+def test_manual_role_refusal_is_reported_failed(repo, tmp_path):
+    """decide records the reason, needs no job, and the report is FAILED
+    with it."""
+    setup_repo(repo, jobs=MANUAL_JOBS)
+    repo.install_tool()
+    assert repo.run("generate").returncode == 0
+    head = repo.git("rev-parse", "HEAD")
+    out = tmp_path / "out"
+    decisions = tmp_path / "decisions.json"
+    result = repo.run("decide", "--trigger=manual", "--job=release",
+                      "--target=main", "--source=main", f"--base={head}",
+                      f"--head={head}", "--json",
+                      env={"GITHUB_OUTPUT": str(out), **role_env("write")})
+    assert result.returncode == 0, result.stderr
+    decisions.write_text(result.stdout)
+    values = dict(line.split("=", 1)
+                  for line in out.read_text().splitlines())
+    assert values["jobs"] == '["(nothing)"]' and values["any"] == "false"
+    verdict = tmp_path / "verdict.txt"
+    result = repo.run("report", "--trigger=manual",
+                      f"--decisions={decisions}",
+                      f"--results={tmp_path / 'none'}",
+                      f"--verdict-out={verdict}")
+    reason = ('octo has role write; a manual run needs role admin '
+              '("manual_role": "admin")')
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == f"FAILED - {reason}"
+    assert verdict.read_text().splitlines() == ["failure", f"FAILED - {reason}"]
+
+
+def test_run_job_manual_is_not_asked_for_a_role(repo):
+    """run-job --trigger=manual (a laptop, or the run job after decide) does
+    not check the role."""
+    setup_repo(repo, jobs=MANUAL_JOBS)
+    head = repo.git("rev-parse", "HEAD")
+    for env in ({}, role_env("read")):
+        result = repo.run("run-job", "release", "--trigger=manual",
+                          "--target=main", "--source=main", f"--base={head}",
+                          f"--head={head}", env=env)
+        assert result.returncode == 0, result.stderr
