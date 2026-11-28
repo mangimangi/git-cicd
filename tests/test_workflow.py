@@ -1,5 +1,6 @@
 """Tests for generating and verifying the GitHub Actions workflows."""
 
+import json
 import re
 
 import pytest
@@ -240,12 +241,18 @@ def test_non_cron_differences_generate_identical_files(tool_repo):
     b_config = {"jobs": {
         "other": {"on": ["open", "merge"], "branches": ["plan/**", "main"],
                   "paths": ["lib/**"], "steps": [["ci/other.sh", "-x"]],
-                  "blocking": False, "manual": False},
+                  "blocking": False, "name": "Something Else"},
+        "release": {"on": [], "branches": ["main"], "steps": ["ci/bump.sh"]},
     }, "needs_nothing": [".pearls/**", "*.md"], "max_parallel": 7}
     generate(tool_repo, b_config)
-    assert generated_files(tool_repo) == files_a
+    files_b = generated_files(tool_repo)
     assert sorted(files_a) == ["git-cicd-manual.yml", "git-cicd-merge.yml",
                                "git-cicd-open.yml"]
+    assert files_b["git-cicd-open.yml"] == files_a["git-cicd-open.yml"]
+    assert files_b["git-cicd-merge.yml"] == files_a["git-cicd-merge.yml"]
+    # the Manual form lists the manual jobs: both configs have two
+    assert files_b["git-cicd-manual.yml"] == files_a[
+        "git-cicd-manual.yml"].replace('- "test"', '- "other"')
 
 
 def test_cron_jobs_do_not_change_the_open_file(tool_repo):
@@ -622,9 +629,11 @@ def test_manual_file_is_written_with_the_dispatch_and_job_input(tool_repo):
     assert text.startswith(f"# {MANUAL} - GENERATED")
     assert "\nname: Manual\n" in text
     on = text.split("\non:\n", 1)[1].split("\npermissions:")[0]
-    assert on.startswith("  workflow_dispatch:\n    inputs:\n      job:\n")
-    assert "        required: true\n        type: string\n" in on
-    assert "config job to run" in on
+    assert on.startswith(
+        '  workflow_dispatch:\n    inputs:\n      job:\n'
+        '        description: "The config job to run"\n'
+        '        required: true\n        type: choice\n        options:\n'
+        '          - "test"\n          - "release"\n')
     assert "push" not in on and "schedule" not in on
     assert "JOB: ${{ inputs.job }}" in text
     assert (f'python3 {TOOL} decide --trigger=manual --job="$JOB"') in text
@@ -697,26 +706,199 @@ def test_manual_file_carries_inputs_as_json_through_env(tool_repo):
         assert "${{" not in block and "CICD_MANUAL_INPUTS" not in block
 
 
-def test_declared_inputs_do_not_change_the_files(tool_repo):
+def test_declared_inputs_change_only_the_manual_form(tool_repo):
     generate(tool_repo, base_config())
     files_a = generated_files(tool_repo)
     config = base_config()
     config["jobs"]["release"]["inputs"] = {
         "bump_type": {"choices": ["patch", "minor"], "default": "patch"}}
     generate(tool_repo, config)
-    assert generated_files(tool_repo) == files_a
+    files_b = generated_files(tool_repo)
+    assert sorted(files_b) == sorted(files_a)
+    for name in files_a:
+        if name != "git-cicd-manual.yml":
+            assert files_b[name] == files_a[name], name
+    field = ('      bump_type:\n'
+             '        description: "(job release)"\n'
+             '        required: false\n        default: "patch"\n'
+             '        type: choice\n        options:\n'
+             '          - "patch"\n          - "minor"\n')
+    a, b = files_a["git-cicd-manual.yml"], files_b["git-cicd-manual.yml"]
+    assert b.count(field) == 1
+    assert b.replace(field, "", 1) == a
+
+
+FORM_CONFIG = {"jobs": {
+    "release": {"on": ["merge"], "branches": ["main"], "steps": ["ci/bump.sh"],
+                "inputs": {
+                    "bump_type": {"description": "Version bump type",
+                                  "choices": ["patch", "minor", "major"],
+                                  "default": "patch"},
+                    "dry_run": {"description": "Only say what would happen",
+                                "choices": ["true", "false"],
+                                "default": "false"},
+                    "note": {"description": "A note"}}},
+    "test": {"on": ["open"], "branches": ["**"], "steps": ["ci/test.sh"],
+             "manual": False,
+             "inputs": {"only": {"description": "Not in the form"},
+                        "job": {}}},
+    "update": {"on": [], "branches": ["main"], "steps": ["ci/other.sh"],
+               "inputs": {
+                   "dry_run": {"description": "Ignored: release's is shown",
+                               "choices": ["true", "false"],
+                               "default": "false"},
+                   "vendor": {"default": "all"},
+                   "token": {"required": True}}},
+}}
+
+FORM = (
+    '      job:\n'
+    '        description: "The config job to run"\n'
+    '        required: true\n'
+    '        type: choice\n'
+    '        options:\n'
+    '          - "release"\n'
+    '          - "update"\n'
+    '      bump_type:\n'
+    '        description: "Version bump type (job release)"\n'
+    '        required: false\n'
+    '        default: "patch"\n'
+    '        type: choice\n'
+    '        options:\n'
+    '          - "patch"\n'
+    '          - "minor"\n'
+    '          - "major"\n'
+    '      dry_run:\n'
+    '        description: "Only say what would happen"\n'
+    '        required: false\n'
+    '        default: "false"\n'
+    '        type: choice\n'
+    '        options:\n'
+    '          - "true"\n'
+    '          - "false"\n'
+    '      note:\n'
+    '        description: "A note (job release)"\n'
+    '        required: false\n'
+    '        type: string\n'
+    '      vendor:\n'
+    '        description: "(job update)"\n'
+    '        required: false\n'
+    '        default: "all"\n'
+    '        type: string\n'
+    '      token:\n'
+    '        description: "(job update)"\n'
+    '        required: false\n'
+    '        type: string\n')
+
+
+def test_manual_form_lists_manual_jobs_and_their_inputs(tool_repo):
+    generate(tool_repo, FORM_CONFIG)
+    text = (tool_repo.path / MANUAL).read_text()
+    on = text.split("\non:\n", 1)[1].split("\npermissions:")[0]
+    assert on.startswith("  workflow_dispatch:\n    inputs:\n" + FORM)
+    assert "only" not in on and '- "test"' not in on
+    assert tool_repo.run("verify").returncode == 0
+
+
+def test_manual_form_names_every_job_of_a_shared_input(tool_repo):
+    def job(inputs):
+        return {"on": [], "branches": ["main"], "steps": ["ci/test.sh"],
+                "inputs": inputs}
+    config = {"jobs": {"a": job({"shared": {"description": "S"}, "a": {}}),
+                       "b": job({"shared": {"description": "S"}, "b": {}}),
+                       "c": job({})}}
+    tool_repo.config(config)
+    form = git_cicd.form_block(git_cicd.load_config(str(tool_repo.path)))
+    assert '      shared:\n        description: "S (jobs a, b)"\n' in form
+    assert '      a:\n        description: "(job a)"\n' in form
+    del config["jobs"]["c"]
+    tool_repo.config(config)
+    form = git_cicd.form_block(git_cicd.load_config(str(tool_repo.path)))
+    assert '      shared:\n        description: "S"\n' in form
+
+
+def test_no_manual_job_no_manual_file(tool_repo):
+    generate(tool_repo, base_config())
+    assert (tool_repo.path / MANUAL).exists()
+    config = base_config()
+    for job in config["jobs"].values():
+        job["manual"] = False
+    tool_repo.config(config)
+    result = tool_repo.run("verify")
+    assert result.returncode == 1
+    assert (f"{MANUAL} is still there, but no job allows manual runs "
+            "(generate removes it)") in result.stdout
+    assert f"run: {TOOL} generate and commit" in result.stdout
+    assert f"and the removal of {MANUAL}" in result.stdout
+    result = tool_repo.run("generate")
+    assert result.returncode == 0
+    assert f"removed {MANUAL} (no job allows manual runs" in result.stdout
+    assert not (tool_repo.path / MANUAL).exists()
+    assert tool_repo.run("verify").returncode == 0
+    assert sorted(generated_files(tool_repo)) == ["git-cicd-merge.yml",
+                                                  "git-cicd-open.yml"]
+
+
+@pytest.mark.parametrize("change", ["add", "change", "new_job", "not_manual"])
+def test_verify_fails_until_the_form_is_regenerated(tool_repo, change):
+    generate(tool_repo, FORM_CONFIG)
+    config = json.loads(json.dumps(FORM_CONFIG))
+    if change == "add":
+        config["jobs"]["release"]["inputs"]["extra"] = {}
+    elif change == "change":
+        config["jobs"]["release"]["inputs"]["bump_type"]["default"] = "minor"
+    elif change == "new_job":
+        config["jobs"]["another"] = {"on": [], "branches": ["main"],
+                                     "steps": ["ci/test.sh"]}
+    else:
+        config["jobs"]["update"]["manual"] = False
+    tool_repo.config(config)
+    result = tool_repo.run("verify")
+    assert result.returncode == 1
+    assert f"{MANUAL} (committed)" in result.stdout
+    assert f"run: {TOOL} generate and commit {WORKFLOW}" in result.stdout
+    assert tool_repo.run("generate").returncode == 0
+    assert tool_repo.run("verify").returncode == 0
+
+
+def test_open_merge_cron_ignore_inputs_and_manual_flags(tool_repo):
+    """Only the manual template holds the form: the open, merge and cron
+    files are what their templates give, whatever the inputs and flags, and
+    this repository's committed copies are what the templates give."""
+    config = json.loads(json.dumps(FORM_CONFIG))
+    config["jobs"]["nightly"] = {"on": ["cron"], "branches": ["main"],
+                                 "cron": "0 3 * * *", "steps": ["ci/test.sh"]}
+    tool_repo.config(config)
+    loaded = git_cicd.load_config(str(tool_repo.path))
+    bare = git_cicd.load_config(str(tool_repo.path))
+    for job in bare["jobs"].values():
+        job["inputs"] = {}
+        job["manual"] = False
+    own = git_cicd.load_config(str(ROOT))
+    for trigger in ("open", "merge", "cron"):
+        template = (TEMPLATES / f"{trigger}.yml").read_text()
+        assert "__FORM__" not in template
+        assert git_cicd.render_workflow(loaded, TOOL, template) == \
+            git_cicd.render_workflow(bare, TOOL, template), trigger
+        path = git_cicd.WORKFLOWS[trigger][1]
+        assert git_cicd.render_workflow(own, "git-cicd", template) == \
+            (ROOT / path).read_text(), path
 
 
 # ── cron: the Cron workflow ─────────────────────────────────────────────────
 
 def cron_config():
+    # not run by hand, so the Manual form is base_config()'s
     config = base_config()
     config["jobs"]["nightly"] = {"on": ["cron"], "branches": ["main", "dev"],
-                                 "cron": "0 3 * * *", "steps": ["ci/test.sh"]}
+                                 "cron": "0 3 * * *", "steps": ["ci/test.sh"],
+                                 "manual": False}
     config["jobs"]["weekly"] = {"on": ["cron", "open"], "branches": ["main"],
-                                "cron": "0 9 * * 1", "steps": ["ci/test.sh"]}
+                                "cron": "0 9 * * 1", "steps": ["ci/test.sh"],
+                                "manual": False}
     config["jobs"]["again"] = {"on": ["cron"], "branches": ["dev"],
-                               "cron": "0 3 * * *", "steps": ["ci/other.sh"]}
+                               "cron": "0 3 * * *", "steps": ["ci/other.sh"],
+                               "manual": False}
     return config
 
 
@@ -893,3 +1075,11 @@ def test_run_job_is_never_skipped_and_skips_the_placeholder(tool_repo, path,
     assert (f"    name: ${{{{ fromJSON(needs.decide.outputs.names)[{entry}] }}}}"
             f" / ${{{{ github.event.repository.name }}}}:${{{{ {entry} }}}}\n") \
         in run
+
+
+def test_form_block_is_empty_without_manual_jobs():
+    config = {"jobs": {"t": {"manual": False, "inputs": {}, "on": ["open"],
+                             "cron": None}}}
+    assert git_cicd.form_block(config) == ""
+    assert git_cicd.rendered_triggers(config) == ["open", "merge"]
+    assert git_cicd.stale_triggers(config) == ["cron", "manual"]

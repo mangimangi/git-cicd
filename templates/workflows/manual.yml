@@ -11,26 +11,32 @@
 #   manual  Manual  .github/workflows/git-cicd-manual.yml  (generated)
 #
 # Every generated file is fixed text except the cron workflow's schedule
-# block; this file does not vary with the config at all, only with the
-# git-cicd version (and the tool path, which is where git-cicd is installed).
-# Whoever upgrades git-cicd, or changes the config, runs
+# block and this workflow's form (the `inputs:` of its `workflow_dispatch`),
+# which git-cicd writes from the config; the rest of this file varies only
+# with the git-cicd version (and the tool path, which is where git-cicd is
+# installed). Whoever upgrades git-cicd, or changes the config (a job's
+# inputs, a job added or removed, its `manual` flag), runs
 #   __TOOL__ generate
 # and commits what it writes in the same pull request. CI regenerates the
-# files, compares them whole and fails the verdict when they differ.
+# files, compares them whole and fails the verdict when they differ. When no
+# job allows manual runs this file is not generated (generate removes it).
 #
-# Event: `workflow_dispatch` with two free-text inputs, as fixed text: `job`,
-# the config job to run on the branch the run is started on, and `inputs`,
-# the values of the job's declared inputs as one JSON object of strings
-# (empty for none). Both reach the tool only as environment variables
-# (`inputs` as CICD_MANUAL_INPUTS, which the tool reads and removes from the
-# scripts' environment); a script gets each declared input as
-# CICD_INPUT_<NAME>. The file cannot list a job's inputs, since it does not
-# vary with the config. The job runs when it exists, does not say
-# `"manual": false` and its `branches` match the branch; `paths` is ignored.
-# Anything else is refused, as are inputs that are not a JSON object of
-# strings, an undeclared input, a missing required one or a value outside
-# its choices: decide records the reason, needs no job, and the report is
-# FAILED with that reason.
+# Event: `workflow_dispatch` with a form generated from the config: `job`, a
+# dropdown of the jobs that allow manual runs, in config order, run on the
+# branch the run is started on; then one named field per distinct declared
+# input of those jobs (its description, default and, for choices, a
+# dropdown), shared by jobs declaring the same name; and `inputs`, the values
+# of the job's declared inputs as one JSON object of strings (empty for
+# none). The input fields are optional in the form, since it shows every
+# job's fields; the tool enforces `required` for the chosen job. Values reach
+# the tool only as environment variables (`inputs` as CICD_MANUAL_INPUTS,
+# which the tool reads and removes from the scripts' environment); a script
+# gets each declared input as CICD_INPUT_<NAME>. The job runs when it exists,
+# does not say `"manual": false` and its `branches` match the branch;
+# `paths` is ignored. Anything else is refused, as are inputs that are not a
+# JSON object of strings, an undeclared input, a missing required one or a
+# value outside its choices: decide records the reason, needs no job, and
+# the report is FAILED with that reason.
 #
 # Permissions: `contents: read` at the top level. The job that runs the
 # config's scripts gets `contents: write` and `pull-requests: write` (a
@@ -74,10 +80,7 @@ name: Manual
 on:
   workflow_dispatch:
     inputs:
-      job:
-        description: 'The config job to run (a job name in .vendored/configs/git-cicd.json)'
-        required: true
-        type: string
+__FORM__
       inputs:
         description: 'The job''s declared inputs as a JSON object of strings, for example {"bump_type": "minor"} (empty for none)'
         required: false

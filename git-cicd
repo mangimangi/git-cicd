@@ -74,6 +74,16 @@ INPUT_ENV_PREFIX = "CICD_INPUT_"
 # workflow from its fixed `inputs` field. Read by the tool, never passed on.
 MANUAL_INPUTS_ENV = "CICD_MANUAL_INPUTS"
 GLOB_CHARS = ("*", "?", "[")
+# The most inputs a workflow_dispatch workflow may have, the Manual form's
+# `job` field included (so at most MANUAL_FORM_LIMIT - 1 input fields).
+# Source: GitHub changelog 2025-12-04, "Actions workflow_dispatch workflows
+# now support 25 inputs"
+# (https://github.blog/changelog/2025-12-04-actions-workflow-dispatch-workflows-now-support-25-inputs/),
+# re-checked 2026-11-28; the limit was 10 before.
+MANUAL_FORM_LIMIT = 25
+# Input names a job that allows manual runs cannot declare: the Manual form's
+# own fields.
+MANUAL_FORM_RESERVED = ("job", "inputs")
 
 
 class ConfigError(Exception):
@@ -509,6 +519,8 @@ def validate_config(data, root):
         errors.append("config: max_parallel must be a positive integer")
         max_parallel = DEFAULT_MAX_PARALLEL
 
+    errors.extend(_validate_manual_form(jobs))
+
     if errors:
         raise ConfigError(errors)
     return {
@@ -516,6 +528,72 @@ def validate_config(data, root):
         "needs_nothing": list(needs_nothing),
         "max_parallel": max_parallel,
     }
+
+
+def _form_default(decl):
+    """The value a declaration gives the script when the form leaves it
+    alone: an absent default and "" are the same."""
+    return decl["default"] or ""
+
+
+def manual_form_fields(jobs):
+    """The input fields of the Manual workflow's form: [(input name,
+    declaration of the first job declaring it, [job names using it])], in
+    first-seen order over the jobs that allow manual runs."""
+    fields = {}
+    for name, job in jobs.items():
+        if not job["manual"]:
+            continue
+        for key, decl in (job.get("inputs") or {}).items():
+            if key in fields:
+                fields[key][1].append(name)
+            else:
+                fields[key] = (decl, [name])
+    return [(key, decl, users) for key, (decl, users) in fields.items()]
+
+
+def _validate_manual_form(jobs):
+    """The Manual workflow's form shows every manual job's inputs at once:
+    one field per input name, so declarations of one name must be able to
+    share a field, none may be named like the form's own fields, and the form
+    must fit the platform's limit."""
+    errors = []
+    manual = {n: j for n, j in jobs.items() if j["manual"]}
+    for name, job in manual.items():
+        for key in job.get("inputs") or {}:
+            if key in MANUAL_FORM_RESERVED:
+                errors.append(f"job {name}: input {key}: the name {key} is "
+                              "reserved for the Manual workflow's own field; "
+                              "rename the input, or set \"manual\": false on "
+                              "the job")
+    first = {}
+    for name, job in manual.items():
+        for key, decl in (job.get("inputs") or {}).items():
+            if key not in first:
+                first[key] = (name, decl)
+                continue
+            other, seen = first[key]
+            what = []
+            if seen["choices"] != decl["choices"]:
+                what.append("choices")
+            if _form_default(seen) != _form_default(decl):
+                what.append("defaults")
+            if what:
+                errors.append(f"input {key} is declared by jobs {other} and "
+                              f"{name} with different {' and '.join(what)}; "
+                              "the Manual workflow's form shows one field per "
+                              "input name: give them the same choices and "
+                              "default, or rename one")
+    count = len(first) + 1
+    if count > MANUAL_FORM_LIMIT:
+        errors.append(f"config: the Manual workflow's form would have "
+                      f"{count} fields (job and {len(first)} distinct input "
+                      f"names); GitHub allows at most {MANUAL_FORM_LIMIT} "
+                      f"inputs in a manually started workflow, so at most "
+                      f"{MANUAL_FORM_LIMIT - 1} distinct input names: use "
+                      "fewer distinct input names, or set \"manual\": false "
+                      "on a job")
+    return errors
 
 
 def load_config(root, path=None):
@@ -1008,12 +1086,59 @@ def schedule_block(config):
     return "\n".join(lines) + "\n"
 
 
+def manual_job_names(config):
+    return [n for n, j in config["jobs"].items() if j["manual"]]
+
+
+def _used_by(users):
+    return f"(job{'s' if len(users) > 1 else ''} {', '.join(users)})"
+
+
+def form_block(config):
+    """The Manual workflow's form, the `inputs:` entries of its
+    `workflow_dispatch`: `job`, a dropdown of the jobs that allow manual runs
+    in config order, then one field per distinct declared input of those
+    jobs, in first-seen order. Every field but `job` is optional in the form,
+    since the form shows every job's fields; the tool enforces `required` for
+    the chosen job. Names are validated identifiers, written bare; every
+    description, default and option is written with json.dumps (a JSON
+    string is a YAML double-quoted scalar), so it cannot leave its place."""
+    names = manual_job_names(config)
+    if not names:
+        return ""
+    lines = ["      job:",
+             f"        description: {json.dumps('The config job to run')}",
+             "        required: true",
+             "        type: choice",
+             "        options:"]
+    lines += [f"          - {json.dumps(n)}" for n in names]
+    for key, decl, users in manual_form_fields(config["jobs"]):
+        description = decl["description"]
+        if len(users) < len(names):
+            description = " ".join(p for p in (description, _used_by(users))
+                                   if p)
+        lines += [f"      {key}:",
+                  f"        description: {json.dumps(description)}",
+                  "        required: false"]
+        if _form_default(decl):
+            lines.append(f"        default: {json.dumps(_form_default(decl))}")
+        if decl["choices"] is not None:
+            lines += ["        type: choice", "        options:"]
+            lines += [f"          - {json.dumps(c)}" for c in decl["choices"]]
+        else:
+            lines.append("        type: string")
+    return "\n".join(lines) + "\n"
+
+
 def render_workflow(config, tool, template):
     """One workflow file from its template, deterministic byte for byte. A
-    template is fixed text; the only part that depends on the config is the
-    schedule block, which only the cron template holds (`__SCHEDULE__`). The
-    tool path depends on where the tool is installed."""
+    template is fixed text; the only parts that depend on the config are the
+    schedule block, which only the cron template holds (`__SCHEDULE__`), and
+    the form, which only the manual template holds (`__FORM__`). The tool
+    path depends on where the tool is installed."""
     text = template.replace("__SCHEDULE__\n", schedule_block(config))
+    if "__FORM__\n" in template:
+        text = text.replace("__FORM__\n", form_block(config))
     return text.replace("__TOOL__", tool)
 
 
@@ -1021,18 +1146,33 @@ def has_cron_jobs(config):
     return bool(schedule_block(config))
 
 
+def has_manual_jobs(config):
+    return bool(manual_job_names(config))
+
+
+# Why a trigger's workflow is not generated, for generate and verify.
+NOT_GENERATED = {
+    "cron": "no job has cron in on",
+    "manual": "no job allows manual runs",
+}
+
+
 def rendered_triggers(config):
     """The triggers whose workflow the config generates: every one, except
     cron when no job has cron in on (GitHub needs an event under on:, and a
-    schedule must never fire with nothing to run)."""
+    schedule must never fire with nothing to run), and manual when no job
+    allows manual runs (the form's `job` dropdown needs an option, and a
+    workflow with nothing to run must not exist)."""
+    present = {"cron": has_cron_jobs(config),
+               "manual": has_manual_jobs(config)}
+    return [t for t in GENERATED_TRIGGERS if present.get(t, True)]
+
+
+def stale_triggers(config):
+    """The triggers whose workflow the config no longer generates (generate
+    removes their files, verify fails while one is there): cron when no job
+    has cron in on, manual when no job allows manual runs."""
     return [t for t in GENERATED_TRIGGERS
-            if t != "cron" or has_cron_jobs(config)]
-
-
-def stale_paths(config):
-    """Generated files the config no longer generates: the cron workflow when
-    no job has cron in on."""
-    return [WORKFLOWS[t][1] for t in GENERATED_TRIGGERS
             if t not in rendered_triggers(config)]
 
 
@@ -1083,10 +1223,12 @@ def verify_workflow(config, root, tool=None):
                 tofile=f"{rel} (generated from the config)")))
     commit = ", ".join(render_workflows(config, tool))
     removals = []
-    for rel in stale_paths(config):
+    for trigger in stale_triggers(config):
+        rel = WORKFLOWS[trigger][1]
         if os.path.lexists(os.path.join(root, rel)):
-            problems.append(f"{rel} is still there, but no job has cron in "
-                            "on (generate removes it)\n")
+            problems.append(f"{rel} is still there, but "
+                            f"{NOT_GENERATED[trigger]} (generate removes "
+                            "it)\n")
             removals.append(rel)
     if os.path.lexists(os.path.join(root, LEGACY_WORKFLOW_PATH)):
         problems.append(f"{LEGACY_WORKFLOW_PATH} is still there (the single "
@@ -1682,10 +1824,11 @@ def cmd_generate(args, root):
         with open(path, "w", encoding="utf-8", newline="") as f:
             f.write(text)
         print(f"wrote {rel}")
-    for rel in stale_paths(config):
+    for trigger in stale_triggers(config):
+        rel = WORKFLOWS[trigger][1]
         if os.path.lexists(os.path.join(root, rel)):
             os.remove(os.path.join(root, rel))
-            print(f"removed {rel} (no job has cron in on; commit the "
+            print(f"removed {rel} ({NOT_GENERATED[trigger]}; commit the "
                   "removal)")
     legacy = os.path.join(root, LEGACY_WORKFLOW_PATH)
     if os.path.lexists(legacy):
