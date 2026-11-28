@@ -643,3 +643,33 @@ def test_duplicate_secret_refused(scripts):
     refused(scripts, {"jobs": {"t": job(
         secrets=["CICD_READ_TOKEN", "CICD_READ_TOKEN"])}},
         "job t: secret CICD_READ_TOKEN listed more than once in secrets")
+
+
+def test_expressions_are_refused_in_a_manual_jobs_name(scripts):
+    refused(scripts, {"jobs": {"t": job(name="Run ${{ github.token }}")}},
+            "job t: the name contains ${{, which GitHub would evaluate in "
+            "the Manual workflow's job dropdown", '"manual": false')
+    scripts.config({"jobs": {"t": job(name="Run ${{ x }}", manual=False)}})
+    assert scripts.run("validate").returncode == 0
+
+
+# ── repository ──────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("value", ["git-cicd", "a.b_c-9", "X"])
+def test_repository_names_are_accepted(scripts, value):
+    scripts.config({"jobs": {"t": job()}, "repository": value})
+    assert scripts.run("validate").returncode == 0
+    config = git_cicd.load_config(str(scripts.path))
+    assert config["repository"] == value
+
+
+def test_repository_defaults_to_none(scripts):
+    scripts.config({"jobs": {"t": job()}})
+    assert git_cicd.load_config(str(scripts.path))["repository"] is None
+
+
+@pytest.mark.parametrize("value", ["", "owner/name", "a b", "${{ x }}", ".",
+                                   "..", 7, None, ["x"], "ü"])
+def test_repository_must_be_a_name(scripts, value):
+    refused(scripts, {"jobs": {"t": job()}, "repository": value},
+            "config: repository must be the repository's name")

@@ -453,8 +453,14 @@ def owned_decision():
                       "reason": "r", "blocking": True}], "max_parallel": 3}
 
 
+def as_medici(repo):
+    """Name the repository medici the way every machine sees it: its origin
+    remote (repo_name reads no environment variable)."""
+    repo.git("remote", "add", "origin", "git@github.com:someone/medici.git")
+
+
 def owned_report(repo, monkeypatch):
-    monkeypatch.setenv("GITHUB_REPOSITORY", "someone/medici")
+    as_medici(repo)
     config = git_cicd.load_config(str(repo.path))
     return run_report(config, repo, owned_decision(),
                       {"unit": owned_result()})[2]
@@ -501,7 +507,7 @@ def test_header_gives_the_short_head_commit(owned, monkeypatch):
 
 def test_header_resolves_head_in_the_repository(owned, monkeypatch):
     sha = owned.commit("c")
-    monkeypatch.setenv("GITHUB_REPOSITORY", "someone/medici")
+    as_medici(owned)
     config = git_cicd.load_config(str(owned.path))
     dec = owned_decision()
     dec["head"] = sha
@@ -513,7 +519,7 @@ def test_header_resolves_head_in_the_repository(owned, monkeypatch):
 
 def test_verdict_description_has_no_step_lines(owned, monkeypatch):
     owned.write("VERSION", "0.3.0\n")
-    monkeypatch.setenv("GITHUB_REPOSITORY", "someone/medici")
+    as_medici(owned)
     config = git_cicd.load_config(str(owned.path))
     _, verdict, _ = run_report(config, owned, owned_decision(),
                                {"unit": owned_result()})
@@ -523,16 +529,24 @@ def test_verdict_description_has_no_step_lines(owned, monkeypatch):
 
 def test_repo_name_sources(repo, monkeypatch):
     root = str(repo.path)
+    # no environment variable decides the name, not even in Actions
     monkeypatch.setenv("GITHUB_REPOSITORY", "owner/from-actions")
-    assert git_cicd.repo_name(root) == "from-actions"
-    monkeypatch.delenv("GITHUB_REPOSITORY")
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
     # no origin remote: the checkout's top-level directory
-    assert git_cicd.repo_name(root) == repo.path.name
+    assert git_cicd.repo_identity(root) == (
+        repo.path.name, "the checkout's directory name")
     repo.git("remote", "add", "origin", "git@github.com:someone/medici.git")
-    assert git_cicd.repo_name(root) == "medici"
+    assert git_cicd.repo_identity(root) == ("medici",
+                                            "the origin remote's URL")
     repo.git("remote", "set-url", "origin",
              "https://github.com/someone/other-repo")
     assert git_cicd.repo_name(root) == "other-repo"
+    # the config's repository wins over both
+    config = {"jobs": {}, "repository": "chosen"}
+    assert git_cicd.repo_identity(root, config) == (
+        "chosen", "the config's repository")
+    assert git_cicd.repo_name(root, {"jobs": {}, "repository": None}) == \
+        "other-repo"
 
 
 def test_markdown_shows_names_literally(owned, monkeypatch, tmp_path):
@@ -564,7 +578,7 @@ def test_rows_and_step_lines_title_case_default_and_written_name(
         "types": {"name": "mypy", "on": ["open"], "branches": ["**"],
                   "steps": ["ci/test.sh"]},
     }})
-    monkeypatch.setenv("GITHUB_REPOSITORY", "someone/medici")
+    as_medici(repo)
     config = git_cicd.load_config(str(repo.path))
     dec = {"trigger": "open", "target": "main", "source": "f", "base": "b",
            "head": "h", "changed_files": [], "max_parallel": 3,
@@ -754,7 +768,7 @@ def test_old_result_step_label_that_does_not_split_names_itself(
     result = owned_result()
     result["steps"] = [{"step": "ci/test.sh 'unbalanced", "seconds": 2.0,
                         "exit_code": 0, "error": None}]
-    monkeypatch.setenv("GITHUB_REPOSITORY", "someone/medici")
+    as_medici(owned)
     text = run_report(config, owned, owned_decision(), {"unit": result})[2]
     assert "Unit Tests / medici:unit:test.sh 'unbalanced  passed" in text
 
