@@ -841,29 +841,42 @@ Exit codes:
 
 git-cicd checks, releases and updates itself with itself. Its workflows run
 the root `./git-cicd`, so CI tests the code in the pull request. Its own
-config declares four jobs, one per trigger:
+config declares five jobs:
 
 | Job | Row | Trigger | Script | What |
 |---|---|---|---|---|
 | `test` | `Open / Unit Tests / git-cicd:test` | `open`, every branch, `paths` the code; not by hand (`"manual": false`) | `ci/setup.sh`, `ci/test.sh` | setup installs pytest, pytest-cov and coverage (7.10 or later) for the Python floor (`>=3.11` in `pyproject.toml`), and bats-core when `bats` is not on PATH; the step runs the pytest suite, prints the line coverage of `git-cicd` with its missing lines and fails below 99%, then runs the bats tests of `install.sh` and the `ci/` scripts (`tests/bats/`) |
 | `vendor-check` | `Open / Check Vendor Files / git-cicd:vendor-check` | `open`, every branch; not by hand (`"manual": false`) | `ci/vendor-check.sh` | `python3 .vendored/check --base "$CICD_BASE"`; it sets `GITHUB_HEAD_REF` from `CICD_SOURCE_BRANCH` when unset, so a local `check` lets `chore/install-*` branches through like Actions does |
-| `release` | `Merge / Release / git-cicd:release` | `merge` on `main`; by hand with the inputs `bump_type` (patch, minor, major; default patch), `subdirectory`, `changelog_description` | `ci/release.sh` | git-semver's `release`: `publish` when the landed commit's subject starts with `chore: bump version`, nothing for `chore: install`, otherwise `bump` (and `bump` on a manual run); it gives `release` `GITHUB_EVENT_NAME`, `GITHUB_EVENT_BEFORE`, `INPUT_BUMP_TYPE`, `INPUT_SUBDIRECTORY`, `INPUT_CHANGELOG_DESCRIPTION` and `GH_TOKEN` |
+| `version-check` | `Open / Version Check / git-cicd:version-check` | `open`, pull requests into `main`; not by hand (`"manual": false`) | `.vendored/pkg/git-semver/git-semver check-bump` | fails a pull request that changes a file in git-semver's `files` (`.vendored/configs/git-semver.json`) without raising `VERSION` above the base's |
+| `release` | `Merge / Release / git-cicd:release` | `merge` on `main`; by hand (no inputs) | `.vendored/pkg/git-semver/release` | git-semver's `release` with no subcommand; with `"bump_on": "pull_request"` it tags the landed commit with the version in `VERSION` when that version has no tag yet, pushes the tag and creates its GitHub release. It never bumps, commits or pushes to `main` |
 | `update-vendored` | `Cron / Install Vendored / git-cicd:update-vendored` | `cron` `0 9 * * 1` on `main`; by hand with the inputs `vendor` (default all), `version` (default latest), `private` (true or false; default false) | `ci/update-vendored.sh` | `python3 .vendored/install <vendor> --version <version> --pr --deps=install` (plus `--private`), with `GH_TOKEN` set to `VENDOR_PAT` when set, else `GITHUB_TOKEN`; only CI runs it |
 
-`release` has no `paths`, so a push that changes only `needs_nothing` files
-does not release, while a `chore: bump version` commit still publishes
-(`VERSION` is in no job's `paths` and not in `needs_nothing`). Start a
-release or an update by hand from the Actions tab: **Manual**, *Run
-workflow* on `main`, then pick the job in the `job` dropdown and fill its
-named fields: `release` with `bump_type` (a dropdown of patch, minor, major),
-`subdirectory` and `changelog_description`, or `update-vendored` with
-`vendor` (for example `mangimangi/git-semver`), `version` and `private` (a
-dropdown of true, false). Each field's description names the job that uses
-it; the other job's fields are ignored. From the command line:
-`gh workflow run git-cicd-manual.yml --ref main -f job=release -f bump_type=minor`.
-`test` and `vendor-check` run on pull requests and are not in the dropdown
-(`"manual": false`). A change to a job's inputs (or its `manual`) changes
-the Manual workflow: run `./git-cicd generate` and commit it with the change.
+**How a release happens.** git-cicd's version is raised in the pull request,
+not after the merge (`"bump_on": "pull_request"` in
+`.vendored/configs/git-semver.json`). A change to a file in git-semver's
+`files` (the tool, `install.sh` and the templates) raises the version in the
+same pull request: run `.vendored/pkg/git-semver/git-semver bump patch
+--no-push` (or `minor`, `major`; `--description "..."` sets the changelog
+entry) on the branch, which updates `VERSION` and `CHANGELOG.md` and commits
+them, and push that commit. `version-check` fails the pull request until the
+version is higher than `main`'s. Merging into `main` runs `release`, which
+tags the merged commit with that version (`vX.Y.Z`) and publishes its GitHub
+release; nothing is pushed to `main` and no `latest` tag is moved. A merge
+that leaves `VERSION` at a version already tagged releases nothing. Two pull
+requests that raise to the same version: the second merge is refused by
+`release` (nothing tagged); raise the version again in a new pull request.
+
+Run `release` by hand from the Actions tab (**Manual**, *Run workflow* on
+`main`, job `release`) to tag a merged version whose release did not run;
+it takes no fields. Start an update the same way with job `update-vendored`
+and its named fields: `vendor` (for example `mangimangi/git-semver`),
+`version` and `private` (a dropdown of true, false). Each field's
+description names the job that uses it. From the command line:
+`gh workflow run git-cicd-manual.yml --ref main -f job=update-vendored -f vendor=mangimangi/git-semver`.
+`test`, `version-check` and `vendor-check` run on pull requests and are not
+in the dropdown (`"manual": false`). A change to a job's inputs (or its
+`manual`) changes the Manual workflow: run `./git-cicd generate` and commit
+it with the change.
 
 The vendor-installed workflows these jobs replace (`version-bump.yml`,
 `check-vendor.yml`, `install-vendored.yml`) are removed from this repository;

@@ -1,6 +1,11 @@
 # Changelog
 
-Releases of git-cicd, written by git-semver on each merge to `main`.
+Releases of git-cicd. Each entry is written by `git-semver bump` in the pull request that raises the version; merging it into `main` tags and publishes that version.
+
+## [0.1.0] - 2026-11-28
+
+### Changed
+- A manual run is started from a form that lists the jobs and their inputs; the free-text `inputs` field and CICD_MANUAL_INPUTS are removed (breaking: run `generate`, pass one `-f <name>=<value>` per input) (gcd-8f83); the Open workflow passes VENDOR_PAT to pull request jobs (gcd-9e80); git-cicd bumps its version in the pull request and tags on merge (gcd-c8e1)
 
 ## [0.0.4] - 2026-11-28
 

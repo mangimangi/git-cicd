@@ -39,19 +39,36 @@ workflows (`.github/workflows/git-cicd-<trigger>.yml`, one per trigger;
 
 ## This repository's jobs
 
-`.vendored/configs/git-cicd.json` declares four jobs: `test` (`open`; the
-pytest suite), `vendor-check` (`open`; `ci/vendor-check.sh` runs
-`.vendored/check`), `release` (`merge` on `main`; `ci/release.sh` bumps or
-publishes with git-semver's `release`) and `update-vendored` (`cron`
-`0 9 * * 1` on `main`; `ci/update-vendored.sh` runs `.vendored/install`).
+`.vendored/configs/git-cicd.json` declares five jobs: `test` (`open`; the
+pytest suite), `version-check` (`open`, pull requests into `main`;
+`.vendored/pkg/git-semver/git-semver check-bump`), `vendor-check` (`open`;
+`ci/vendor-check.sh` runs `.vendored/check`), `release` (`merge` on `main`;
+`.vendored/pkg/git-semver/release` with no subcommand) and `update-vendored`
+(`cron` `0 9 * * 1` on `main`; `ci/update-vendored.sh` runs
+`.vendored/install`).
+
+## Releasing
+
+The version is raised in the pull request (`"bump_on": "pull_request"` in
+`.vendored/configs/git-semver.json`). A change to a file in git-semver's
+`files` (`git-cicd`, `install.sh`, the templates) raises the version in the
+same pull request: run `.vendored/pkg/git-semver/git-semver bump patch
+--no-push` (`minor` or `major` for a change that breaks an adopter;
+`--description "..."` sets the changelog entry), which updates `VERSION` and
+`CHANGELOG.md` and commits them. `version-check` fails a pull request into
+`main` that changes those files without raising the version above `main`'s.
+Merging into `main` runs `release`, which tags the merged commit with the
+version it carries and creates its GitHub release; nothing is pushed to
+`main`.
+
 Only CI runs `release` and `update-vendored`. The owner starts either by hand
 from the Actions tab: **Manual**, *Run workflow* on `main`, then picks the job
 in the `job` dropdown and fills its named fields (left alone, each is its
-default): job `release` with `bump_type` (patch, minor, major; default
-patch), `subdirectory` and `changelog_description`, or job `update-vendored`
-with `vendor` (default all, for example `mangimangi/git-semver`), `version`
-(default latest) and `private` (true, false; default false). `test` and
-`vendor-check` say `"manual": false` and are not in the dropdown. The
+default): job `release` takes no fields (it tags the current commit's
+version if it is not tagged yet), job `update-vendored` takes `vendor`
+(default all, for example `mangimangi/git-semver`), `version` (default
+latest) and `private` (true, false; default false). `test`, `version-check`
+and `vendor-check` say `"manual": false` and are not in the dropdown. The
 Manual workflow's form is generated from the config: a change to a job's
 inputs or its `manual` means `./git-cicd generate` and committing
 `.github/workflows/git-cicd-manual.yml` in the same pull request.
@@ -87,7 +104,7 @@ undo anything it reports.
 - `git-cicd` — the tool (validate, decide, run-job, generate, verify, report, check)
 - `templates/workflows/<trigger>.yml` — the workflow templates, one per generated trigger (`open.yml`); `templates/config.json`, `templates/config.schema` — installed config and schema
 - `install.sh` — the git-vendored installer
-- `ci/` — this repository's own job scripts (`setup.sh`, `test.sh`, `vendor-check.sh`, `release.sh`, `update-vendored.sh`); `.vendored/configs/git-cicd.json` — its own config
+- `ci/` — this repository's own job scripts (`setup.sh`, `test.sh`, `vendor-check.sh`, `update-vendored.sh`); `.vendored/configs/git-cicd.json` — its own config
 - `tests/` — pytest suite; `tests/bats/` — bats tests of `install.sh` and the `ci/` scripts (shared `helper.bash`)
 
 ## Planning and issues
