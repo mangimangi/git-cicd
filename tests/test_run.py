@@ -171,6 +171,166 @@ def test_environment_reaches_step(repo, log):
     assert "ghs_tok" not in result.stdout + result.stderr
 
 
+def test_merge_environment_reaches_step(repo, log):
+    """On merge the target is the branch landed on, the source the same
+    branch, the base the commit before the push and the head the landed
+    commit; the changed files are what the push brought."""
+    repo.script("ci/env.sh", DUMP_ENV)
+    repo.config({"jobs": {"envjob": {
+        "on": ["merge"], "branches": ["main"], "steps": ["ci/env.sh"]}}})
+    before = repo.commit("base")
+    repo.write("src/app.py", "x\n")
+    landed = repo.commit("landed")
+    result = repo.run("run-job", "envjob", "--trigger=merge", "--target=main",
+                      "--source=main", f"--base={before}", f"--head={landed}",
+                      env=env_for(log))
+    assert result.returncode == 0, result.stdout + result.stderr
+    values = dict(line.split("=", 1) for line in logged(log)[:7])
+    assert values == {
+        "CICD_TRIGGER": "merge", "CICD_JOB": "envjob",
+        "CICD_TARGET_BRANCH": "main", "CICD_SOURCE_BRANCH": "main",
+        "CICD_BASE": before, "CICD_HEAD": landed,
+        "CICD_CHANGED_FILES": values["CICD_CHANGED_FILES"],
+    }
+    assert (log.parent / "log.txt.changed").read_text() == "src/app.py\n"
+
+
+def test_manual_environment_reaches_step(repo, log):
+    """On manual, target and source are the branch the run was started on,
+    base and head the run's commit, and the changed files are empty."""
+    repo.script("ci/env.sh", DUMP_ENV)
+    repo.config({"jobs": {"envjob": {
+        "on": [], "branches": ["main"], "paths": ["src/**"],
+        "steps": ["ci/env.sh"]}}})
+    repo.commit("base")
+    repo.write("src/app.py", "x\n")
+    sha = repo.commit("run here")
+    result = repo.run("run-job", "envjob", "--trigger=manual", "--target=main",
+                      "--source=main", f"--base={sha}", f"--head={sha}",
+                      env=env_for(log))
+    assert result.returncode == 0, result.stdout + result.stderr
+    values = dict(line.split("=", 1) for line in logged(log)[:7])
+    assert values == {
+        "CICD_TRIGGER": "manual", "CICD_JOB": "envjob",
+        "CICD_TARGET_BRANCH": "main", "CICD_SOURCE_BRANCH": "main",
+        "CICD_BASE": sha, "CICD_HEAD": sha,
+        "CICD_CHANGED_FILES": values["CICD_CHANGED_FILES"],
+    }
+    assert (log.parent / "log.txt.changed").read_text() == ""
+
+
+@pytest.mark.parametrize("job,branch,reason", [
+    ("nope", "main", "unknown job 'nope'"),
+    ("off", "main", 'job off cannot be run by hand ("manual": false)'),
+    ("t", "dev", "branch dev does not match the branches of job t (main)"),
+])
+def test_manual_run_job_refusals(repo, log, job, branch, reason):
+    repo.script("ci/a.sh", LOG_STEP)
+    repo.config({"jobs": {
+        "t": {"branches": ["main"], "steps": ["ci/a.sh"]},
+        "off": {"branches": ["**"], "steps": ["ci/a.sh"], "manual": False}}})
+    sha = repo.commit("base")
+    result = repo.run("run-job", job, "--trigger=manual", f"--target={branch}",
+                      f"--source={branch}", f"--base={sha}", f"--head={sha}",
+                      env=env_for(log))
+    assert result.returncode == 2
+    assert reason in result.stderr
+    assert logged(log) == []
+
+
+# ── declared inputs ─────────────────────────────────────────────────────────
+
+DUMP_INPUTS = """env | grep '^CICD_INPUT_\\|^CICD_MANUAL_INPUTS=' | sort > "$LOG"
+printf '%s' "$CICD_INPUT_TEXT" > "$LOG.text"
+"""
+
+INPUT_JOB = {"on": ["open", "merge"], "branches": ["**"],
+             "steps": ["ci/inputs.sh"],
+             "inputs": {"text": {"default": "the default"},
+                        "kind": {"choices": ["a", "b"], "default": "a"},
+                        "empty": {}}}
+
+
+def setup_inputs(repo, job=None):
+    repo.script("ci/inputs.sh", DUMP_INPUTS)
+    repo.config({"jobs": {"j": job or INPUT_JOB}})
+    return repo.commit("base")
+
+
+def run_inputs(repo, sha, log, trigger="manual", inputs=None, **more):
+    env = env_for(log, **more)
+    if inputs is not None:
+        env["CICD_MANUAL_INPUTS"] = inputs
+    return repo.run("run-job", "j", f"--trigger={trigger}", "--target=main",
+                    "--source=main", f"--base={sha}", f"--head={sha}", env=env)
+
+
+def test_manual_value_reaches_the_step_literally(repo, log):
+    sha = setup_inputs(repo)
+    value = "it's \"q\" $HOME `id` $(id)\nsecond line\\n"
+    result = run_inputs(repo, sha, log, inputs=json.dumps({"text": value,
+                                                           "kind": "b"}))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (log.parent / "log.txt.text").read_bytes() == value.encode()
+    lines = logged(log)
+    assert "CICD_INPUT_KIND=b" in lines
+    assert "CICD_INPUT_EMPTY=" in lines
+    assert not any(l.startswith("CICD_MANUAL_INPUTS=") for l in lines)
+
+
+@pytest.mark.parametrize("trigger", ["open", "merge"])
+def test_other_triggers_get_the_defaults(repo, log, trigger):
+    sha = setup_inputs(repo)
+    result = run_inputs(repo, sha, log, trigger=trigger,
+                        inputs=json.dumps({"kind": "b"}),
+                        CICD_INPUT_STRAY="inherited",
+                        CICD_INPUT_KIND="inherited")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (log.parent / "log.txt.text").read_text() == "the default"
+    lines = logged(log)
+    assert sorted(l for l in lines if not l.startswith("CICD_INPUT_TEXT")) \
+        == ["CICD_INPUT_EMPTY=", "CICD_INPUT_KIND=a"]
+
+
+def test_undeclared_inherited_inputs_are_dropped(repo, log):
+    sha = setup_inputs(repo)
+    result = run_inputs(repo, sha, log, inputs="",
+                        CICD_INPUT_STRAY="inherited")
+    assert result.returncode == 0, result.stdout + result.stderr
+    names = [l.split("=", 1)[0] for l in logged(log)]
+    assert "CICD_INPUT_STRAY" not in names
+    assert sorted(set(names)) == ["CICD_INPUT_EMPTY", "CICD_INPUT_KIND",
+                                  "CICD_INPUT_TEXT"]
+
+
+@pytest.mark.parametrize("inputs,reason", [
+    ("{nope", "the inputs are not valid JSON"),
+    ('["a"]', "the inputs must be a JSON object of string values"),
+    ('{"text": 1}', "the inputs must be a JSON object of string values"),
+    ('{"other": "x"}',
+     "job j declares no input 'other' (declared: text, kind, empty)"),
+    ('{"kind": "c"}', "job j: input kind: 'c' is not one of the choices (a, b)"),
+])
+def test_manual_input_failures_refuse_the_run(repo, log, inputs, reason):
+    sha = setup_inputs(repo)
+    result = run_inputs(repo, sha, log, inputs=inputs)
+    assert result.returncode == 2
+    assert f"manual run refused: {reason}" in result.stderr
+    assert logged(log) == []
+
+
+def test_missing_required_input_refuses_the_run(repo, log):
+    job = dict(INPUT_JOB, inputs={"repo": {"required": True}})
+    sha = setup_inputs(repo, job)
+    result = run_inputs(repo, sha, log, inputs="{}")
+    assert result.returncode == 2
+    assert "job j: input repo is required" in result.stderr
+    # on another trigger a required input is the empty string
+    result = run_inputs(repo, sha, log, trigger="open")
+    assert result.returncode == 0, result.stderr
+    assert logged(log) == ["CICD_INPUT_REPO="]
+
+
 def test_step_receives_trigger_not_moment(repo, log):
     """The step sees CICD_TRIGGER=open; the old name CICD_MOMENT is not set."""
     repo.script("ci/env.sh", 'env >> "$LOG"\n')
@@ -261,15 +421,40 @@ def test_unknown_job(repo, log):
     assert "unknown job 'nope'" in result.stderr
 
 
-@pytest.mark.parametrize("trigger", ["merge", "cron", "manual"])
-def test_unbuilt_trigger(repo, log, trigger):
+def test_cron_environment_reaches_step(repo, log):
+    """On cron, target and source are the branch, base and head its head
+    commit, the changed files are empty and inputs are their defaults."""
+    repo.script("ci/env.sh", DUMP_ENV + 'echo "$CICD_INPUT_VENDOR" >> "$LOG"\n')
+    repo.config({"jobs": {"envjob": {
+        "on": ["cron"], "cron": "0 9 * * 1", "branches": ["main"],
+        "inputs": {"vendor": {"default": "all"}}, "steps": ["ci/env.sh"]}}})
+    repo.commit("base")
+    repo.write("src/app.py", "x\n")
+    sha = repo.commit("head")
+    result = repo.run("run-job", "envjob", "--trigger=cron", "--target=main",
+                      "--source=main", f"--base={sha}", f"--head={sha}",
+                      env=env_for(log, CICD_MANUAL_INPUTS='{"vendor": "x"}'))
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = logged(log)
+    values = dict(line.split("=", 1) for line in lines[:7])
+    assert values == {
+        "CICD_TRIGGER": "cron", "CICD_JOB": "envjob",
+        "CICD_TARGET_BRANCH": "main", "CICD_SOURCE_BRANCH": "main",
+        "CICD_BASE": sha, "CICD_HEAD": sha,
+        "CICD_CHANGED_FILES": values["CICD_CHANGED_FILES"],
+    }
+    assert (log.parent / "log.txt.changed").read_text() == ""
+    assert lines[-1] == "all"
+
+
+def test_result_names_branch_and_head(repo, log, tmp_path):
     repo.script("ci/a.sh")
     base, head = setup_repo(repo, {"t": {
         "on": ["open"], "branches": ["**"], "steps": ["ci/a.sh"]}}, log)
-    result = repo.run("run-job", "t", f"--trigger={trigger}", "--target=main",
-                      "--source=f", f"--base={base}", f"--head={head}")
-    assert result.returncode == 2
-    assert f"the {trigger} trigger is not built yet" in result.stderr
+    out = tmp_path / "result.json"
+    assert run_job(repo, "t", base, head, "--result", str(out)).returncode == 0
+    data = json.loads(out.read_text())
+    assert data["target"] == "main" and data["head"] == head
 
 
 def test_changed_files_when_diff_fails_is_empty_file(repo, log):

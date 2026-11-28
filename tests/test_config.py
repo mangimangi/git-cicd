@@ -433,3 +433,82 @@ def test_name_with_shell_metacharacters_is_data(scripts):
 def test_bad_name_refused(scripts, value, reason):
     refused(scripts, {"jobs": {"test": job(name=value)}},
             "job test: name", reason)
+
+
+# ── declared inputs ─────────────────────────────────────────────────────────
+
+# What today's workflows take, as declarations (version-bump.yml,
+# install-vendored.yml, git-vendored's validate).
+TODAYS_INPUTS = {
+    "release": {
+        "bump_type": {"description": "Version bump type",
+                      "choices": ["patch", "minor", "major"],
+                      "default": "patch"},
+        "subdirectory": {"description": "Subdirectory to bump (leave empty "
+                                        "for root)", "default": ""},
+        "changelog_description": {"description": "Changelog entry"},
+    },
+    "update": {
+        "vendor": {"default": "all"},
+        "version": {"default": "latest"},
+        "private": {"choices": ["true", "false"], "default": "false"},
+    },
+    "validate": {
+        "repo": {"required": True, "description": "owner/name"},
+        "version": {"default": ""},
+    },
+}
+
+
+def test_todays_workflow_inputs_validate(scripts):
+    scripts.config({"jobs": {name: job(inputs=inputs)
+                             for name, inputs in TODAYS_INPUTS.items()}})
+    result = scripts.run("validate")
+    assert result.returncode == 0, result.stderr
+    config = git_cicd.load_config(str(scripts.path))
+    bump = config["jobs"]["release"]["inputs"]["bump_type"]
+    assert bump == {"description": "Version bump type", "required": False,
+                    "default": "patch", "choices": ["patch", "minor", "major"]}
+    assert config["jobs"]["validate"]["inputs"]["repo"]["required"] is True
+    assert config["jobs"]["release"]["inputs"]["changelog_description"][
+        "default"] is None
+
+
+def test_no_inputs_normalizes_to_empty(scripts):
+    scripts.config({"jobs": {"t": job()}})
+    assert git_cicd.load_config(str(scripts.path))["jobs"]["t"]["inputs"] == {}
+
+
+@pytest.mark.parametrize("inputs,expected", [
+    (["x"], "job t: inputs must be an object (input name -> declaration)"),
+    ({"Bump": {}}, "job t: input Bump: invalid input name"),
+    ({"1x": {}}, "job t: input 1x: invalid input name"),
+    ({"a-b": {}}, "job t: input a-b: invalid input name"),
+    ({"x": "patch"}, "job t: input x: a declaration must be an object"),
+    ({"x": {"type": "choice"}}, "job t: input x: unknown field type"),
+    ({"x": {"default": 1}}, "job t: input x: default must be a string"),
+    ({"x": {"default": True}}, "job t: input x: default must be a string"),
+    ({"x": {"description": 5}},
+     "job t: input x: description must be a single-line string"),
+    ({"x": {"description": "two\nlines"}},
+     "job t: input x: description must be a single-line string"),
+    ({"x": {"choices": ["a"], "default": "b"}},
+     "job t: input x: default 'b' is not one of the choices (a)"),
+    ({"x": {"choices": []}},
+     "job t: input x: choices must be a non-empty array of strings"),
+    ({"x": {"choices": "a"}},
+     "job t: input x: choices must be a non-empty array of strings"),
+    ({"x": {"choices": ["a", "a"]}},
+     "job t: input x: choice 'a' is listed more than once"),
+    ({"x": {"choices": ["a", True]}},
+     "job t: input x: every choice must be a string"),
+    ({"x": {"required": "yes"}}, "job t: input x: required must be a boolean"),
+    ({"x": {"required": True, "default": "a"}},
+     "job t: input x: a required input cannot have a default"),
+])
+def test_malformed_inputs_refused(scripts, inputs, expected):
+    refused(scripts, {"jobs": {"t": job(inputs=inputs)}}, expected)
+
+
+def test_inputs_is_a_known_job_field():
+    assert "inputs" in git_cicd.JOB_FIELDS

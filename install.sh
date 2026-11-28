@@ -37,7 +37,7 @@ INSTALL_DIR="${VENDOR_INSTALL_DIR:?VENDOR_INSTALL_DIR is required}"
 
 CONFIG=".vendored/configs/git-cicd.json"
 # The triggers whose workflow git-cicd generates (see WORKFLOWS in git-cicd).
-TRIGGERS=(open)
+TRIGGERS=(open merge cron manual)
 
 # File download helper - uses gh api when GH_TOKEN is set, curl otherwise
 fetch_file() {
@@ -86,8 +86,11 @@ INSTALLED_FILES+=(".vendored/manifests/git-cicd.schema")
 # Workflows - regenerated on every install from the config (generate also
 # removes the single workflow file of earlier versions)
 python3 "$INSTALL_DIR/git-cicd" generate
+# (only the files generate wrote: there is no cron workflow without a cron job)
 for trigger in "${TRIGGERS[@]}"; do
-    INSTALLED_FILES+=(".github/workflows/git-cicd-$trigger.yml")
+    if [ -f ".github/workflows/git-cicd-$trigger.yml" ]; then
+        INSTALLED_FILES+=(".github/workflows/git-cicd-$trigger.yml")
+    fi
 done
 
 # Write manifest when requested by the framework
