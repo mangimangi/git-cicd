@@ -49,6 +49,16 @@
 # a value outside its choices: decide records the reason, needs no job, and
 # the report is FAILED with that reason.
 #
+# Who may start a run: the tool decides, this workflow supplies the fact.
+# Decide reads the repository permission of `github.triggering_actor` with
+# the workflow's own token (admin, write or read; anything else, or a failed
+# read, is empty) and passes it as CICD_ACTOR_ROLE, with the name as
+# CICD_ACTOR, both in fixed env lines and never in a command. The tool
+# refuses the run, as above, when the role is below the config's
+# `manual_role` (default admin); an empty or unknown role is always refused
+# (fail closed). The check lives in this file on the branch the run is
+# started on: a writer can remove it on a branch of their own.
+#
 # Permissions: `contents: read` at the top level. The job that runs the
 # config's scripts gets `contents: write` and `pull-requests: write` (a
 # release pushes a commit and tags, or opens a pull request), and checks out
@@ -196,11 +206,28 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.sha }}
 
+      - name: Read the role of the person who started the run
+        id: role
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.triggering_actor }}
+        run: |
+          PERMISSION="$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$ACTOR/permission" \
+            --jq '.permission' 2>/dev/null || true)"
+          case "$PERMISSION" in
+            admin|write|read) ROLE="$PERMISSION" ;;
+            *) ROLE="" ;;
+          esac
+          echo "role of the person who started the run: ${ROLE:-(could not be read)}"
+          echo "role=$ROLE" >> "$GITHUB_OUTPUT"
+
       - name: Decide whether the job may run
         id: decide
         env:
           JOB: ${{ inputs.job }}
           CICD_MANUAL_FORM: ${{ toJSON(inputs) }}
+          CICD_ACTOR: ${{ github.triggering_actor }}
+          CICD_ACTOR_ROLE: ${{ steps.role.outputs.role }}
           BRANCH: ${{ github.ref_name }}
           HEAD_SHA: ${{ github.sha }}
         run: |

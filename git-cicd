@@ -56,7 +56,20 @@ TRIGGERS = ("open", "merge", "cron")
 DEFAULT_MAX_PARALLEL = 3
 
 TOP_LEVEL_FIELDS = ("_vendor", "jobs", "needs_nothing", "max_parallel",
-                    "repository")
+                    "repository", "manual_role")
+# Who may start a manual run (`manual_role`): the lowest role, in rank
+# order, of the person who started it. The tool decides; the Manual
+# workflow (the platform's adapter) only supplies the fact, the role of the
+# person who started the run, in MANUAL_ROLE_ENV and their name in
+# MANUAL_ACTOR_ENV. A role that is empty or not one of ACTOR_ROLES is
+# below every required role (fail closed).
+MANUAL_ROLES = ("write", "admin")
+DEFAULT_MANUAL_ROLE = "admin"
+ACTOR_ROLES = ("read", "write", "admin")
+MANUAL_ROLE_ENV = "CICD_ACTOR_ROLE"
+MANUAL_ACTOR_ENV = "CICD_ACTOR"
+# A name shown as given in a refusal; anything else is shown quoted.
+ACTOR_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*(\[bot\])?$")
 # The repository name a config may set (`repository`): GitHub's own
 # characters for a repository name.
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -675,6 +688,13 @@ def validate_config(data, root):
                       "as rows show it in <name> / <repo>:<job>")
         repository = None
 
+    manual_role = data.get("manual_role", DEFAULT_MANUAL_ROLE)
+    if manual_role not in MANUAL_ROLES:
+        errors.append("config: manual_role must be one of "
+                      f"{', '.join(MANUAL_ROLES)} (the lowest role of whoever "
+                      f"starts a manual run; default {DEFAULT_MANUAL_ROLE})")
+        manual_role = DEFAULT_MANUAL_ROLE
+
     errors.extend(_validate_manual_form(jobs))
 
     if errors:
@@ -684,6 +704,7 @@ def validate_config(data, root):
         "needs_nothing": list(needs_nothing),
         "max_parallel": max_parallel,
         "repository": repository,
+        "manual_role": manual_role,
     }
 
 
@@ -882,11 +903,44 @@ def manual_refusal(config, name, target):
     return None
 
 
+def _actor_label(actor):
+    """The person who started a run, as a refusal names them."""
+    if not actor:
+        return "the person who started the run"
+    if ACTOR_NAME_RE.match(actor):
+        return actor
+    return repr(actor)
+
+
+def role_refusal(config, role, actor):
+    """Why the person who started a manual run (`actor`, with the role the
+    Manual workflow read for them, `role`) may not start it, or None. The
+    config's `manual_role` is the lowest role allowed; an empty or unknown
+    role is refused (fail closed)."""
+    required = config.get("manual_role", DEFAULT_MANUAL_ROLE)
+    who = _actor_label(actor)
+    hint = (f'a manual run needs role {required} ("manual_role": '
+            f'"{required}")')
+    if not role:
+        return f"the role of {who} could not be read; {hint}"
+    if role not in ACTOR_ROLES:
+        return f"{who} has the unknown role {role!r}; {hint}"
+    if ACTOR_ROLES.index(role) < ACTOR_ROLES.index(required):
+        return f"{who} has role {role}; {hint}"
+    return None
+
+
 def decide_manual(config, target, source, base, head, job):
     """A manual run: the named job is needed when it may run (paths and
     needs_nothing are ignored); every other job is not needed. A refusal is
-    recorded in the decision record, never raised, so the report shows it."""
-    refused = manual_refusal(config, job, target)
+    recorded in the decision record, never raised, so the report shows it.
+    The person who started the run must hold the config's `manual_role`
+    (MANUAL_ROLE_ENV, supplied by the Manual workflow); `run-job` does not
+    ask, so a local run is not refused for it."""
+    refused = role_refusal(config, os.environ.get(MANUAL_ROLE_ENV, ""),
+                           os.environ.get(MANUAL_ACTOR_ENV, ""))
+    if not refused:
+        refused = manual_refusal(config, job, target)
     ignored = []
     if not refused:
         _, ignored, refused = manual_input_values(config, config["jobs"][job])
