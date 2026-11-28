@@ -2,6 +2,11 @@
 
 Releases of git-cicd. Each entry is written by `git-semver bump` in the pull request that raises the version; merging it into `main` tags and publishes that version.
 
+## [0.3.0] - 2026-11-28
+
+### Changed
+- The Manual workflow's job dropdown lists each job as its check row (<name> / <repo>:<job>, e.g. Release / medici:release) and each input field's description names its jobs the same way; the tool maps the chosen option back to the job, and decide still takes the bare job name. Breaking for adopters: run generate and commit .github/workflows/git-cicd-manual.yml after upgrading, and pass the row as the job value when starting a run from the command line (-f job="Release / medici:release"). New config field repository states the repository's name for a checkout whose origin remote names it differently; verify says when the name is the only difference (gcd-ee6f)
+
 ## [0.2.0] - 2026-11-28
 
 ### Changed
