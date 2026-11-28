@@ -49,6 +49,21 @@
 # a value outside its choices: decide records the reason, needs no job, and
 # the report is FAILED with that reason.
 #
+# Who may start a run: the platform lets anyone with write access start one;
+# the tool also requires the config's `manual_role` (default `admin`). The
+# decide job reads the repository permission of `github.triggering_actor`
+# with the workflow's own token
+# (`repos/{owner}/{repo}/collaborators/{user}/permission`, `.permission`:
+# admin, write or read; empty when it could not be read) and passes it to
+# the tool as CICD_ACTOR_ROLE, the person's name as CICD_ACTOR, both in
+# fixed env lines; the run job gets the same role from decide's
+# `actor_role` output, and the tool checks it again. A role below the
+# required one, an empty one and an unknown one are refused like an unknown
+# job, the reason naming the person and the role required. This check is
+# real only in this file as it is on the branch the run is started on: a
+# writer can remove it on a branch of their own. What holds against a
+# writer is a protected environment (a job's `environment`, below).
+#
 # Permissions: `contents: read` at the top level. The job that runs the
 # config's scripts gets `contents: write` and `pull-requests: write` (a
 # release pushes a commit and tags, or opens a pull request), and checks out
@@ -68,6 +83,14 @@
 # job with nothing to run runs its placeholder entry
 # `(nothing:<id>)`, row `Nothing needed / <repo>:(nothing:<id>)`, with its
 # steps skipped, for the reason `run` does (below).
+#
+# A config job that declares an `environment` runs the same way in a run job
+# of its own, one per distinct pair of permission set and environment, whose
+# id ends in `env-<name>` (for example `run-env-release`) and which says
+# `environment: "<name>"` (a validated name, written literally): GitHub then
+# applies that environment's rules (required reviewers, allowed branches)
+# before the job starts and gives it that environment's secrets. A secret
+# still reaches a script only when its job declares it.
 #
 # Secrets: a job gets only the secrets its config job declares (`secrets`,
 # from the documented set CICD_WRITE_TOKEN, CICD_READ_TOKEN and the
@@ -154,6 +177,7 @@ jobs:
       jobs: ${{ steps.decide.outputs.jobs }}
       names: ${{ steps.decide.outputs.names }}
       secrets: ${{ steps.decide.outputs.secrets }}
+      actor_role: ${{ steps.actor.outputs.role }}
       any: ${{ steps.decide.outputs.any }}
       max_parallel: ${{ steps.decide.outputs.max_parallel }}
     steps:
@@ -196,11 +220,25 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.sha }}
 
+      - name: Read the role of whoever started the run
+        id: actor
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.triggering_actor }}
+        run: |
+          ROLE="$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$ACTOR/permission" \
+            --jq '.permission' 2>/dev/null)" || ROLE=""
+          ROLE="$(printf '%s' "$ROLE" | tr -cd 'a-z' | cut -c1-40)"
+          echo "role of $ACTOR: ${ROLE:-(could not be read)}"
+          echo "role=$ROLE" >> "$GITHUB_OUTPUT"
+
       - name: Decide whether the job may run
         id: decide
         env:
           JOB: ${{ inputs.job }}
           CICD_MANUAL_FORM: ${{ toJSON(inputs) }}
+          CICD_ACTOR_ROLE: ${{ steps.actor.outputs.role }}
+          CICD_ACTOR: ${{ github.triggering_actor }}
           BRANCH: ${{ github.ref_name }}
           HEAD_SHA: ${{ github.sha }}
         run: |
@@ -243,6 +281,8 @@ jobs:
         env:
           JOB: ${{ matrix.job }}
           CICD_MANUAL_FORM: ${{ toJSON(inputs) }}
+          CICD_ACTOR_ROLE: ${{ needs.decide.outputs.actor_role }}
+          CICD_ACTOR: ${{ github.triggering_actor }}
           BRANCH: ${{ github.ref_name }}
           HEAD_SHA: ${{ github.sha }}
           GITHUB_TOKEN: ${{ github.token }}

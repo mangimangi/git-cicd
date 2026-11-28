@@ -50,6 +50,14 @@
 # `(nothing:<id>)`, row `Nothing needed / <repo>:(nothing:<id>)`, with its
 # steps skipped, for the reason `run` does (below).
 #
+# A config job that declares an `environment` runs the same way in a run job
+# of its own, one per distinct pair of permission set and environment, whose
+# id ends in `env-<name>` (for example `run-env-release`) and which says
+# `environment: "<name>"` (a validated name, written literally): GitHub then
+# applies that environment's rules (required reviewers, allowed branches)
+# before the job starts and gives it that environment's secrets. A secret
+# still reaches a script only when its job declares it.
+#
 # Secrets: a job gets only the secrets its config job declares (`secrets`,
 # from the documented set CICD_WRITE_TOKEN, CICD_READ_TOKEN and the
 # deprecated VENDOR_PAT). The step that runs a job has one fixed env line per

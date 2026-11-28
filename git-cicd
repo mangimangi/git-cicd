@@ -56,12 +56,17 @@ TRIGGERS = ("open", "merge", "cron")
 DEFAULT_MAX_PARALLEL = 3
 
 TOP_LEVEL_FIELDS = ("_vendor", "jobs", "needs_nothing", "max_parallel",
-                    "repository")
+                    "repository", "manual_role")
 # The repository name a config may set (`repository`): GitHub's own
 # characters for a repository name.
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 JOB_FIELDS = ("name", "on", "branches", "paths", "setup", "steps", "cron", "manual",
-              "blocking", "inputs", "secrets", "permissions")
+              "blocking", "inputs", "secrets", "permissions", "environment")
+# A job's `environment`: the GitHub environment its run job runs in, whose
+# rules (required reviewers, allowed branches) and secrets the platform
+# applies. Written literally into the generated workflows, so validated
+# words only.
+ENVIRONMENT_RE = re.compile(r"^[A-Za-z0-9_-]{1,255}$")
 # The secrets a job may declare. A script's environment holds one of them if
 # and only if its job declares it and it is set non-empty, on every trigger
 # and in a local check. CICD_WRITE_TOKEN pushes branches, opens pull requests
@@ -97,6 +102,18 @@ INPUT_ENV_PREFIX = "CICD_INPUT_"
 # of strings (`toJSON(inputs)`, set in a fixed env line), every field of
 # every manual job plus `job`. Read by the tool, never passed on.
 MANUAL_FORM_ENV = "CICD_MANUAL_FORM"
+# Who may start a manual run: the config's `manual_role`, the lowest role
+# that may (default admin). The Manual workflow reads the role of whoever
+# started the run from the platform and passes it in CICD_ACTOR_ROLE, their
+# name in CICD_ACTOR. A run in Actions (GITHUB_ACTIONS=true) or with
+# CICD_ACTOR_ROLE set is asked for the role; a run on a laptop is not. An
+# empty or unknown role is refused (fail closed). Read by the tool, never
+# passed on to a script.
+MANUAL_ROLES = ("admin", "write")
+DEFAULT_MANUAL_ROLE = "admin"
+ROLE_RANK = {"read": 1, "write": 2, "admin": 3}
+ACTOR_ROLE_ENV = "CICD_ACTOR_ROLE"
+ACTOR_ENV = "CICD_ACTOR"
 GLOB_CHARS = ("*", "?", "[")
 # The most inputs a workflow_dispatch workflow may have, the Manual form's
 # `job` field included (so at most MANUAL_FORM_LIMIT - 1 input fields).
@@ -534,6 +551,15 @@ def _validate_job(root, name, job):
             prefix, job["permissions"], "open" in on)
         errors.extend(permission_errors)
 
+    # environment
+    environment = job.get("environment")
+    if "environment" in job and not (
+            isinstance(environment, str) and ENVIRONMENT_RE.match(environment)):
+        errors.append(f"{prefix}: environment must be the name of a GitHub "
+                      "environment (letters, digits, - and _ only; for "
+                      "example release)")
+        environment = None
+
     # flags
     for flag in ("manual", "blocking"):
         if flag in job and not isinstance(job[flag], bool):
@@ -553,6 +579,7 @@ def _validate_job(root, name, job):
         "inputs": inputs,
         "secrets": list(dict.fromkeys(secrets)),
         "permissions": permissions,
+        "environment": environment,
     }
     return errors, normalized
 
@@ -603,10 +630,12 @@ def runs_on(job, trigger):
 
 
 def permission_groups(config, trigger):
-    """{run job id: {"permissions": effective set, "jobs": [names]}} for
-    every effective permission set on the trigger that differs from its
-    default, in first-seen config order. The id is `run-` plus each scope
-    and level beyond the default (`run-packages-write`), validated words
+    """{run job id: {"permissions": effective set, "environment": name or
+    None, "jobs": [names]}} for every pair of effective permission set and
+    environment on the trigger that differs from the default (the trigger's
+    permissions, no environment), in first-seen config order. The id is
+    `run-` plus each scope and level beyond the default, then `env-` and the
+    environment (`run-packages-write`, `run-env-release`), validated words
     only. Every other job runs in the default `run` job."""
     default = TRIGGER_PERMISSIONS[trigger]
     groups = {}
@@ -616,10 +645,14 @@ def permission_groups(config, trigger):
         perms = effective_permissions(job, trigger)
         extra = [f"{s}-{lv}" for s, lv in perms.items()
                  if default.get(s) != lv]
+        environment = job.get("environment")
+        if environment:
+            extra.append(f"env-{environment}")
         if not extra:
             continue
         gid = "run-" + "-".join(extra)
-        groups.setdefault(gid, {"permissions": perms, "jobs": []})
+        groups.setdefault(gid, {"permissions": perms,
+                                "environment": environment, "jobs": []})
         groups[gid]["jobs"].append(name)
     return groups
 
@@ -675,6 +708,13 @@ def validate_config(data, root):
                       "as rows show it in <name> / <repo>:<job>")
         repository = None
 
+    manual_role = data.get("manual_role", DEFAULT_MANUAL_ROLE)
+    if manual_role not in MANUAL_ROLES:
+        errors.append("config: manual_role must be \"admin\" (the default: "
+                      "only an admin starts a manual run) or \"write\" "
+                      "(anyone with write access)")
+        manual_role = DEFAULT_MANUAL_ROLE
+
     errors.extend(_validate_manual_form(jobs))
 
     if errors:
@@ -684,6 +724,7 @@ def validate_config(data, root):
         "needs_nothing": list(needs_nothing),
         "max_parallel": max_parallel,
         "repository": repository,
+        "manual_role": manual_role,
     }
 
 
@@ -866,10 +907,43 @@ def _name_files(files, limit=5):
     return shown
 
 
+def role_asked():
+    """True when this is a manual run in the platform's sense: in Actions,
+    or with the role of whoever started it given. `run-job --trigger=manual`
+    on a laptop is not asked for a role."""
+    return (ACTOR_ROLE_ENV in os.environ
+            or os.environ.get("GITHUB_ACTIONS") == "true")
+
+
+def role_refusal(config):
+    """Why whoever started a manual run may not, or None: their role
+    (CICD_ACTOR_ROLE) must be at least the config's `manual_role`. An empty
+    or unknown role is refused. Only asked when role_asked()."""
+    if not role_asked():
+        return None
+    required = config.get("manual_role", DEFAULT_MANUAL_ROLE)
+    role = os.environ.get(ACTOR_ROLE_ENV, "").strip()
+    actor = "".join(c for c in os.environ.get(ACTOR_ENV, "").strip()
+                    if c.isprintable()) or "whoever started the run"
+    needs = (f"a manual run needs the {required} role (\"manual_role\" in "
+             "the config)")
+    if not role:
+        return f"the role of {actor} could not be read; {needs}"
+    if role not in ROLE_RANK:
+        return f"{actor} has the unknown role {role[:40]!r}; {needs}"
+    if ROLE_RANK[role] < ROLE_RANK[required]:
+        return f"{actor} has the {role} role; {needs}"
+    return None
+
+
 def manual_refusal(config, name, target):
     """Why a manual run of job `name` on branch `target` is refused, or None
-    when it may run: the job must exist, allow manual runs and have branches
-    that match the branch the run was started on."""
+    when it may run: whoever started it must have the role it needs
+    (role_refusal), and the job must exist, allow manual runs and have
+    branches that match the branch the run was started on."""
+    refused = role_refusal(config)
+    if refused:
+        return refused
     job = config["jobs"].get(name)
     if job is None:
         return (f"unknown job {name!r} (declared: "
@@ -1155,8 +1229,9 @@ def script_env(job_name, facts, changed_files_path, inputs=None,
     """The inherited environment plus the CICD_ facts about the change and
     one CICD_INPUT_<NAME> per declared input.
 
-    Inherited CICD_INPUT_ variables and the manual run's raw form values
-    (CICD_MANUAL_FORM) are removed, so the declared inputs are the only
+    Inherited CICD_INPUT_ variables, the manual run's raw form values
+    (CICD_MANUAL_FORM) and who started it (CICD_ACTOR_ROLE, CICD_ACTOR) are
+    removed, so the declared inputs are the only
     channel. Every name of DECLARABLE_SECRETS the job does not declare in
     `secrets` is removed, on every trigger (open, merge, cron, manual) and so
     in a local check, and so is a declared one that is empty: a script sees
@@ -1165,7 +1240,7 @@ def script_env(job_name, facts, changed_files_path, inputs=None,
     reaches scripts unchanged through the inherited environment. git-cicd
     itself never prints a secret's value.
     """
-    dropped = {MANUAL_FORM_ENV}
+    dropped = {MANUAL_FORM_ENV, ACTOR_ROLE_ENV, ACTOR_ENV}
     dropped |= {n for n in DECLARABLE_SECRETS
                 if n not in secrets or not os.environ.get(n)}
     env = {k: v for k, v in os.environ.items()
@@ -1480,6 +1555,8 @@ def group_jobs_block(config, template, trigger):
         text = run.replace("  run:\n", f"  {gid}:\n", 1)
         perms = "    permissions:\n" + "".join(
             f"      {s}: {lv}\n" for s, lv in g["permissions"].items())
+        if g.get("environment"):
+            perms += f"    environment: {json.dumps(g['environment'])}\n"
         text = PERMISSIONS_RE.sub("", text, count=1)
         text = text.replace("    runs-on: ubuntu-latest\n",
                             "    runs-on: ubuntu-latest\n" + perms, 1)
