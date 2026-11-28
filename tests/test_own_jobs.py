@@ -35,6 +35,8 @@ def test_this_repository_declares_its_own_jobs():
     assert check["on"] == ["open"] and check["branches"] == ["**"]
     assert check["paths"] is None
     assert check["steps"] == [["ci/vendor-check.sh"]]
+    # the open jobs run on pull requests, never by hand
+    assert check["manual"] is False and jobs["test"]["manual"] is False
 
     update = jobs["update-vendored"]
     assert update["title"] == "Install Vendored"
@@ -45,6 +47,44 @@ def test_this_repository_declares_its_own_jobs():
             for k, v in update["inputs"].items()} == {
         "vendor": (None, "all"), "version": (None, "latest"),
         "private": (["true", "false"], "false")}
+
+
+def test_the_manual_form_lists_release_and_update_vendored():
+    """The committed Manual workflow's form, as generate writes it from this
+    repository's config: the job dropdown and the six named fields."""
+    from tests.test_workflow import form_fields
+    text = (ROOT / ".github/workflows/git-cicd-manual.yml").read_text()
+    config = git_cicd.load_config(str(ROOT))
+    assert text == git_cicd.render_workflows(config, "git-cicd")[
+        ".github/workflows/git-cicd-manual.yml"]
+    fields = form_fields(text)
+    assert fields == {
+        "job": {"description": "The config job to run", "required": True,
+                "type": "choice", "options": ["release", "update-vendored"]},
+        "bump_type": {"description": "Version bump type (job release)",
+                      "required": False, "default": "patch",
+                      "type": "choice",
+                      "options": ["patch", "minor", "major"]},
+        "subdirectory": {
+            "description": "Subdirectory to bump (leave empty for root) "
+                           "(job release)",
+            "required": False, "type": "string"},
+        "changelog_description": {
+            "description": "Changelog entry (what changed in this release) "
+                           "(job release)",
+            "required": False, "type": "string"},
+        "vendor": {"description": "Vendor to update (or all) "
+                                  "(job update-vendored)",
+                   "required": False, "default": "all", "type": "string"},
+        "version": {"description": "Version to install (default: latest) "
+                                   "(job update-vendored)",
+                    "required": False, "default": "latest",
+                    "type": "string"},
+        "private": {"description": "Vendor repo is private (use VENDOR_PAT) "
+                                   "(job update-vendored)",
+                    "required": False, "default": "false", "type": "choice",
+                    "options": ["true", "false"]},
+    }
 
 
 def test_semver_files_list_every_template():

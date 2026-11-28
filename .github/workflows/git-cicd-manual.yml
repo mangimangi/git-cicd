@@ -88,9 +88,7 @@ on:
         required: true
         type: choice
         options:
-          - "test"
           - "release"
-          - "vendor-check"
           - "update-vendored"
       bump_type:
         description: "Version bump type (job release)"
