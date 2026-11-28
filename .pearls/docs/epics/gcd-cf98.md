@@ -30,6 +30,7 @@ How a declared permission and a declared secret reach one job among several that
 ## What ships
 
 - A job declares the secrets it receives; nothing is passed undeclared
+  - issue: gcd-cf98.1
   - vehicle: type: issue
   - source repo: git-cicd
   - target repo: git-cicd
@@ -37,6 +38,7 @@ How a declared permission and a declared secret reach one job among several that
   - shape: A job may declare a list of secrets from a documented set: `CICD_WRITE_TOKEN`, `CICD_READ_TOKEN`, and `VENDOR_PAT` (deprecated). `validate` refuses any other name, a malformed declaration or a duplicate, naming the job and the reason. On every trigger, including `open` and a local `check`, a script's environment holds a secret if and only if its job declares it; a secret present in the caller's environment that the job does not declare is removed before the script runs. The trigger no longer decides: `VENDOR_PAT` is passed to no job that does not declare it. The generated workflows give each job only the secrets it declares; a job that declares none has no secret in its environment at all, not an empty one it could mistake for a value. A declared secret that is not set in the repository reaches the script as unset, and the report says which declared secrets were absent, by name only. No secret value is ever printed, in a log, a report or an error.
 
 - A job declares the permissions its token needs
+  - issue: gcd-cf98.2 (blocked by gcd-cf98.1)
   - vehicle: type: issue
   - source repo: git-cicd
   - target repo: git-cicd
@@ -44,6 +46,7 @@ How a declared permission and a declared secret reach one job among several that
   - shape: A job may declare permissions for the workflow's own token beyond its trigger's default, from a documented set that includes `packages: write`. `validate` refuses a permission outside the set, a level that is not allowed, and a write permission declared by a job that runs on `open` unless the documentation says why that one is allowed; each refusal names the job and the reason. A job that declares none keeps its trigger's default. In the generated workflows a job gets exactly its trigger's default plus what it declares, and no other job gains anything from it: two jobs on the same trigger with different declarations run with different permissions. `verify` fails when the generated files and the declarations disagree.
 
 - git-cicd's own jobs declare what they need, and the docs say the rule
+  - issue: gcd-cf98.3 (blocked by gcd-cf98.1, gcd-cf98.2)
   - vehicle: type: issue
   - source repo: git-cicd
   - target repo: git-cicd
@@ -67,3 +70,28 @@ How a declared permission and a declared secret reach one job among several that
 - Any change in git-semver or git-vendored (units 2 and 3 of the plan), and pushing a version bump.
 - A GitHub App as the identity behind a token; secrets outside the documented set; an image or runtime per job.
 - Migrating a consumer.
+
+## Issues
+
+| Issue | Scope | Blocked by |
+|---|---|---|
+| gcd-cf98.1 | `secrets` job field, `script_env` strips undeclared secrets on every trigger, absent secrets reported by name, per-entry secret selection in the run step's `env`, token guard in pytest and bats | — |
+| gcd-cf98.2 | `permissions` job field, a generated run job for each permission set, decide outputs for each group, generate/verify | gcd-cf98.1 |
+| gcd-cf98.3 | this repo's config and `ci/update-vendored.sh`, regenerated workflows, README/AGENTS.md rule and upgrade steps, minor bump to 0.2.0 with a breaking changelog entry | gcd-cf98.1, gcd-cf98.2 |
+
+The acceptance criteria above are split this way: the `open`/`CICD_READ_TOKEN`, the "declares nothing receives nothing" and the token-guard criteria go to gcd-cf98.1; `packages: write` vs sibling and `verify` after a declaration change go to gcd-cf98.2; the own-config `update-vendored`/`release` criterion, `check-bump`, the Verdict on the PR into `plan/git-dev-aef7` and the final vendor check go to gcd-cf98.3. Every issue also keeps the 99% coverage, `validate` refusal and vendor-check criteria.
+
+## Refinement decisions
+
+- **Three issues in the existing epic gcd-cf98, done in order** (gcd-cf98.1, gcd-cf98.2, gcd-cf98.3). Reason: the doc's three "What ships" items map one to one; .1 and .2 touch the same validation code, templates and decide outputs, so running them in order avoids conflicts, and .3 needs both declarations to exist.
+- **Secrets are picked per matrix entry by an expression in the run step's `env`** (gcd-cf98.1): decide gets a `secrets` output (job → declared names); each documented name gets one line of the form `X: ${{ contains(fromJSON(needs.decide.outputs.secrets)[matrix.job], 'X') && secrets.X || '' }}`; `script_env` removes undeclared and empty names. Reason: the set of names is fixed, so the templates stay fixed text, no config value reaches the workflow, and an undeclared secret's value never reaches the step. The implementer checks this against GitHub's documentation and records any change.
+- **A declared secret that is empty is treated as unset and removed** (gcd-cf98.1). Reason: the doc says a job must never see "an empty one it could mistake for a value".
+- **The token guard is proved by sentinels** (gcd-cf98.1): an autouse conftest fixture and `tests/bats/helper.bash` remove the five names, `ci/test.sh` exports sentinel values before pytest and bats, and a pytest test and a bats test assert none of the five is set. Reason: without the sentinels, removing the guard would fail no test on a machine with no tokens set, so the acceptance criterion "a test fails if that guard is removed" could not be shown.
+- **Permissions get a generated run job for each permission set** (gcd-cf98.2). For each trigger, every effective permission set that differs from the trigger's default gets its own generated run job (the default plus the set, written literally), with a matrix from its own decide output; the default `run` job keeps the other jobs. Reason: job-level `permissions` are expected to accept only literal values (the implementer checks this), and every matrix entry gets the job's permissions, so this is the only way two sibling jobs can run with different permissions. A config with no declarations generates exactly today's files. How a group job with nothing to run is shown (skipped by a job-level `if`, or a placeholder with its own documented title) is decided by the implementer after checking how GitHub renders it, so that no raw `${{ }}` row appears.
+- **The permissions that can be declared are `contents`, `pull-requests`, `issues` and `packages`, each at `read` or `write`, in GitHub's own object syntax** (gcd-cf98.2). Reason: they cover `packages: write` and the scopes the triggers already use, and a small set can be documented in full.
+- **No write permission is allowed on `open`** (gcd-cf98.2). Reason: `open` runs a pull request's own code. The one `open` job that must write (git-semver's version check, unit 2) does it with a declared `CICD_WRITE_TOKEN`, not with the workflow token.
+- **A job's effective permissions are its trigger's default merged with what it declares, the higher level winning; a declaration that adds nothing is accepted** (gcd-cf98.2). Reason: a job on several triggers can then declare one set, and a declaration that adds nothing changes nothing.
+- **`ci/update-vendored.sh` uses `CICD_WRITE_TOKEN`, else `VENDOR_PAT`, else `GITHUB_TOKEN`; the `private` input's description names the new token** (gcd-cf98.3). Reason: the doc says to "use the first that is set", and `GITHUB_TOKEN` stays as the last fallback the script already uses. Changing the description changes the Manual form, so the workflows are regenerated in the same issue.
+- **The README documents fine-grained token permissions: read token = Contents read (plus Metadata); write token = Contents, Pull requests and Workflows read/write** (gcd-cf98.3). Reason: the doc asks for them. The implementer checks the names against GitHub's documentation.
+- **The version is raised to 0.2.0 with `git-semver bump minor`** (gcd-cf98.3). Reason: the doc asks for a minor bump in the unit's own work, and below 1.0 a minor bump is how this repo marks a breaking change (0.1.0 did the same).
+
