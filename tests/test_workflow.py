@@ -43,9 +43,11 @@ def generate(repo, config):
     return (repo.path / WORKFLOW).read_text()
 
 
-def bare(template, tool=TOOL):
+def bare(template, tool=TOOL, branches="['main']"):
     """A template as a config without permission groups renders it: the
-    group placeholders empty, the tool path filled in."""
+    group placeholders empty, the Merge trigger's branches and the tool path
+    filled in."""
+    template = template.replace("__BRANCHES__", branches)
     for mark in ("__GROUP_OUTPUTS__\n", "__GROUP_JOBS__\n",
                  "__GROUP_NEEDS__"):
         template = template.replace(mark, "")
@@ -292,7 +294,7 @@ def test_non_cron_differences_generate_identical_files(tool_repo):
     generate(tool_repo, base_config())
     files_a = generated_files(tool_repo)
     b_config = {"jobs": {
-        "other": {"on": ["open", "merge"], "branches": ["plan/**", "main"],
+        "other": {"on": ["open", "merge"], "branches": ["main"],
                   "paths": ["lib/**"], "steps": [["ci/other.sh", "-x"]],
                   "blocking": False, "name": "Something Else"},
         "release": {"on": [], "branches": ["main"], "steps": ["ci/bump.sh"]},
@@ -538,7 +540,7 @@ def test_merge_file_is_written_with_the_push_event(tool_repo):
     text = generate_merge(tool_repo)
     assert text.startswith(f"# {MERGE} - GENERATED")
     assert "\nname: Merge\n" in text
-    assert "\non:\n  push:\n    branches: ['**']\n\npermissions:" in text
+    assert "\non:\n  push:\n    branches: ['main']\n\npermissions:" in text
     assert "tags" not in text.split("\non:\n", 1)[1].split("permissions:")[0]
     assert f"python3 {TOOL} decide --trigger=merge" in text
     assert f"python3 {TOOL} run-job \"$JOB\" --trigger=merge" in text
@@ -549,6 +551,147 @@ def test_merge_file_is_written_with_the_push_event(tool_repo):
     assert "HEAD_SHA: ${{ github.sha }}" in text
     assert "BRANCH: ${{ github.ref_name }}" in text
     assert '--target="$BRANCH"' in text and '--source="$BRANCH"' in text
+
+
+def merge_trigger(text):
+    return text.split("\non:\n  push:\n    branches: ", 1)[1].split("\n")[0]
+
+
+def merge_config(*branch_lists, extra=None):
+    jobs = {f"m{n}": {"on": ["merge"], "branches": list(b),
+                      "steps": ["ci/bump.sh"]}
+            for n, b in enumerate(branch_lists)}
+    jobs.update(extra or {})
+    return {"jobs": jobs}
+
+
+def test_merge_trigger_is_the_branches_of_one_merge_job(tool_repo):
+    tool_repo.config(base_config())
+    result = tool_repo.run("generate")
+    assert result.returncode == 0, result.stderr
+    assert "note:" not in result.stdout
+    assert merge_trigger((tool_repo.path / MERGE).read_text()) == "['main']"
+    assert tool_repo.run("verify").returncode == 0
+
+
+def test_merge_trigger_is_the_union_of_merge_jobs_in_config_order(tool_repo):
+    """Two merge jobs on different branches: their branches in config order,
+    each once; a job not on merge adds nothing."""
+    config = merge_config(
+        ["main", "release/*"], ["release/*", "dev", "main"],
+        extra={"t": {"on": ["open"], "branches": ["feature/**"],
+                     "steps": ["ci/test.sh"]}})
+    tool_repo.config(config)
+    result = tool_repo.run("generate")
+    assert result.returncode == 0, result.stderr
+    assert "note:" not in result.stdout
+    assert merge_trigger((tool_repo.path / MERGE).read_text()) == \
+        "['main', 'release/*', 'dev']"
+
+
+def test_merge_trigger_change_fails_verify(tool_repo):
+    generate(tool_repo, base_config())
+    tool_repo.config(merge_config(["main", "dev"]))
+    result = tool_repo.run("verify")
+    assert result.returncode == 1
+    assert "+    branches: ['main', 'dev']" in result.stdout
+
+
+# Patterns a GitHub branch filter reads the same way as the config.
+PASSED_THROUGH = ["main", "release/v1.2", "release/*", "*", "**", "plan/**",
+                  "a**b", "x-*/y", "feature_*.final"]
+# Patterns it reads differently, one per kind: the trigger falls back.
+FALLS_BACK = ["release/v?", "c++", "rel[ab]", "x]", "!main", "a\\b",
+              "**/main", "plan/**/x", "a***"]
+
+
+@pytest.mark.parametrize("pattern", PASSED_THROUGH)
+def test_a_pattern_a_branch_filter_reads_alike_is_passed_through(tool_repo,
+                                                                  pattern):
+    tool_repo.config(merge_config([pattern]))
+    result = tool_repo.run("generate")
+    assert result.returncode == 0, result.stderr
+    assert "note:" not in result.stdout
+    assert merge_trigger((tool_repo.path / MERGE).read_text()) == \
+        f"['{pattern}']"
+
+
+@pytest.mark.parametrize("pattern", FALLS_BACK)
+def test_a_pattern_a_branch_filter_reads_otherwise_falls_back(tool_repo,
+                                                               pattern):
+    """The whole trigger becomes any branch, and generate says so in one
+    line naming the pattern and its job."""
+    tool_repo.config(merge_config(["main"], [pattern, "dev"]))
+    result = tool_repo.run("generate")
+    assert result.returncode == 0, result.stderr
+    assert merge_trigger((tool_repo.path / MERGE).read_text()) == "['**']"
+    notes = [ln for ln in result.stdout.splitlines() if "note:" in ln]
+    assert notes == [
+        "note: the Merge workflow starts on a push to any branch ('**'): "
+        f"pattern {pattern!r} of job m1 means something else in a GitHub "
+        "branch filter; the tool still decides each job against the branch"]
+    assert tool_repo.run("verify").returncode == 0
+
+
+def test_filter_pattern_ok_agrees_with_the_config_matcher():
+    """Every passed-through pattern matches what the config's matcher says,
+    read as GitHub reads it: `*` any characters but `/`, `**` any."""
+    def github(pattern):
+        out = re.escape(pattern).replace(r"\*\*", ".*").replace(r"\*",
+                                                               "[^/]*")
+        return re.compile(out + r"\Z")
+    names = ["main", "release/v1.2", "release/x", "release/x/y", "plan/a/b",
+             "ab", "a/b", "x-1/y", "feature_1.final", "", "dev"]
+    for pattern in PASSED_THROUGH:
+        assert git_cicd.filter_pattern_ok(pattern), pattern
+        for name in names:
+            assert git_cicd.match(pattern, name) == bool(
+                github(pattern).match(name)), (pattern, name)
+    for pattern in FALLS_BACK:
+        assert not git_cicd.filter_pattern_ok(pattern), pattern
+
+
+def test_merge_trigger_quotes_a_single_quote(tool_repo):
+    tool_repo.config(merge_config(["it's"]))
+    assert tool_repo.run("generate").returncode == 0
+    assert merge_trigger((tool_repo.path / MERGE).read_text()) == \
+        "['it''s']"
+
+
+@pytest.mark.parametrize("pattern", ["rel-${{ github.actor }}", "a\tb"])
+def test_a_merge_branch_that_cannot_be_written_is_refused(tool_repo,
+                                                          pattern):
+    tool_repo.config(merge_config([pattern]))
+    result = tool_repo.run("validate")
+    assert result.returncode != 0
+    assert (f"job m0: branches pattern {pattern!r} contains ${{{{ or a "
+            "control character") in result.stdout + result.stderr
+
+
+def test_an_open_job_branch_is_not_written_so_not_refused(tool_repo):
+    tool_repo.config({"jobs": {"t": {"on": ["open"], "branches": ["a${{b"],
+                                     "steps": ["ci/test.sh"]}}})
+    assert tool_repo.run("validate").returncode == 0
+
+
+def test_no_merge_job_no_merge_file(tool_repo):
+    """Without a job on merge no push could need anything, so the Merge
+    workflow is not generated; a file left from before is removed and fails
+    verify until then."""
+    generate(tool_repo, base_config())
+    assert (tool_repo.path / MERGE).is_file()
+    config = base_config()
+    config["jobs"]["release"]["on"] = ["open"]
+    tool_repo.config(config)
+    result = tool_repo.run("verify")
+    assert result.returncode == 1
+    assert f"{MERGE} is still there, but no job has merge in on" in \
+        result.stdout
+    result = tool_repo.run("generate")
+    assert result.returncode == 0
+    assert f"removed {MERGE} (no job has merge in on" in result.stdout
+    assert not (tool_repo.path / MERGE).exists()
+    assert tool_repo.run("verify").returncode == 0
 
 
 def test_merge_skips_a_branch_deletion(tool_repo):
@@ -1241,8 +1384,8 @@ def test_form_block_is_empty_without_manual_jobs():
     config = {"jobs": {"t": {"manual": False, "inputs": {}, "on": ["open"],
                              "cron": None}}}
     assert git_cicd.form_block(config, "r") == ""
-    assert git_cicd.rendered_triggers(config) == ["open", "merge"]
-    assert git_cicd.stale_triggers(config) == ["cron", "manual"]
+    assert git_cicd.rendered_triggers(config) == ["open"]
+    assert git_cicd.stale_triggers(config) == ["merge", "cron", "manual"]
 
 
 # ── the repository's name in the Manual form ────────────────────────────────

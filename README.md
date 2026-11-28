@@ -23,7 +23,7 @@ executes: `open` (pull requests), `merge` (a change lands on a branch),
 | Path | Owner | What |
 |---|---|---|
 | `.vendored/configs/git-cicd.json` | the repository | the config: jobs, `needs_nothing`, `max_parallel` |
-| `.github/workflows/git-cicd-<trigger>.yml` | generated | the GitHub Actions workflows, one per trigger (`git-cicd-open.yml`, `git-cicd-merge.yml`, `git-cicd-manual.yml` when a job allows manual runs, and `git-cicd-cron.yml` when a job has `cron` in `on`); generated, committed |
+| `.github/workflows/git-cicd-<trigger>.yml` | generated | the GitHub Actions workflows, one per trigger (`git-cicd-open.yml`, `git-cicd-merge.yml` when a job has `merge` in `on`, `git-cicd-manual.yml` when a job allows manual runs, and `git-cicd-cron.yml` when a job has `cron` in `on`); generated, committed |
 | your scripts (e.g. `ci/`) | the repository | setup and step scripts, wherever the repository keeps them; git-cicd installs none |
 | `.vendored/pkg/git-cicd/` | git-cicd | the tool and its workflow template, installed by `install.sh` |
 
@@ -562,7 +562,7 @@ overlap rule, and each named for its trigger, so a row reads
 | Trigger | Workflow name | File | Generated |
 |---|---|---|---|
 | `open` | `Open` | `.github/workflows/git-cicd-open.yml` | yes |
-| `merge` | `Merge` | `.github/workflows/git-cicd-merge.yml` | yes |
+| `merge` | `Merge` | `.github/workflows/git-cicd-merge.yml` | yes, when a job has `merge` in `on` |
 | `cron` | `Cron` | `.github/workflows/git-cicd-cron.yml` | yes, when a job has `cron` in `on` |
 | manual | `Manual` | `.github/workflows/git-cicd-manual.yml` | yes, when a job allows manual runs |
 
@@ -574,13 +574,15 @@ not a kind of job.
 `git-cicd generate` writes every generated file. **Every generated file is
 fixed text except the cron workflow's schedule block** (one entry per distinct
 cron expression in the config), **the Manual workflow's form** (which jobs
-its `job` dropdown lists and which named input fields it has) **and the run
-job of each permission group** (below), and the tool path, which follows
-where git-cicd is installed. Jobs are decided when a workflow runs, so
-without a `permissions` declaration beyond a trigger's default `Open` and
-`Merge` never change with the config, and two configs that differ only in
-jobs that are neither `cron` nor manual (or only in their `paths`,
-`branches`, `steps`, `name` or `secrets`) generate the same files.
+its `job` dropdown lists and which named input fields it has), **the Merge
+workflow's push `branches`** (the branches of the `merge` jobs, below) **and
+the run job of each permission group** (below), and the tool path, which
+follows where git-cicd is installed. Jobs are decided when a workflow runs,
+so without a `permissions` declaration beyond a trigger's default `Open`
+never changes with the config and `Merge` changes only in its `branches`,
+and two configs that differ only in jobs that are neither `cron` nor manual
+(or only in their `paths`, `steps`, `name` or `secrets`, or in the
+`branches` of jobs not on `merge`) generate the same files.
 
 **Permissions per job.** The job that runs the config's scripts, `run`, has
 its trigger's default permissions (on `open` the read-only top level; on
@@ -646,8 +648,30 @@ The `open` workflow (`Open`):
 
 The `merge` workflow (`Merge`):
 
-- Event: `push` to every branch (`branches: ['**']`, no tags); `branches`
-  are decided by the tool against the branch the push landed on. Every job
+- Generated only when a job has `merge` in `on`: without one no push could
+  need anything, so there is no Merge workflow (`generate` removes one left
+  from before, and `verify` fails while it is there).
+- Event: `push` (no tags) to the branches the `merge` jobs name. `generate`
+  writes `branches:` as the union, in config order and without duplicates,
+  of the `branches` of every job whose `on` includes `merge`, each a
+  single-quoted string: with one `release` job on `main` that is
+  `branches: ['main']`, so a push to any other branch (a unit branch, a merge
+  into an integration branch) starts no run. The tool still decides each job
+  against the branch the push landed on, as before; a push the trigger lets
+  through that no job matches still reports `Nothing needed`.
+- Which patterns are passed through: a pattern is written into the trigger
+  only when a GitHub branch filter
+  ([filter pattern syntax](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#filter-pattern-cheat-sheet))
+  reads it as the config does: literal characters, `*` (any characters but
+  `/`) and `**` (any characters), for example `main`, `release/*` or
+  `plan/**`. A pattern holding `?` (one character in the config, "zero or
+  one of the preceding character" on GitHub), `+`, `[`, `]`, `!`, `\`, a
+  `**/` segment (which in the config may also match no directory) or `***`
+  falls back: the whole trigger is `branches: ['**']`, a push to any branch
+  (what every Merge workflow did before), and `generate` says so in one
+  line naming the pattern and its job. A run that needs nothing is the safe
+  side; a release that never starts is not. A `merge` job's branch pattern
+  with `${{` or a control character is refused by `validate`. Every job
   skips a push that deletes a branch (`github.event.deleted`): there is no
   commit to run on or to put a status on.
 - Token: `contents: read` at the top level. The job that runs the config's
@@ -870,8 +894,8 @@ to install or upgrade it.
    `chore/install-git-cicd`. That pull request carries the tool, the
    templates, the schema and the config when it is missing. The install also
    regenerates the per-trigger workflows
-   (`.github/workflows/git-cicd-open.yml`, `git-cicd-merge.yml`,
-   `git-cicd-manual.yml` when a job allows manual runs, and
+   (`.github/workflows/git-cicd-open.yml`, `git-cicd-merge.yml` when a job
+   has `merge` in `on`, `git-cicd-manual.yml` when a job allows manual runs, and
    `git-cicd-cron.yml` when a job has `cron` in `on`; on the first upgrade from the single file, also the deletion of
    `.github/workflows/git-cicd.yml`), but the pull request may arrive without
    them: one pushed with a token that may not write workflow files leaves
@@ -997,7 +1021,7 @@ Exit codes:
 | `validate [--config PATH]` | load and validate the config: `config ok: N jobs` or every error |
 | `decide --trigger open\|merge\|manual --target B --source B --base SHA --head SHA [--job NAME] [--json] [--changed-files-out PATH]`, or `decide --trigger cron --cron EXPR [--json]` | one decision per declared job, with the reason; `--job` names the job of a manual run (required with `--trigger manual`, refused with any other); `--cron` is the schedule that fired (required with `--trigger cron`, refused with any other); in Actions also writes `jobs`, `names`, `secrets`, `any`, `max_parallel` (and on cron `runs`, and `groups` when a job on the trigger declares `permissions` beyond its default) to `GITHUB_OUTPUT`, where `jobs` (and `runs`) is the default `run` job's matrix, the placeholder `(nothing)` when it has nothing to run, and `groups` each permission group's matrix |
 | `run-job JOB --trigger open\|merge\|cron\|manual --target … --head SHA [--setup] [--result PATH]` | setup when asked, then the steps; result JSON with the times |
-| `generate` / `verify` | write / check the generated workflows (`.github/workflows/git-cicd-open.yml`, `.github/workflows/git-cicd-merge.yml`, `.github/workflows/git-cicd-manual.yml` when a job allows manual runs, and `.github/workflows/git-cicd-cron.yml` when a job has `cron` in `on`); `generate` removes, and `verify` fails on, the old `.github/workflows/git-cicd.yml` |
+| `generate` / `verify` | write / check the generated workflows (`.github/workflows/git-cicd-open.yml`, `.github/workflows/git-cicd-merge.yml` when a job has `merge` in `on`, `.github/workflows/git-cicd-manual.yml` when a job allows manual runs, and `.github/workflows/git-cicd-cron.yml` when a job has `cron` in `on`); `generate` removes, and `verify` fails on, the old `.github/workflows/git-cicd.yml` |
 | `report --decisions FILE --results DIR [--trigger open\|merge\|cron\|manual] [--verdict-out PATH]` | the report and verdict from `decide --json` and `run-job --result` files; `--verdict-out` writes the status state (`success`/`failure`) and description, one per line (on cron one line per branch head: `<sha> TAB <state> TAB <description>`) |
 | `check […]` | the local command above |
 

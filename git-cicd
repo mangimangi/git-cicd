@@ -441,6 +441,13 @@ def _validate_job(root, name, job):
                       "is empty)")
     elif any(b == "" for b in branches):
         errors.append(f"{prefix}: branches contains an empty pattern")
+    elif "merge" in on:
+        for b in branches:
+            if EXPRESSION_MARK in b or not all(ch.isprintable() for ch in b):
+                errors.append(f"{prefix}: branches pattern {b!r} contains "
+                              f"{EXPRESSION_MARK} or a control character, "
+                              "which cannot be written into the Merge "
+                              "workflow's trigger")
 
     # cron
     has_cron = "cron" in on
@@ -1317,6 +1324,69 @@ def schedule_block(config):
     return "\n".join(lines) + "\n"
 
 
+# The characters a GitHub branch filter reads specially and the config's
+# patterns take literally (`?` is one character in the config, "zero or one
+# of the preceding character" on GitHub); a pattern holding one cannot be
+# passed through. GitHub's filter pattern syntax:
+# https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#filter-pattern-cheat-sheet
+FILTER_SPECIAL = ("?", "+", "[", "]", "!", "\\")
+ANY_BRANCH = "**"
+
+
+def filter_pattern_ok(pattern):
+    """True when a config branches pattern means the same as a GitHub branch
+    filter pattern, so the Merge workflow's trigger can name it as it is.
+    Both read `*` as any characters but `/` and `**` as any characters; the
+    config's `**/` at the start of a segment may also match no directory at
+    all, which GitHub's cannot, and `***` is left to neither. Everything else
+    must be literal to both."""
+    if any(ch in pattern for ch in FILTER_SPECIAL) or "***" in pattern:
+        return False
+    return not re.search(r"(?:^|/)\*\*/", pattern)
+
+
+def merge_branches(config):
+    """The Merge workflow's push `branches`: the union, in config order and
+    without duplicates, of the branches of every job whose on includes
+    merge. Return (patterns, refused): when a pattern cannot be passed
+    through (filter_pattern_ok), patterns is [ANY_BRANCH] and refused is
+    (job, pattern) for the first such one, else refused is None."""
+    patterns = []
+    for name, job in config["jobs"].items():
+        if "merge" not in job["on"]:
+            continue
+        for b in job["branches"]:
+            if not filter_pattern_ok(b):
+                return [ANY_BRANCH], (name, b)
+            if b not in patterns:
+                patterns.append(b)
+    return patterns, None
+
+
+def _yaml_single(text):
+    return "'" + text.replace("'", "''") + "'"
+
+
+def branches_block(config):
+    """The Merge trigger's branches as a YAML flow sequence of single-quoted
+    strings, from validated patterns (no `${{`, no control character)."""
+    patterns, _ = merge_branches(config)
+    return "[" + ", ".join(_yaml_single(p) for p in patterns) + "]"
+
+
+def branches_note(config):
+    """generate's one line when the Merge trigger falls back to any branch,
+    else None."""
+    _, refused = merge_branches(config)
+    if refused is None:
+        return None
+    name, pattern = refused
+    return (f"note: the Merge workflow starts on a push to any branch "
+            f"('{ANY_BRANCH}'): pattern {pattern!r} of job {name} means "
+            "something else in a GitHub branch filter; the tool still "
+            "decides each job against the branch")
+
+
 def manual_job_names(config):
     return [n for n, j in config["jobs"].items() if j["manual"]]
 
@@ -1426,7 +1496,9 @@ def render_workflow(config, tool, template, trigger=None, repo=None):
     """One workflow file from its template, deterministic byte for byte. A
     template is fixed text; the only parts that depend on the config are the
     schedule block, which only the cron template holds (`__SCHEDULE__`), the
-    form, which only the manual template holds (`__FORM__`), and the run job
+    form, which only the manual template holds (`__FORM__`), the push
+    branches, which only the merge template holds (`__BRANCHES__`,
+    branches_block), and the run job
     of each permission group with the decide output and the report's needs
     that go with them (`__GROUP_OUTPUTS__`, `__GROUP_JOBS__`,
     `__GROUP_NEEDS__`), empty when no job declares permissions beyond its
@@ -1442,6 +1514,8 @@ def render_workflow(config, tool, template, trigger=None, repo=None):
                         "outputs.groups }}\n" if groups else "")
     text = text.replace(GROUP_NEEDS, "".join(f", {g}" for g in groups))
     text = text.replace("__SCHEDULE__\n", schedule_block(config))
+    if "__BRANCHES__" in template:
+        text = text.replace("__BRANCHES__", branches_block(config))
     if "__FORM__\n" in template:
         repo = repo or config.get("repository") or "repository"
         text = text.replace("__FORM__\n", form_block(config, repo))
@@ -1456,8 +1530,13 @@ def has_manual_jobs(config):
     return bool(manual_job_names(config))
 
 
+def has_merge_jobs(config):
+    return any("merge" in j["on"] for j in config["jobs"].values())
+
+
 # Why a trigger's workflow is not generated, for generate and verify.
 NOT_GENERATED = {
+    "merge": "no job has merge in on",
     "cron": "no job has cron in on",
     "manual": "no job allows manual runs",
 }
@@ -1465,19 +1544,21 @@ NOT_GENERATED = {
 
 def rendered_triggers(config):
     """The triggers whose workflow the config generates: every one, except
-    cron when no job has cron in on (GitHub needs an event under on:, and a
+    merge when no job has merge in on (a push must not start a run that can
+    never need anything), cron when no job has cron in on (GitHub needs an event under on:, and a
     schedule must never fire with nothing to run), and manual when no job
     allows manual runs (the form's `job` dropdown needs an option, and a
     workflow with nothing to run must not exist)."""
-    present = {"cron": has_cron_jobs(config),
+    present = {"merge": has_merge_jobs(config),
+               "cron": has_cron_jobs(config),
                "manual": has_manual_jobs(config)}
     return [t for t in GENERATED_TRIGGERS if present.get(t, True)]
 
 
 def stale_triggers(config):
     """The triggers whose workflow the config no longer generates (generate
-    removes their files, verify fails while one is there): cron when no job
-    has cron in on, manual when no job allows manual runs."""
+    removes their files, verify fails while one is there): merge when no job
+    has merge in on, cron when no job has cron in on, manual when no job allows manual runs."""
     return [t for t in GENERATED_TRIGGERS
             if t not in rendered_triggers(config)]
 
@@ -2194,6 +2275,8 @@ def cmd_generate(args, root):
         with open(path, "w", encoding="utf-8", newline="") as f:
             f.write(text)
         print(f"wrote {rel}")
+        if rel == WORKFLOWS["merge"][1] and branches_note(config):
+            print(branches_note(config))
     for trigger in stale_triggers(config):
         rel = WORKFLOWS[trigger][1]
         if os.path.lexists(os.path.join(root, rel)):

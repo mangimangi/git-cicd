@@ -6,6 +6,7 @@ Releases of git-cicd. Each entry is written by `git-semver bump` in the pull req
 
 ### Changed
 - The Manual workflow's job dropdown lists each job by its row name, <name> / <repo>:<job>, as a pull request's checks show it, and input descriptions name their jobs the same way (gcd-cffa). Adopters run generate after upgrading and commit the Manual workflow: the form's job values changed (the bare config key is still accepted from the command line). <repo> no longer comes from GITHUB_REPOSITORY: it is the new config key repository, else the origin remote's last path segment, else the directory name.
+- The Merge workflow starts only on a push to a branch a merge job names (gcd-13c9): its push branches are the union of the merge jobs' branches (['main'] for a release on main), so pushes to other branches, unit and integration branches included, no longer start a Merge run. A pattern a GitHub branch filter reads differently (?, +, [, ], !, \, a **/ segment, ***) falls back to ['**'] and generate says so; without a merge job the Merge workflow is not generated. Adopters run generate after upgrading and commit the Merge workflow (and the removal of it when no job is on merge).
 
 ## [0.2.0] - 2026-11-28
 
