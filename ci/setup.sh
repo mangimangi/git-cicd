@@ -49,5 +49,6 @@ fi
 
 "$PYTHON" -m venv --clear "$VENV"
 "$VENV/bin/python" -m pip install --quiet --upgrade pip
-"$VENV/bin/python" -m pip install --quiet pytest pytest-cov
+# coverage >= 7.10 measures subprocesses (pyproject.toml patch = ["subprocess"]).
+"$VENV/bin/python" -m pip install --quiet pytest pytest-cov "coverage>=7.10"
 "$VENV/bin/python" --version

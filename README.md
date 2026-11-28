@@ -667,7 +667,7 @@ config declares four jobs, one per trigger:
 
 | Job | Row | Trigger | Script | What |
 |---|---|---|---|---|
-| `test` | `Open / Unit Tests / git-cicd:test` | `open`, every branch, `paths` the code | `ci/setup.sh`, `ci/test.sh` | setup installs pytest for the Python floor (`>=3.11` in `pyproject.toml`); the step runs the suite |
+| `test` | `Open / Unit Tests / git-cicd:test` | `open`, every branch, `paths` the code | `ci/setup.sh`, `ci/test.sh` | setup installs pytest, pytest-cov and coverage (7.10 or later) for the Python floor (`>=3.11` in `pyproject.toml`); the step runs the suite and prints the line coverage of `git-cicd` with its missing lines |
 | `vendor-check` | `Open / Check Vendor Files / git-cicd:vendor-check` | `open`, every branch | `ci/vendor-check.sh` | `python3 .vendored/check --base "$CICD_BASE"`; it sets `GITHUB_HEAD_REF` from `CICD_SOURCE_BRANCH` when unset, so a local `check` lets `chore/install-*` branches through like Actions does |
 | `release` | `Merge / Release / git-cicd:release` | `merge` on `main`; by hand with the inputs `bump_type` (patch, minor, major; default patch), `subdirectory`, `changelog_description` | `ci/release.sh` | git-semver's `release`: `publish` when the landed commit's subject starts with `chore: bump version`, nothing for `chore: install`, otherwise `bump` (and `bump` on a manual run); it gives `release` `GITHUB_EVENT_NAME`, `GITHUB_EVENT_BEFORE`, `INPUT_BUMP_TYPE`, `INPUT_SUBDIRECTORY`, `INPUT_CHANGELOG_DESCRIPTION` and `GH_TOKEN` |
 | `update-vendored` | `Cron / Install Vendored / git-cicd:update-vendored` | `cron` `0 9 * * 1` on `main`; by hand with the inputs `vendor` (default all), `version` (default latest), `private` (true or false; default false) | `ci/update-vendored.sh` | `python3 .vendored/install <vendor> --version <version> --pr --deps=install` (plus `--private`), with `GH_TOKEN` set to `VENDOR_PAT` when set, else `GITHUB_TOKEN`; only CI runs it |
@@ -683,6 +683,14 @@ workflow* on `main`, job `release` (inputs for example
 The vendor-installed workflows these jobs replace (`version-bump.yml`,
 `check-vendor.yml`, `install-vendored.yml`) are removed from this repository;
 git-semver and git-vendored still install them into other repositories.
+
+The `test` step measures line coverage of `git-cicd` in the pytest process
+and in every `python3 git-cicd …` a test starts as a subprocess, including
+the copies tests install into temporary repositories; `pyproject.toml`
+(`[tool.coverage]`) maps them onto one `git-cicd` row. Each run writes its
+data into a fresh temporary directory, so two runs give the same figure.
+Without setup (no pytest-cov), the step runs the suite and says coverage was
+not measured.
 
 ```bash
 ./git-cicd check --setup     # the first time

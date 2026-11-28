@@ -11,13 +11,16 @@ interface it implements is described in `README.md`.
 The checks run with the tool itself, the same way CI runs them:
 
 ```bash
-./git-cicd check --setup   # the first time: ci/setup.sh installs pytest for the Python floor (3.11)
+./git-cicd check --setup   # the first time: ci/setup.sh installs pytest and coverage for the Python floor (3.11)
 ./git-cicd check           # afterwards
 ```
 
 `check` compares the current branch against its target (upstream, else
 `origin/HEAD`, else `main`), runs the needed jobs one after another and exits
 non-zero on a failed verdict. Run a single job with `--job test`.
+The `test` job measures line coverage of `git-cicd`, including the runs tests
+start as subprocesses (`pyproject.toml` `[tool.coverage]`), and prints one
+`git-cicd` row with the missing lines.
 
 After changing `.vendored/configs/git-cicd.json` or a template under
 `templates/workflows/`, run `./git-cicd generate` and commit the generated
