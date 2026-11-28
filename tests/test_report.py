@@ -284,6 +284,26 @@ def test_report_cron_trigger_not_built(config, repo, tmp_path):
     assert "FAILED" in summary.read_text()
 
 
+def test_report_command_merge(config, repo, tmp_path):
+    repo.install_tool()
+    assert repo.run("generate").returncode == 0
+    dec = decision(test=(True, "1 changed file match paths"))
+    dec["trigger"] = "merge"
+    (tmp_path / "d.json").write_text(json.dumps(dec))
+    (tmp_path / "r").mkdir()
+    res = passed_result("test")
+    res.update(state="failed", failed_step="ci/cov.sh", exit_code=1)
+    (tmp_path / "r" / "result.json").write_text(json.dumps(res))
+    out = tmp_path / "verdict.txt"
+    result = repo.run("report", "--trigger", "merge", "--decisions",
+                      str(tmp_path / "d.json"), "--results",
+                      str(tmp_path / "r"), "--verdict-out", str(out))
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "not built yet" not in result.stdout + result.stderr
+    assert out.read_text().splitlines() == [
+        "failure", "FAILED - 1 of 3 jobs needed, 1 failed"]
+
+
 def test_load_results_ignores_other_json(tmp_path):
     (tmp_path / "a" / "b").mkdir(parents=True)
     (tmp_path / "a" / "b" / "r.json").write_text(json.dumps(

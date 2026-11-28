@@ -282,22 +282,122 @@ def test_not_open_jobs_reported(repo):
     assert jobs["release"]["reason"] == "not an open job"
 
 
-@pytest.mark.parametrize("trigger", ["merge", "cron", "manual"])
+@pytest.mark.parametrize("trigger", ["cron", "manual"])
 def test_unbuilt_triggers_exit_2(repo, trigger):
     base = setup_repo(repo)
     result = repo.run("decide", "--trigger", trigger, "--target", "main",
                       "--source", "feature", "--base", base, "--head", base)
     assert result.returncode == 2
-    assert (f"the {trigger} trigger is not built yet (git-cicd gcd-e74c builds "
-            "open only)") in result.stderr
+    assert (f"the {trigger} trigger is not built yet (built: "
+            f"{', '.join(git_cicd.BUILT_TRIGGERS)})") in result.stderr
+    assert "gcd-e74c" not in result.stderr
     assert result.stdout == ""
 
 
 def test_unbuilt_trigger_lists_declaring_jobs(repo):
-    base = setup_repo(repo)
-    result = repo.run("decide", "--trigger", "merge", "--target", "main",
+    base = setup_repo(repo, jobs={
+        "nightly": {"on": ["cron"], "branches": ["main"], "cron": "0 3 * * *",
+                    "steps": ["ci/test.sh"]}})
+    result = repo.run("decide", "--trigger", "cron", "--target", "main",
                       "--source", "feature", "--base", base, "--head", base)
-    assert "jobs declaring it: release" in result.stderr
+    assert "jobs declaring it: nightly" in result.stderr
+
+
+# ── merge: a change landed on a branch ──────────────────────────────────────
+
+MERGE_JOBS = {
+    "test": {"on": ["open"], "branches": ["**"], "paths": ["src/**"],
+             "steps": ["ci/test.sh"]},
+    "release": {"on": ["merge"], "branches": ["main"], "steps": ["ci/bump.sh"]},
+    "docs": {"on": ["merge", "open"], "branches": ["main", "plan/**"],
+             "paths": ["docs/**"], "steps": ["ci/lint.sh"]},
+}
+
+
+def setup_merge(repo):
+    """A repo on main with the merge jobs; return the commit before a push."""
+    base = setup_repo(repo, jobs=MERGE_JOBS, needs_nothing=["*.md"])
+    repo.git("checkout", "-q", "main")
+    return base
+
+
+def decide_merge(repo, before, branch="main"):
+    return decide(repo, before, target=branch, source=branch,
+                  trigger="merge")
+
+
+def test_merge_paths_and_open_jobs(repo):
+    before = setup_merge(repo)
+    repo.write("docs/guide.md", "new\n")
+    repo.commit("docs")
+    data, jobs = decide_merge(repo, before)
+    assert data["trigger"] == "merge"
+    assert data["changed_files"] == ["docs/guide.md"]
+    assert jobs["test"] == dict(jobs["test"], needed=False,
+                                reason="not a merge job")
+    assert jobs["release"]["needed"] is True
+    assert jobs["release"]["reason"] == ("1 changed file outside needs_nothing "
+                                         "(the job has no paths)")
+    assert jobs["docs"]["needed"] is True
+    assert jobs["docs"]["reason"] == "1 changed file match paths"
+
+
+def test_merge_no_path_match(repo):
+    before = setup_merge(repo)
+    repo.write("src/app.py", "x = 3\n")
+    repo.commit("src")
+    _, jobs = decide_merge(repo, before)
+    assert jobs["release"]["needed"] is True
+    assert jobs["docs"]["needed"] is False
+    assert jobs["docs"]["reason"] == "no changed file matches paths"
+
+
+def test_merge_branches_bind(repo):
+    before = setup_merge(repo)
+    repo.write("docs/guide.md", "new\n")
+    repo.commit("docs")
+    _, jobs = decide_merge(repo, before, branch="plan/x")
+    assert jobs["release"]["needed"] is False
+    assert jobs["release"]["reason"] == "target plan/x does not match branches"
+    assert jobs["docs"]["needed"] is True
+
+
+def test_merge_only_needs_nothing(repo):
+    before = setup_merge(repo)
+    repo.write("README.md", "changed\n")
+    repo.commit("readme")
+    _, jobs = decide_merge(repo, before)
+    for name in ("release", "docs"):
+        assert jobs[name]["needed"] is False
+        assert jobs[name]["reason"] == "only needs_nothing files changed"
+
+
+def test_merge_job_script_forces(repo):
+    before = setup_merge(repo)
+    repo.script("ci/test.sh", "echo changed\n")  # an open job's script
+    repo.commit("script")
+    _, jobs = decide_merge(repo, before)
+    assert jobs["release"]["needed"] and jobs["docs"]["needed"]
+    assert jobs["docs"]["reason"] == "config or job script changed: ci/test.sh"
+
+
+@pytest.mark.parametrize("before,why", [
+    ("0" * 40, "is the all-zero commit (the push created the branch)"),
+    ("1" * 40, "is not a commit in this repository"),
+])
+def test_merge_without_a_diff_needs_every_matching_job(repo, before, why):
+    setup_merge(repo)
+    repo.write("README.md", "changed\n")  # needs_nothing only
+    repo.commit("readme")
+    data, jobs = decide_merge(repo, before)
+    assert data["changed_files"] == []
+    for name in ("release", "docs"):
+        assert jobs[name]["needed"] is True
+        assert jobs[name]["reason"] == (
+            f"cannot compute the diff: base {before!r} {why}")
+    assert jobs["test"]["needed"] is False
+    _, jobs = decide_merge(repo, before, branch="other")
+    assert not jobs["release"]["needed"] and not jobs["docs"]["needed"]
 
 
 @pytest.mark.parametrize("paths,changed,needed", [

@@ -171,6 +171,30 @@ def test_environment_reaches_step(repo, log):
     assert "ghs_tok" not in result.stdout + result.stderr
 
 
+def test_merge_environment_reaches_step(repo, log):
+    """On merge the target is the branch landed on, the source the same
+    branch, the base the commit before the push and the head the landed
+    commit; the changed files are what the push brought."""
+    repo.script("ci/env.sh", DUMP_ENV)
+    repo.config({"jobs": {"envjob": {
+        "on": ["merge"], "branches": ["main"], "steps": ["ci/env.sh"]}}})
+    before = repo.commit("base")
+    repo.write("src/app.py", "x\n")
+    landed = repo.commit("landed")
+    result = repo.run("run-job", "envjob", "--trigger=merge", "--target=main",
+                      "--source=main", f"--base={before}", f"--head={landed}",
+                      env=env_for(log))
+    assert result.returncode == 0, result.stdout + result.stderr
+    values = dict(line.split("=", 1) for line in logged(log)[:7])
+    assert values == {
+        "CICD_TRIGGER": "merge", "CICD_JOB": "envjob",
+        "CICD_TARGET_BRANCH": "main", "CICD_SOURCE_BRANCH": "main",
+        "CICD_BASE": before, "CICD_HEAD": landed,
+        "CICD_CHANGED_FILES": values["CICD_CHANGED_FILES"],
+    }
+    assert (log.parent / "log.txt.changed").read_text() == "src/app.py\n"
+
+
 def test_step_receives_trigger_not_moment(repo, log):
     """The step sees CICD_TRIGGER=open; the old name CICD_MOMENT is not set."""
     repo.script("ci/env.sh", 'env >> "$LOG"\n')
@@ -261,7 +285,7 @@ def test_unknown_job(repo, log):
     assert "unknown job 'nope'" in result.stderr
 
 
-@pytest.mark.parametrize("trigger", ["merge", "cron", "manual"])
+@pytest.mark.parametrize("trigger", ["cron", "manual"])
 def test_unbuilt_trigger(repo, log, trigger):
     repo.script("ci/a.sh")
     base, head = setup_repo(repo, {"t": {

@@ -10,11 +10,13 @@ import pytest
 
 ROOT = Path(__file__).parent.parent
 INSTALL_SH = ROOT / "install.sh"
-SHIPPED = ["git-cicd", "templates/workflows/open.yml", "templates/config.json",
+SHIPPED = ["git-cicd", "templates/workflows/open.yml",
+           "templates/workflows/merge.yml", "templates/config.json",
            "templates/config.schema"]
 INSTALL_DIR = ".vendored/pkg/git-cicd"
 CONFIG = ".vendored/configs/git-cicd.json"
 WORKFLOW = ".github/workflows/git-cicd-open.yml"
+MERGE = ".github/workflows/git-cicd-merge.yml"
 WORKFLOWS_ALLOWED = ".github/workflows/git-cicd-*.yml"
 LEGACY = ".github/workflows/git-cicd.yml"
 
@@ -77,6 +79,11 @@ def test_code_lands_under_install_dir(tmp_path, project):
     assert (project / INSTALL_DIR / "templates" / "workflows" / "open.yml") \
         .read_bytes() == (ROOT / "templates" / "workflows" / "open.yml") \
         .read_bytes()
+    for trigger in ("open", "merge"):
+        assert (project / INSTALL_DIR / "templates" / "workflows"
+                / f"{trigger}.yml").read_bytes() == \
+            (ROOT / "templates" / "workflows" / f"{trigger}.yml").read_bytes()
+    assert (project / MERGE).is_file()
     assert "Installing git-cicd v1.2.3 from mangimangi/git-cicd" in result.stdout
 
 
@@ -165,7 +172,8 @@ def test_manifest_lists_installed_files(tmp_path, project):
     files = manifest.read_text().splitlines()
     assert files == [f"{INSTALL_DIR}/git-cicd",
                      f"{INSTALL_DIR}/templates/workflows/open.yml",
-                     ".vendored/manifests/git-cicd.schema", WORKFLOW]
+                     f"{INSTALL_DIR}/templates/workflows/merge.yml",
+                     ".vendored/manifests/git-cicd.schema", WORKFLOW, MERGE]
     assert CONFIG not in files
     for f in files:
         assert (project / f).is_file()

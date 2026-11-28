@@ -22,7 +22,7 @@ non-zero on a failed verdict. Run a single job with `--job test`.
 After changing `.vendored/configs/git-cicd.json` or a template under
 `templates/workflows/`, run `./git-cicd generate` and commit the generated
 workflows (`.github/workflows/git-cicd-<trigger>.yml`, one per trigger;
-`git-cicd-open.yml` today); the verdict fails while they disagree.
+`git-cicd-open.yml` and `git-cicd-merge.yml` today); the verdict fails while they disagree.
 
 ## Vendored tools
 

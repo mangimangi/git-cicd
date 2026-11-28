@@ -14,17 +14,17 @@ git CLI, vendored by [git-vendored](https://github.com/mangimangi/git-vendored)
 and versioned by [git-semver](https://github.com/mangimangi/git-semver).
 
 What is built today: the whole interface is validated, and the `open` trigger
-(pull requests) and local runs execute. The `merge` and `cron` triggers and
-manual runs validate in a config and are reported as **not built yet** when
-asked to run (exit 2); they are never silently ignored. See
-[Not built yet](#not-built-yet).
+(pull requests), the `merge` trigger (a change lands on a branch) and local
+runs execute. The `cron` trigger and manual runs validate in a config and are
+reported as **not built yet** when asked to run (exit 2); they are never
+silently ignored. See [Not built yet](#not-built-yet).
 
 ## Files
 
 | Path | Owner | What |
 |---|---|---|
 | `.vendored/configs/git-cicd.json` | the repository | the config: jobs, `needs_nothing`, `max_parallel` |
-| `.github/workflows/git-cicd-<trigger>.yml` | generated | the GitHub Actions workflows, one per trigger (`git-cicd-open.yml` today); generated, committed |
+| `.github/workflows/git-cicd-<trigger>.yml` | generated | the GitHub Actions workflows, one per trigger (`git-cicd-open.yml` and `git-cicd-merge.yml` today); generated, committed |
 | your scripts (e.g. `ci/`) | the repository | setup and step scripts, wherever the repository keeps them; git-cicd installs none |
 | `.vendored/pkg/git-cicd/` | git-cicd | the tool and its workflow template, installed by `install.sh` |
 
@@ -112,7 +112,15 @@ any sequence without `/` (so `*.md` is Markdown at the repository root only),
   matches `branches`, and the change affects the job: a changed file outside
   `needs_nothing` matches its `paths` (a job without `paths` is affected by any
   change outside `needs_nothing`).
-- A change affects **every** `open` job whose `branches` match when it touches
+- **`merge`**: a change lands on a branch (a push), the branch matches
+  `branches`, and the change affects the job under the same `paths` and
+  `needs_nothing` rules as `open`. The changed files are what the push
+  brought (`BEFORE...LANDED`, the commit before the push to the landed
+  commit). A push that creates a branch has no commit before it (an all-zero
+  `before`), so, like any base that does not resolve, the diff cannot be
+  computed and every `merge` job whose `branches` match is needed. A push
+  that deletes a branch runs nothing.
+- A change affects **every** `open` or `merge` job whose `branches` match when it touches
   the git-cicd config or any script any job names (setup or step, whatever
   the job's triggers); when a changed file is in no job's `paths` and not in
   `needs_nothing`; or when the diff cannot be computed or is empty. So "not
@@ -132,13 +140,13 @@ Every decision carries a reason, and the report shows it.
 
 | Variable | Value |
 |---|---|
-| `CICD_TRIGGER` | the trigger (`open`) |
+| `CICD_TRIGGER` | the trigger (`open`, `merge`) |
 | `CICD_JOB` | the job name |
-| `CICD_TARGET_BRANCH` | the target branch (the pull request's base) |
-| `CICD_SOURCE_BRANCH` | the source branch (the pull request's head; what `.vendored/check` needs to let install branches through) |
-| `CICD_BASE` | the base commit |
-| `CICD_HEAD` | the head commit |
-| `CICD_CHANGED_FILES` | absolute path of a file listing the changed files, one per line |
+| `CICD_TARGET_BRANCH` | the target branch: on `open` the pull request's base; on `merge` the branch the change landed on |
+| `CICD_SOURCE_BRANCH` | the source branch: on `open` the pull request's head (what `.vendored/check` needs to let install branches through); on `merge` the same branch as the target (a push has no separate source, and the variable is never empty) |
+| `CICD_BASE` | the base commit: on `open` the pull request's base; on `merge` the commit before the push (all zeros when the push created the branch) |
+| `CICD_HEAD` | the head commit: on `open` the pull request's head; on `merge` the landed commit |
+| `CICD_CHANGED_FILES` | absolute path of a file listing the changed files, one per line (empty when the diff cannot be computed) |
 
 - `GITHUB_TOKEN` and `VENDOR_PAT`, passed through unchanged. git-cicd itself
   never reads or logs them.
@@ -177,7 +185,9 @@ git-cicd owns its own three; a config job's row has the job's display name
 (its job name in title case when it has none) and `<repo>`, the name of the
 repository the workflow runs in. GitHub shows a check run after its
 workflow's name, which is the trigger's (`Open / Unit Tests / medici:unit-tests`,
-`Open / Decide / git-cicd:decide`); a status has no workflow and shows as
+`Open / Decide / git-cicd:decide`, and on a push `Merge / Unit Tests /
+medici:unit-tests`, `Merge / Decide / git-cicd:decide`,
+`Merge / Report / git-cicd:report`); a status has no workflow and shows as
 `Verdict / git-cicd:verdict`. No row or status name carries a version: it is
 what branch protection and anything else that waits on a check refers to, and
 it does not change when a tool is upgraded.
@@ -259,6 +269,19 @@ What a reader can rely on, and from when:
   its `decide` job once it sees that the pull request's head has moved on,
   and its report is FAILED for every job it needed.
 
+**The status when there is no pull request.** A `merge` run's verdict is the
+same `Verdict / git-cicd:verdict` commit status, on the landed commit:
+pending from the first step of decide, final from the last step of report,
+and failure when the report did not run to the end. One exception keeps the
+status the pull request's: a push to a branch with an open pull request
+starts both `Open` and `Merge` on the same commit, and both would write the
+same status (the last writer wins, so a `Merge` run that needs nothing could
+turn a failed `Open` verdict green). So a run of any trigger but `open` posts
+the status, pending and final, **only when no open pull request has that
+commit as its head**. Otherwise the `Open` run owns the status, and the other
+run's verdict is its `Report / git-cicd:report` check run, which fails on a
+FAILED verdict, and its job summary.
+
 **Wait on the `Verdict / git-cicd:verdict` status.** In branch protection,
 require `Verdict / git-cicd:verdict` (a required check matches a status of
 that name). A script should read the commit's statuses
@@ -279,7 +302,7 @@ overlap rule, and each named for its trigger, so a row reads
 | Trigger | Workflow name | File | Generated |
 |---|---|---|---|
 | `open` | `Open` | `.github/workflows/git-cicd-open.yml` | yes |
-| `merge` | `Merge` | `.github/workflows/git-cicd-merge.yml` | not yet |
+| `merge` | `Merge` | `.github/workflows/git-cicd-merge.yml` | yes |
 | `cron` | `Cron` | `.github/workflows/git-cicd-cron.yml` | not yet |
 | manual | `Manual` | `.github/workflows/git-cicd-manual.yml` | not yet |
 
@@ -316,6 +339,34 @@ The `open` workflow (`Open`):
 - Only GitHub's own `actions/checkout`, `actions/upload-artifact` and
   `actions/download-artifact`; no Python version is written anywhere: setup
   scripts install the Python they need (for example from `requires-python`).
+
+The `merge` workflow (`Merge`):
+
+- Event: `push` to every branch (`branches: ['**']`, no tags); `branches`
+  are decided by the tool against the branch the push landed on. Every job
+  skips a push that deletes a branch (`github.event.deleted`): there is no
+  commit to run on or to put a status on.
+- Token: `contents: read` at the top level. The job that runs the config's
+  scripts gets `contents: write` and `pull-requests: write` (a release pushes
+  a commit and tags, or opens a pull request), and checks out the landed
+  commit on its branch with full history and tags (`fetch-depth: 0`,
+  `fetch-tags: true`). `Decide / git-cicd:decide` and
+  `Report / git-cicd:report` get `statuses: write` and `pull-requests: read`
+  (to see whether an open pull request owns the status); decide also gets
+  `actions: read` for the queue.
+- Overlap: runs on one branch go **one at a time and are never cancelled**.
+  The file has no `concurrency` key: a GitHub concurrency group keeps only
+  one pending run, and cancels the pending one when a newer run joins, even
+  with `cancel-in-progress: false`. Instead `decide`, right after posting
+  pending, waits until no earlier run (a lower run id) of
+  `git-cicd-merge.yml` or `git-cicd-manual.yml` on the same branch is queued
+  or in progress (it polls `repos/{owner}/{repo}/actions/runs` for the
+  branch's latest 100 runs), so a manual run of a release job shares the
+  queue.
+- Jobs as on `open`: `decide`, one `run` per needed job (at most
+  `max_parallel` at once, always with setup), and `verdict`
+  (`Report / git-cicd:report`); the verdict is the status on the landed
+  commit under the rule above.
 
 **The generate/verify rule.** The platform's token cannot push workflow files,
 so CI never regenerates. Whoever upgrades git-cicd or changes the config runs
@@ -458,20 +509,20 @@ Exit codes:
 | Command | What |
 |---|---|
 | `validate [--config PATH]` | load and validate the config: `config ok: N jobs` or every error |
-| `decide --trigger open --target B --source B --base SHA --head SHA [--json] [--changed-files-out PATH]` | one decision per declared job, with the reason; in Actions also writes `jobs`, `any`, `max_parallel` to `GITHUB_OUTPUT` |
-| `run-job JOB --trigger open --target … --head SHA [--setup] [--result PATH]` | setup when asked, then the steps; result JSON with the times |
-| `generate` / `verify` | write / check the generated workflows (`.github/workflows/git-cicd-open.yml`); `generate` removes, and `verify` fails on, the old `.github/workflows/git-cicd.yml` |
-| `report --decisions FILE --results DIR [--verdict-out PATH]` | the report and verdict from `decide --json` and `run-job --result` files; `--verdict-out` writes the status state (`success`/`failure`) and description, one per line |
+| `decide --trigger open\|merge --target B --source B --base SHA --head SHA [--json] [--changed-files-out PATH]` | one decision per declared job, with the reason; in Actions also writes `jobs`, `names`, `any`, `max_parallel` to `GITHUB_OUTPUT` |
+| `run-job JOB --trigger open\|merge --target … --head SHA [--setup] [--result PATH]` | setup when asked, then the steps; result JSON with the times |
+| `generate` / `verify` | write / check the generated workflows (`.github/workflows/git-cicd-open.yml`, `.github/workflows/git-cicd-merge.yml`); `generate` removes, and `verify` fails on, the old `.github/workflows/git-cicd.yml` |
+| `report --decisions FILE --results DIR [--trigger open\|merge] [--verdict-out PATH]` | the report and verdict from `decide --json` and `run-job --result` files; `--verdict-out` writes the status state (`success`/`failure`) and description, one per line |
 | `check […]` | the local command above |
 
 ## Not built yet
 
-- The `merge` and `cron` triggers and manual runs: they validate, and
+- The `cron` trigger and manual runs: they validate, and
   `decide`/`run-job`/`report` exit 2 with `the <trigger> trigger is not built
-  yet` when asked to run them. Their workflows (`Merge`, `Cron`, `Manual`) are
-  not generated yet, so nothing triggers them; when they are built, each adds
-  its own file under the name above, with its own GitHub event, permissions and
-  overlap rule (`merge` queued, never cancelled), and changes no other file.
+  yet` when asked to run them. Their workflows (`Cron`, `Manual`) are not
+  generated yet, so nothing triggers them; when they are built, each adds its
+  own file under the name above, with its own GitHub event, permissions and
+  overlap rule, and changes no other file.
 - Declared inputs for manual runs.
 - Secrets beyond `GITHUB_TOKEN` and `VENDOR_PAT`.
 - An image or runtime per job.

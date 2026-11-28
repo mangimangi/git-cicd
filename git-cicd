@@ -41,7 +41,7 @@ WORKFLOWS = {
     "cron": ("Cron", ".github/workflows/git-cicd-cron.yml"),
     "manual": ("Manual", ".github/workflows/git-cicd-manual.yml"),
 }
-GENERATED_TRIGGERS = ("open",)
+GENERATED_TRIGGERS = ("open", "merge")
 # The single workflow file of git-cicd before the per-trigger files; generate
 # removes it and verify fails while it is there.
 LEGACY_WORKFLOW_PATH = ".github/workflows/git-cicd.yml"
@@ -396,14 +396,17 @@ def load_config(root, path=None):
 
 # ── Decide ──────────────────────────────────────────────────────────────────
 
-NOT_BUILT = "the {trigger} trigger is not built yet (git-cicd gcd-e74c builds open only)"
 ALL_TRIGGERS = TRIGGERS + ("manual",)
+# The triggers that execute; every other one is refused, never ignored.
+BUILT_TRIGGERS = ("open", "merge")
+NOT_BUILT = ("the {trigger} trigger is not built yet (built: "
+             + ", ".join(BUILT_TRIGGERS) + ")")
 
 
 def check_trigger(config, trigger):
     """Raise UsageError for a trigger that is not built yet, naming the jobs
     that declare it. Never silently succeed."""
-    if trigger == "open":
+    if trigger in BUILT_TRIGGERS:
         return
     if trigger == "manual":
         declaring = [n for n, j in config["jobs"].items() if j["manual"]]
@@ -431,6 +434,9 @@ def changed_files(root, base, head):
 
     Return (files, None) or (None, why) when the diff cannot be computed.
     """
+    if base and re.fullmatch(r"0+", base):  # a push that created the branch
+        return None, (f"base {base!r} is the all-zero commit (the push "
+                      "created the branch)")
     base_sha = resolve_commit(root, base)
     if base_sha is None:
         return None, f"base {base!r} is not a commit in this repository"
@@ -478,6 +484,10 @@ def _name_files(files, limit=5):
     return shown
 
 
+def _article(word):
+    return "an" if word[:1] in "aeiou" else "a"
+
+
 def decide(config, root, trigger, target, source, base, head, files=None,
            diff_error=None):
     """Decide every declared job for the trigger, one decision each, with a
@@ -514,7 +524,7 @@ def decide(config, root, trigger, target, source, base, head, files=None,
     decisions = []
     for name, job in config["jobs"].items():
         if trigger not in job["on"]:
-            needed, reason = False, f"not an {trigger} job"
+            needed, reason = False, f"not {_article(trigger)} {trigger} job"
         elif not match_any(job["branches"], target or ""):
             needed, reason = False, f"target {target} does not match branches"
         elif force:

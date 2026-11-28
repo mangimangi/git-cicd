@@ -7,6 +7,8 @@ import pytest
 from tests.conftest import ROOT, git_cicd
 
 WORKFLOW = ".github/workflows/git-cicd-open.yml"
+MERGE = ".github/workflows/git-cicd-merge.yml"
+TEMPLATES = ROOT / "templates" / "workflows"
 LEGACY = ".github/workflows/git-cicd.yml"
 TEMPLATE = ROOT / "templates" / "workflows" / "open.yml"
 TOOL = ".vendored/pkg/git-cicd/git-cicd"
@@ -72,18 +74,23 @@ def test_generate_writes_file(tool_repo):
     assert "schedule:" not in text
 
 
-def test_no_expressions_inside_run_blocks(tool_repo):
-    text = generate(tool_repo, base_config())
-    blocks = run_blocks(text)
-    assert len(blocks) == 8
+@pytest.mark.parametrize("path,count", [(WORKFLOW, 8), (MERGE, 8)])
+def test_no_expressions_inside_run_blocks(tool_repo, path, count):
+    generate(tool_repo, base_config())
+    blocks = run_blocks((tool_repo.path / path).read_text())
+    assert len(blocks) == count
     for block in blocks:
         assert "${{" not in block, block
 
 
 def test_template_run_blocks_have_no_expressions():
-    text = TEMPLATE.read_text()
-    for block in run_blocks(text):
-        assert "${{" not in block
+    templates = sorted(TEMPLATES.glob("*.yml"))
+    assert len(templates) == len(git_cicd.GENERATED_TRIGGERS)
+    for template in templates:
+        blocks = run_blocks(template.read_text())
+        assert blocks, template
+        for block in blocks:
+            assert "${{" not in block, (template, block)
 
 
 def test_workflow_contract(tool_repo):
@@ -234,7 +241,7 @@ def test_non_cron_differences_generate_identical_files(tool_repo):
     }, "needs_nothing": [".pearls/**", "*.md"], "max_parallel": 7}
     generate(tool_repo, b_config)
     assert generated_files(tool_repo) == files_a
-    assert list(files_a) == ["git-cicd-open.yml"]
+    assert sorted(files_a) == ["git-cicd-merge.yml", "git-cicd-open.yml"]
 
 
 def test_cron_jobs_do_not_change_the_open_file(tool_repo):
@@ -323,20 +330,20 @@ def test_verify_fails_while_the_old_file_is_there(tool_repo):
     result = tool_repo.run("verify")
     assert result.returncode == 1
     assert f"{LEGACY} is still there" in result.stdout
-    assert (f"run: {TOOL} generate and commit {WORKFLOW} and the removal of "
-            f"{LEGACY}") in result.stdout
+    assert (f"run: {TOOL} generate and commit {WORKFLOW}, {MERGE} and the "
+            f"removal of {LEGACY}") in result.stdout
 
 
 def test_generated_files_are_named_for_their_triggers():
     """One workflow per trigger, its name the trigger's word and its file
-    fixed for good; only `open` is generated so far."""
+    fixed for good; `open` and `merge` are generated so far."""
     assert git_cicd.WORKFLOWS == {
         "open": ("Open", ".github/workflows/git-cicd-open.yml"),
         "merge": ("Merge", ".github/workflows/git-cicd-merge.yml"),
         "cron": ("Cron", ".github/workflows/git-cicd-cron.yml"),
         "manual": ("Manual", ".github/workflows/git-cicd-manual.yml"),
     }
-    assert git_cicd.GENERATED_TRIGGERS == ("open",)
+    assert git_cicd.GENERATED_TRIGGERS == ("open", "merge")
     templates = sorted(p.stem for p in (ROOT / "templates" / "workflows")
                        .glob("*.yml"))
     assert templates == sorted(git_cicd.GENERATED_TRIGGERS)
@@ -350,8 +357,21 @@ def test_generated_files_are_named_for_their_triggers():
 def test_this_repository_is_migrated():
     assert not (ROOT / LEGACY).exists()
     config = git_cicd.load_config(str(ROOT))
-    assert (ROOT / WORKFLOW).read_text() == \
-        git_cicd.render_workflows(config, "git-cicd")[WORKFLOW]
+    rendered = git_cicd.render_workflows(config, "git-cicd")
+    assert list(rendered) == [WORKFLOW, MERGE]
+    for path, text in rendered.items():
+        assert (ROOT / path).read_text() == text, path
+
+
+def test_open_file_is_unchanged_from_the_committed_copy(tool_repo):
+    """The open workflow stays byte-identical as the other triggers are
+    built: the committed copy in this repository is what the template
+    renders, and the template is untouched."""
+    committed = (ROOT / WORKFLOW).read_text()
+    text = generate(tool_repo, base_config())
+    assert text == committed.replace("python3 git-cicd ", f"python3 {TOOL} ") \
+        .replace("#   git-cicd generate", f"#   {TOOL} generate")
+    assert TEMPLATE.read_text().replace("__TOOL__", "git-cicd") == committed
 
 
 def test_verify_missing_file(tool_repo):
@@ -434,3 +454,152 @@ def test_display_names_do_not_change_the_file(tool_repo):
     b = generate(tool_repo, config)
     assert a == b
     assert "Unit Tests" not in b
+
+
+# ── merge: the Merge workflow ───────────────────────────────────────────────
+
+def generate_merge(repo):
+    generate(repo, base_config())
+    return (repo.path / MERGE).read_text()
+
+
+def steps_of(job_text):
+    return job_text.split("      - name: ")[1:]
+
+
+def test_merge_file_is_written_with_the_push_event(tool_repo):
+    text = generate_merge(tool_repo)
+    assert text.startswith(f"# {MERGE} - GENERATED")
+    assert "\nname: Merge\n" in text
+    assert "\non:\n  push:\n    branches: ['**']\n\npermissions:" in text
+    assert "tags" not in text.split("\non:\n", 1)[1].split("permissions:")[0]
+    assert f"python3 {TOOL} decide --trigger=merge" in text
+    assert f"python3 {TOOL} run-job \"$JOB\" --trigger=merge" in text
+    assert f"python3 {TOOL} report --trigger=merge" in text
+    assert "__TOOL__" not in text and "__SCHEDULE__" not in text
+    # the facts of a push, through env: only
+    assert "BASE: ${{ github.event.before }}" in text
+    assert "HEAD_SHA: ${{ github.sha }}" in text
+    assert "BRANCH: ${{ github.ref_name }}" in text
+    assert '--target="$BRANCH"' in text and '--source="$BRANCH"' in text
+
+
+def test_merge_skips_a_branch_deletion(tool_repo):
+    jobs = job_blocks(generate_merge(tool_repo))
+    assert "    if: ${{ !github.event.deleted }}\n" in jobs["decide"]
+    assert "    if: always() && !github.event.deleted\n" in jobs["verdict"]
+    assert "    needs: decide\n" in jobs["run"]
+
+
+def test_merge_has_no_concurrency(tool_repo):
+    text = generate_merge(tool_repo)
+    assert "concurrency" not in text.split("\nname: Merge\n", 1)[1]
+    assert "cancel-in-progress" not in text.split("\nname: Merge\n", 1)[1]
+
+
+def test_merge_queue_waits_for_earlier_runs_on_the_branch(tool_repo):
+    jobs = job_blocks(generate_merge(tool_repo))
+    steps = steps_of(jobs["decide"])
+    names = [s.split("\n", 1)[0] for s in steps]
+    assert names[:4] == [
+        "Set the Verdict / git-cicd:verdict status to pending",
+        "Wait for earlier Merge and Manual runs on this branch",
+        "Checkout repository", "Decide which jobs the change needs"]
+    queue = steps[1]
+    assert '"repos/$GITHUB_REPOSITORY/actions/runs"' in queue
+    assert '-f branch="$BRANCH"' in queue
+    assert 'select(.status != "completed")' in queue
+    assert '.github/workflows/git-cicd-merge.yml' in queue
+    assert '.github/workflows/git-cicd-manual.yml' in queue
+    assert "select(.id < (env.GITHUB_RUN_ID | tonumber))" in queue
+    assert "actions: read" in jobs["decide"]
+
+
+def test_merge_write_permissions_only_on_the_run_job(tool_repo):
+    text = generate_merge(tool_repo)
+    top = text.split("\njobs:\n", 1)[0]
+    assert top.endswith("\npermissions:\n  contents: read\n")
+    jobs = job_blocks(text)
+    assert set(jobs) == {"decide", "run", "verdict"}
+    assert ("    permissions:\n      contents: write\n"
+            "      pull-requests: write\n") in jobs["run"]
+    for name in ("decide", "verdict"):
+        perms = re.findall(r"^      ([a-z-]+): (read|write)$",
+                           jobs[name].split("    steps:")[0], re.M)
+        assert ("statuses", "write") in perms
+        assert [p for p, level in perms if level == "write"] == ["statuses"]
+        assert ("pull-requests", "read") in perms
+    writes = re.findall(r"^\s*([a-z-]+):\s*write\s*$", text, re.M)
+    assert sorted(writes) == ["contents", "pull-requests", "statuses",
+                              "statuses"]
+    assert "write-all" not in text
+
+
+def test_merge_run_job_has_full_history_and_tags(tool_repo):
+    run = job_blocks(generate_merge(tool_repo))["run"]
+    checkout = steps_of(run)[0]
+    assert "fetch-depth: 0" in checkout and "fetch-tags: true" in checkout
+    # the landed commit (github.sha) on its branch, so a release can push
+    assert "ref:" not in checkout
+    assert "--setup --result=" in run
+
+
+def test_merge_verdict_status_pending_first_and_final_last(tool_repo):
+    text = generate_merge(tool_repo)
+    jobs = job_blocks(text)
+    first = steps_of(jobs["decide"])[0]
+    assert first.startswith(
+        "Set the Verdict / git-cicd:verdict status to pending\n")
+    assert "-f state=pending" in first
+    assert 'statuses/$HEAD_SHA"' in first
+    last = steps_of(jobs["verdict"])[-1]
+    assert last.startswith("Set the Verdict / git-cicd:verdict status\n")
+    assert "        if: always()\n" in last
+    assert "STATE=failure" in last
+    assert "--verdict-out=" in steps_of(jobs["verdict"])[-2]
+    assert text.count('context="Verdict / git-cicd:verdict"') == 2
+    assert text.count("HEAD_SHA: ${{ github.sha }}") >= 3
+
+
+def test_merge_status_only_without_an_open_pull_request(tool_repo):
+    """A pull request's Open run owns the status on its head commit: the
+    Merge run posts neither pending nor final when an open pull request has
+    the landed commit as its head."""
+    jobs = job_blocks(generate_merge(tool_repo))
+    for step in (steps_of(jobs["decide"])[0], steps_of(jobs["verdict"])[-1]):
+        guard, post = step.split("--method POST", 1)
+        assert '"repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/pulls"' in guard
+        assert 'select(.state == "open" and .head.sha == env.HEAD_SHA)' \
+            in guard
+        assert 'if [ "$OPEN_PRS" != "0" ]; then' in guard
+        assert "exit 0" in guard
+
+
+def test_merge_rows_and_actions(tool_repo):
+    text = generate_merge(tool_repo)
+    jobs = job_blocks(text)
+    assert ROW_NAME in jobs["run"]
+    assert "    name: Decide / git-cicd:decide\n" in jobs["decide"]
+    assert "    name: Report / git-cicd:report\n" in jobs["verdict"]
+    uses = re.findall(r"(?m)^\s*(?:- )?uses:\s*(\S+)", text)
+    assert uses and all(re.fullmatch(
+        r"actions/(checkout|upload-artifact|download-artifact)@v4", u)
+        for u in uses), uses
+
+
+def test_verify_fails_on_a_hand_edit_of_the_merge_file(tool_repo):
+    text = generate_merge(tool_repo)
+    (tool_repo.path / MERGE).write_text(text.replace("fetch-tags: true",
+                                                     "fetch-tags: false"))
+    result = tool_repo.run("verify")
+    assert result.returncode == 1
+    assert "+          fetch-tags: true" in result.stdout
+    assert f"{MERGE} (committed)" in result.stdout
+
+
+def test_verify_fails_when_the_merge_file_is_missing(tool_repo):
+    generate_merge(tool_repo)
+    (tool_repo.path / MERGE).unlink()
+    result = tool_repo.run("verify")
+    assert result.returncode == 1
+    assert f"{MERGE} is missing" in result.stdout
