@@ -2,6 +2,11 @@
 
 Releases of git-cicd. Each entry is written by `git-semver bump` in the pull request that raises the version; merging it into `main` tags and publishes that version.
 
+## [0.3.0] - 2026-11-28
+
+### Changed
+- The Manual workflow's job dropdown lists each job by its row name, <name> / <repo>:<job>, as a pull request's checks show it, and input descriptions name their jobs the same way (gcd-cffa). Adopters run generate after upgrading and commit the Manual workflow: the form's job values changed (the bare config key is still accepted from the command line). <repo> no longer comes from GITHUB_REPOSITORY: it is the new config key repository, else the origin remote's last path segment, else the directory name.
+
 ## [0.2.0] - 2026-11-28
 
 ### Changed
