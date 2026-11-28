@@ -243,3 +243,21 @@ def test_display_name_with_metacharacters_reaches_report_and_runs_nothing(
     assert f"    {name} / {repo.path.name}:unit:a.sh  passed" in result.stdout
     assert not marker.exists()
     assert "$HOME" in summary.read_text()
+
+
+def test_check_job_runs_an_included_job(project):
+    project.git("checkout", "-q", "main")
+    project.write("shared/jobs.json", json.dumps({"jobs": {"inc": {
+        "on": ["open"], "branches": ["main"], "paths": ["src/**"],
+        "steps": ["ci/a.sh"]}}}))
+    cfg = json.loads((project.path / git_cicd.CONFIG_PATH).read_text())
+    cfg["include"] = [{"path": "shared/jobs.json", "jobs": {"inc": {}}}]
+    project.config(cfg)
+    assert project.run("generate").returncode == 0
+    project.commit("include")
+    project.git("checkout", "-q", "feature")
+    project.git("rebase", "-q", "main")
+    result = check(project, "--job", "inc")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert logged(project) == ["inc a.sh"]
+    assert "PASSED - 1 of 5 jobs needed" in result.stdout

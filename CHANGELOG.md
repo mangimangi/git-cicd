@@ -2,6 +2,11 @@
 
 Releases of git-cicd. Each entry is written by `git-semver bump` in the pull request that raises the version; merging it into `main` tags and publishes that version.
 
+## [0.4.1] - 2026-11-28
+
+### Changed
+- A config can take named jobs from a file in the repository with include, each with the most secrets and permissions it may ask for; a config without include is unchanged.
+
 ## [0.4.0] - 2026-11-28
 
 ### Changed

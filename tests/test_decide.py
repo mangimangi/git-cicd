@@ -1085,3 +1085,79 @@ def test_run_job_manual_is_not_asked_for_a_role(repo):
                           "--target=main", "--source=main", f"--base={head}",
                           f"--head={head}", env=env)
         assert result.returncode == 0, result.stderr
+
+
+# ── included jobs ───────────────────────────────────────────────────────────
+
+SHARED = "shared/jobs.json"
+
+
+def setup_included(repo, needs_nothing=None):
+    """A config whose only open job, `shared`, comes from an include line;
+    the file also holds a job no line names."""
+    repo.write(SHARED, json.dumps({"jobs": {
+        "shared": {"on": ["open"], "branches": ["main"],
+                   "paths": ["src/**"], "steps": ["ci/lint.sh"]},
+        "unnamed": {"on": ["open"], "branches": ["**"],
+                    "steps": ["ci/lint.sh"]},
+    }}))
+    return setup_repo(repo, jobs={
+        "test": {"on": ["open"], "branches": ["**"], "paths": ["tests/**"],
+                 "steps": ["ci/test.sh"]},
+    }, needs_nothing=needs_nothing, include=[
+        {"path": SHARED, "jobs": {"shared": {}}}])
+
+
+def test_included_open_job_needed_on_matching_paths(repo):
+    base = setup_included(repo)
+    repo.write("src/app.py", "x = 2\n")
+    repo.commit("change src")
+    data, jobs = decide(repo, base)
+    assert jobs["shared"]["needed"] is True
+    assert jobs["shared"]["reason"] == "1 changed file match paths"
+    assert jobs["test"]["needed"] is False
+    assert "unnamed" not in jobs
+    assert [j["name"] for j in data["jobs"]] == ["test", "shared"]
+
+
+def test_included_open_job_not_needed_for_other_paths(repo):
+    base = setup_included(repo)
+    repo.write("tests/t.py", "t\n")
+    repo.commit("change tests")
+    _, jobs = decide(repo, base)
+    assert jobs["shared"]["needed"] is False
+    assert jobs["shared"]["reason"] == "no changed file matches paths"
+    _, jobs = decide(repo, base, target="plan/x")
+    assert jobs["shared"]["reason"] == "target plan/x does not match branches"
+
+
+@pytest.mark.parametrize("needs_nothing", [None, ["shared/**"]])
+def test_included_file_changed_forces_all(repo, needs_nothing):
+    base = setup_included(repo, needs_nothing=needs_nothing)
+    path = repo.path / SHARED
+    path.write_text(path.read_text() + "\n")
+    repo.commit("touch included file")
+    _, jobs = decide(repo, base)
+    for name in ("test", "shared"):
+        assert jobs[name]["needed"] is True
+        assert jobs[name]["reason"] == (
+            f"config or job script changed: {SHARED}")
+    # branches still bind
+    _, jobs = decide(repo, base, target="plan/x")
+    assert jobs["shared"]["needed"] is False
+    assert jobs["test"]["needed"] is True
+
+
+def test_check_verdict_counts_an_included_job(repo):
+    setup_included(repo)
+    repo.install_tool()
+    assert repo.run("generate").returncode == 0
+    repo.git("add", "-A")
+    repo.git("commit", "-q", "-m", "generate")
+    repo.git("branch", "-f", "main", "HEAD")
+    repo.write("src/app.py", "x = 2\n")
+    repo.commit("change src")
+    result = repo.run("check")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "PASSED - 1 of 2 jobs needed" in result.stdout
+    assert "shared: needed" in result.stdout

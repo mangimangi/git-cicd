@@ -56,7 +56,13 @@ TRIGGERS = ("open", "merge", "cron")
 DEFAULT_MAX_PARALLEL = 3
 
 TOP_LEVEL_FIELDS = ("_vendor", "jobs", "needs_nothing", "max_parallel",
-                    "repository", "manual_role")
+                    "repository", "manual_role", "include")
+# An include line (`include`: an array of these): a file in the repository
+# and the jobs taken from it, each with the most it may ask for (its limit).
+INCLUDE_FIELDS = ("path", "jobs")
+INCLUDE_LIMIT_FIELDS = ("secrets", "permissions")
+# The only top-level key of an included file: {"jobs": {...}}.
+INCLUDED_FILE_FIELDS = ("jobs",)
 # Who may start a manual run (`manual_role`): the lowest role, in rank
 # order, of the person who started it. The tool decides; the Manual
 # workflow (the platform's adapter) only supplies the fact, the role of the
@@ -221,9 +227,9 @@ def _is_str_list(value):
     return isinstance(value, list) and all(isinstance(v, str) for v in value)
 
 
-def _check_file(root, path, where):
-    """Errors for a setup or step file: a repository path to an executable
-    regular file, relative, without `..` segments."""
+def _check_relpath(path, where):
+    """Errors for a path that must stay in the repository: non-empty,
+    relative, without `..` segments."""
     if path == "":
         return [f"{where}: empty path"]
     if os.path.isabs(path):
@@ -231,6 +237,15 @@ def _check_file(root, path, where):
                 "to the repository root"]
     if ".." in path.replace("\\", "/").split("/"):
         return [f"{where}: {path} contains a '..' segment"]
+    return []
+
+
+def _check_file(root, path, where):
+    """Errors for a setup or step file: a repository path to an executable
+    regular file, relative, without `..` segments."""
+    errors = _check_relpath(path, where)
+    if errors:
+        return errors
     full = os.path.join(root, path)
     if not os.path.isfile(full):
         return [f"{where}: {path} is not a file in the repository"]
@@ -643,9 +658,174 @@ def group_placeholder(gid):
     return f"(nothing:{gid})"
 
 
-def validate_config(data, root):
+def _validate_limit(prefix, value):
+    """Return (errors, limit) for the limit an include line gives a job: the
+    most it may ask for, {"secrets": [...], "permissions": {scope: level}}
+    (both default to none)."""
+    if not isinstance(value, dict):
+        return [f"{prefix}: the limit must be an object (secrets, "
+                "permissions)"], None
+    errors = []
+    for key in value:
+        if key not in INCLUDE_LIMIT_FIELDS:
+            errors.append(f"{prefix}: unknown field {key} in the limit "
+                          f"(allowed: {', '.join(INCLUDE_LIMIT_FIELDS)})")
+    secrets = value.get("secrets", [])
+    if (not _is_str_list(secrets)
+            or any(s not in DECLARABLE_SECRETS for s in secrets)
+            or len(set(secrets)) != len(secrets)):
+        errors.append(f"{prefix}: the limit's secrets must be an array of "
+                      "distinct secret names "
+                      f"({', '.join(DECLARABLE_SECRETS)})")
+        secrets = []
+    permissions = {}
+    if "permissions" in value:
+        permission_errors, permissions = _validate_permissions(
+            f"{prefix}: the limit", value["permissions"], False)
+        errors.extend(permission_errors)
+    return errors, {"secrets": list(secrets), "permissions": permissions}
+
+
+def _limit_errors(prefix, job, limit):
+    """Errors for a job taken from an included file that asks for more than
+    its include line's limit."""
+    errors = []
+    allowed = ", ".join(limit["secrets"]) or "none"
+    for secret in job["secrets"]:
+        if secret not in limit["secrets"]:
+            errors.append(f"{prefix}: secret {secret} is not in the include "
+                          f"line's limit (allowed: {allowed}); widening it "
+                          "is an edit to the include line")
+    granted = ", ".join(f"{s}: {lv}" for s, lv in
+                        limit["permissions"].items()) or "none"
+    for scope, level in job["permissions"].items():
+        most = limit["permissions"].get(scope)
+        if most is None:
+            errors.append(f"{prefix}: permission {scope} is not in the "
+                          f"include line's limit (allowed: {granted}); "
+                          "widening it is an edit to the include line")
+        elif level == "write" and most == "read":
+            errors.append(f"{prefix}: permission {scope}: write is wider "
+                          f"than the include line's limit ({scope}: read); "
+                          "widening it is an edit to the include line")
+    return errors
+
+
+def _read_included(root, path, where):
+    """Return (errors, the jobs object) of an included file, read from the
+    working tree with a plain open(): no network, no git, no other tool."""
+    try:
+        with open(os.path.join(root, path), encoding="utf-8") as f:
+            text = f.read()
+    except OSError as e:
+        return [f"{where}: cannot read the file: {e.strerror}"], None
+    except UnicodeDecodeError:
+        return [f"{where}: the file is not UTF-8 text"], None
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        return [f"{where}: the file is not valid JSON: {e}"], None
+    shape = 'an included file is {"jobs": {job name -> job}}'
+    if not isinstance(data, dict):
+        return [f"{where}: the top level must be a JSON object ({shape})"], \
+            None
+    errors = [f"{where}: unknown field {key} in the file ({shape})"
+              for key in data if key not in INCLUDED_FILE_FIELDS]
+    if "jobs" not in data:
+        errors.append(f"{where}: the file has no jobs ({shape})")
+    elif not isinstance(data["jobs"], dict):
+        errors.append(f"{where}: jobs must be an object in the file "
+                      f"({shape})")
+    if errors:
+        return errors, None
+    return [], data["jobs"]
+
+
+def _validate_includes(value, root, config_where, own_names):
+    """Return (errors, included jobs, included paths) for the config's
+    `include`. The jobs are normalized as the repository's own and come in
+    include-line order, within a line in the order of its `jobs` keys; only
+    the jobs a line names are read, and each asks for at most its limit."""
+    if not isinstance(value, list):
+        return [f"{config_where}: include must be an array of include lines "
+                '({"path": file, "jobs": {job name -> limit}})'], {}, []
+    errors = []
+    jobs = {}
+    paths = []
+    taken_by = {}
+    for index, line in enumerate(value):
+        where = f"{config_where}: include[{index}]"
+        if not isinstance(line, dict):
+            errors.append(f"{where}: an include line must be an object "
+                          f"({', '.join(INCLUDE_FIELDS)})")
+            continue
+        path = line.get("path")
+        if isinstance(path, str) and path:
+            where = f"{config_where}: include {path}"
+        for key in line:
+            if key not in INCLUDE_FIELDS:
+                errors.append(f"{where}: unknown field {key} (allowed: "
+                              f"{', '.join(INCLUDE_FIELDS)})")
+        if not (isinstance(path, str) and path):
+            errors.append(f"{where}: path must be a non-empty string (a "
+                          "file in the repository, relative to its root)")
+            continue
+        path_errors = _check_relpath(path, where)
+        raw = line.get("jobs")
+        if not isinstance(raw, dict) or not raw:
+            errors.extend(path_errors)
+            errors.append(f"{where}: jobs must be a non-empty object (job "
+                          "name -> limit: secrets, permissions)")
+            continue
+        limits = {}
+        for name, limit_value in raw.items():
+            job_where = f"{where}: job {name}"
+            if not JOB_NAME_RE.match(name):
+                errors.append(f"{job_where}: invalid job name (letters, "
+                              "digits, - and _ only)")
+                continue
+            limit_errors, limit = _validate_limit(job_where, limit_value)
+            errors.extend(limit_errors)
+            if name in own_names:
+                errors.append(f"{job_where}: the config declares a job "
+                              f"{name} of its own; a job name is taken "
+                              "once")
+            elif name in taken_by:
+                errors.append(f"{job_where}: job {name} is already taken by "
+                              f"include {taken_by[name]}; a job name is "
+                              "taken once")
+            else:
+                taken_by[name] = path
+                if not limit_errors:
+                    limits[name] = limit
+        if path_errors:
+            errors.extend(path_errors)
+            continue
+        paths.append(_norm(path))
+        file_errors, file_jobs = _read_included(root, path, where)
+        if file_errors:
+            errors.extend(file_errors)
+            continue
+        for name, limit in limits.items():
+            job_where = f"{where}: job {name}"
+            if name not in file_jobs:
+                errors.append(f"{job_where}: the file has no job {name} "
+                              f"(it has: {', '.join(file_jobs) or 'none'})")
+                continue
+            job_errors, normalized = _validate_job(root, name,
+                                                   file_jobs[name])
+            errors.extend(f"{where}: {e}" for e in job_errors)
+            if normalized is None:
+                continue
+            errors.extend(_limit_errors(job_where, normalized, limit))
+            jobs[name] = normalized
+    return errors, jobs, paths
+
+
+def validate_config(data, root, path=None):
     """Validate a parsed config. Return the normalized config or raise
-    ConfigError with every error found."""
+    ConfigError with every error found. `path` is the config file, named in
+    the errors of its include lines (default: CONFIG_PATH)."""
     errors = []
     if not isinstance(data, dict):
         raise ConfigError(["config: the top level must be a JSON object"])
@@ -695,12 +875,23 @@ def validate_config(data, root):
                       f"starts a manual run; default {DEFAULT_MANUAL_ROLE})")
         manual_role = DEFAULT_MANUAL_ROLE
 
+    includes = []
+    if "include" in data:
+        config_where = CONFIG_PATH if path is None else _norm(
+            os.path.relpath(os.path.abspath(path), os.path.abspath(root)))
+        own_names = set(raw_jobs) if isinstance(raw_jobs, dict) else set()
+        include_errors, included, includes = _validate_includes(
+            data["include"], root, config_where, own_names)
+        errors.extend(include_errors)
+        jobs.update(included)
+
     errors.extend(_validate_manual_form(jobs))
 
     if errors:
         raise ConfigError(errors)
     return {
         "jobs": jobs,
+        "includes": includes,
         "needs_nothing": list(needs_nothing),
         "max_parallel": max_parallel,
         "repository": repository,
@@ -802,7 +993,7 @@ def load_config(root, path=None):
         data = json.loads(text)
     except json.JSONDecodeError as e:
         raise ConfigError([f"config: {path} is not valid JSON: {e}"])
-    config = validate_config(data, root)
+    config = validate_config(data, root, path)
     config["path"] = path
     return config
 
@@ -1049,8 +1240,11 @@ def decide(config, root, trigger, target, source, base, head, files=None,
         if not files:
             force = "no changed files found"
         else:
-            forcing = job_scripts(config) | {config_relpath(config, root),
-                                             CONFIG_PATH}
+            # A change to the config, an included file or a job's script
+            # forces every job the trigger and branches allow.
+            forcing = (job_scripts(config)
+                       | {config_relpath(config, root), CONFIG_PATH}
+                       | set(config.get("includes", [])))
             touched = [f for f in files if _norm(f) in forcing]
             if touched:
                 force = "config or job script changed: " + _name_files(touched)
