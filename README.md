@@ -325,6 +325,7 @@ request they are:
 | `Decide / git-cicd:decide` | decides which jobs the change needs; posts the pending status | check run (a job) |
 | `<name> / <repo>:<job>` | one per needed job, for example `Unit Tests / medici:unit-tests` | check run (a job) |
 | `Nothing needed / <repo>:(nothing)` | only when the run needs no job: a placeholder whose steps are all skipped | check run (a job) |
+| `Nothing needed / <repo>:(nothing:<group>)` | only when a job on the trigger declares `permissions` beyond its default, and none of that permission group's jobs is needed: the group run job's placeholder, for example `Nothing needed / medici:(nothing:run-packages-write)` | check run (a job) |
 | `Report / git-cicd:report` | collects the results, writes the report, posts the final status | check run (a job) |
 | `Verdict / git-cicd:verdict` | the verdict: **the one object a reader waits on** | commit status |
 
@@ -352,7 +353,12 @@ the name of a matrix job that is skipped before its matrix is evaluated, so a
 skipped `run` job would show its raw `${{ ... }}` name expression as a row.
 `(nothing)` is no valid job name, so no config job's row can look like it.
 The placeholder uploads no result, so the report and the verdict are the
-same as without it.
+same as without it. The run job of a permission group (a job that declares
+`permissions` beyond its trigger's default runs in one, `run-<scope>-<level>`;
+see "The generated workflows") works the same way: its jobs keep their
+`<name> / <repo>:<job>` rows, and when none of them is needed it runs its own
+placeholder entry `(nothing:<group>)`, row
+`Nothing needed / <repo>:(nothing:<group>)`, so no row shows a raw name.
 
 ### The report
 

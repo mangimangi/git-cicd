@@ -43,6 +43,15 @@ def generate(repo, config):
     return (repo.path / WORKFLOW).read_text()
 
 
+def bare(template, tool=TOOL):
+    """A template as a config without permission groups renders it: the
+    group placeholders empty, the tool path filled in."""
+    for mark in ("__GROUP_OUTPUTS__\n", "__GROUP_JOBS__\n",
+                 "__GROUP_NEEDS__"):
+        template = template.replace(mark, "")
+    return template.replace("__TOOL__", tool)
+
+
 def run_blocks(text):
     """The lines of every `run:` block (inline or literal block)."""
     blocks = []
@@ -331,7 +340,7 @@ def test_schedule_block_fills_only_a_cron_template(tool_repo):
         '    - cron: "0 9 * * 1"\njobs: {}\n')
     open_text = TEMPLATE.read_text()
     assert git_cicd.render_workflow(loaded, TOOL, open_text) == \
-        open_text.replace("__TOOL__", TOOL)
+        bare(open_text)
 
 
 def test_generate_is_deterministic(tool_repo):
@@ -427,7 +436,7 @@ def test_open_file_is_unchanged_from_the_committed_copy(tool_repo):
     text = generate(tool_repo, base_config())
     assert text == committed.replace("python3 git-cicd ", f"python3 {TOOL} ") \
         .replace("#   git-cicd generate", f"#   {TOOL} generate")
-    assert TEMPLATE.read_text().replace("__TOOL__", "git-cicd") == committed
+    assert bare(TEMPLATE.read_text(), "git-cicd") == committed
 
 
 def test_verify_missing_file(tool_repo):
@@ -835,7 +844,7 @@ def test_hostile_declarations_cannot_change_the_files(tool_repo):
     # the rest of the file is the template's
     form = git_cicd.form_block(git_cicd.load_config(str(tool_repo.path)))
     assert manual.replace(form, "__FORM__\n", 1) == \
-        (TEMPLATES / "manual.yml").read_text().replace("__TOOL__", TOOL)
+        bare((TEMPLATES / "manual.yml").read_text())
     # no run: block of any generated file holds a value from the config
     values = set(HOSTILE + HOSTILE_LINES) | {"zz-hostile_job",
                                             "nightly-hostile"}

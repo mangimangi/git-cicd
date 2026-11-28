@@ -11,7 +11,10 @@
 #   manual  Manual  .github/workflows/git-cicd-manual.yml  (not built yet)
 #
 # Every generated file is fixed text except the cron workflow's schedule
-# block; this file does not vary with the config at all, only with the
+# block, the manual workflow's form and, in every workflow, the run job of
+# each permission group (below) with the decide output and the report's
+# `needs` that go with it; without a permission declaration beyond the
+# default this file does not vary with the config at all, only with the
 # git-cicd version (and the tool path, which is where git-cicd is installed).
 # Whoever upgrades git-cicd, or changes the config, runs
 #   git-cicd generate
@@ -47,7 +50,22 @@
 # come. A run that is cancelled or dies leaves the status pending or failed,
 # never green. This is why the two status-writing jobs get `statuses: write`
 # (the one write permission on `open`); the job that runs the config's
-# scripts gets none and inherits the read-only top level.
+# scripts gets none and inherits the read-only top level. A job with open in
+# on may declare read permissions only (validate refuses a write: open runs a
+# pull request's own code; a job that must write declares the
+# CICD_WRITE_TOKEN secret).
+#
+# A config job that declares `permissions` beyond the default (`contents: read`) runs instead
+# in a run job of its own, one per distinct effective permission set, with
+# the id `run-` plus each scope and level beyond the default (for example
+# `run-packages-write`): generate writes it as a copy of `run` whose
+# permissions are the default plus the declaration (the higher level wins,
+# written literally: GitHub takes no expression in a job's `permissions`,
+# and they apply to every matrix entry) and whose matrix is that group's
+# entry of decide's `groups` output; `run` keeps every other job. A group
+# job with nothing to run runs its placeholder entry
+# `(nothing:<id>)`, row `Nothing needed / <repo>:(nothing:<id>)`, with its
+# steps skipped, for the reason `run` does (below).
 #
 # Secrets: a job gets only the secrets its config job declares (`secrets`,
 # from the documented set CICD_WRITE_TOKEN, CICD_READ_TOKEN and the

@@ -10,9 +10,12 @@
 #   cron    Cron    .github/workflows/git-cicd-cron.yml    (generated when a job has cron in on)
 #   manual  Manual  .github/workflows/git-cicd-manual.yml  (generated)
 #
-# Every generated file is fixed text except this file's schedule block: one
+# Every generated file is fixed text except this file's schedule block (one
 # entry per distinct cron expression among the config's jobs with cron in
-# on, the only part of any generated file that varies with the config. With
+# on), the manual workflow's form and, in every workflow, the run job of each
+# permission group (below) with the decide output and the report's `needs`
+# that go with it: the only parts of any generated file that vary with the
+# config. With
 # no such job this file is not generated (GitHub needs an event under on:,
 # and a schedule must never fire with nothing to run); generate removes it
 # and verify fails while it is there. Whoever upgrades git-cicd, or changes
@@ -34,6 +37,18 @@
 # checks out its branch's head with full history and tags. Decide and report
 # get `statuses: write` for the Verdict statuses and `pull-requests: read` to
 # see whether an open pull request owns one.
+#
+# A config job that declares `permissions` beyond this default runs instead
+# in a run job of its own, one per distinct effective permission set, with
+# the id `run-` plus each scope and level beyond the default (for example
+# `run-packages-write`): generate writes it as a copy of `run` whose
+# permissions are the default plus the declaration (the higher level wins,
+# written literally: GitHub takes no expression in a job's `permissions`,
+# and they apply to every matrix entry) and whose matrix is that group's
+# entry of decide's `groups` output; `run` keeps every other job. A group
+# job with nothing to run runs its placeholder entry
+# `(nothing:<id>)`, row `Nothing needed / <repo>:(nothing:<id>)`, with its
+# steps skipped, for the reason `run` does (below).
 #
 # Secrets: a job gets only the secrets its config job declares (`secrets`,
 # from the documented set CICD_WRITE_TOKEN, CICD_READ_TOKEN and the
@@ -90,6 +105,7 @@ jobs:
       runs: ${{ steps.decide.outputs.runs }}
       names: ${{ steps.decide.outputs.names }}
       secrets: ${{ steps.decide.outputs.secrets }}
+__GROUP_OUTPUTS__
       any: ${{ steps.decide.outputs.any }}
       max_parallel: ${{ steps.decide.outputs.max_parallel }}
     steps:
@@ -180,10 +196,11 @@ jobs:
           name: git-cicd-result-${{ matrix.entry.key }}
           path: ${{ runner.temp }}/git-cicd/result.json
           if-no-files-found: ignore
+__GROUP_JOBS__
 
   verdict:
     name: Report / git-cicd:report
-    needs: [decide, run]
+    needs: [decide, run__GROUP_NEEDS__]
     if: always()
     runs-on: ubuntu-latest
     permissions:

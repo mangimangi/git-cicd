@@ -11,8 +11,10 @@
 #   manual  Manual  .github/workflows/git-cicd-manual.yml  (generated)
 #
 # Every generated file is fixed text except the cron workflow's schedule
-# block and this workflow's form (the `inputs:` of its `workflow_dispatch`),
-# which git-cicd writes from the config; the rest of this file varies only
+# block, this workflow's form (the `inputs:` of its `workflow_dispatch`) and,
+# in every workflow, the run job of each permission group (below) with the
+# decide output and the report's `needs` that go with it, which git-cicd
+# writes from the config; the rest of this file varies only
 # with the git-cicd version (and the tool path, which is where git-cicd is
 # installed). Whoever upgrades git-cicd, or changes the config (a job's
 # inputs, a job added or removed, its `manual` flag), runs
@@ -48,6 +50,18 @@
 # report get `statuses: write` for the Verdict status, `pull-requests: read`
 # to see whether an open pull request owns it, and decide `actions: read` for
 # the queue.
+#
+# A config job that declares `permissions` beyond this default runs instead
+# in a run job of its own, one per distinct effective permission set, with
+# the id `run-` plus each scope and level beyond the default (for example
+# `run-packages-write`): generate writes it as a copy of `run` whose
+# permissions are the default plus the declaration (the higher level wins,
+# written literally: GitHub takes no expression in a job's `permissions`,
+# and they apply to every matrix entry) and whose matrix is that group's
+# entry of decide's `groups` output; `run` keeps every other job. A group
+# job with nothing to run runs its placeholder entry
+# `(nothing:<id>)`, row `Nothing needed / <repo>:(nothing:<id>)`, with its
+# steps skipped, for the reason `run` does (below).
 #
 # Secrets: a job gets only the secrets its config job declares (`secrets`,
 # from the documented set CICD_WRITE_TOKEN, CICD_READ_TOKEN and the
