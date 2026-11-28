@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import git_cicd
+
 ROOT = Path(__file__).parent.parent
 INSTALL_SH = ROOT / "install.sh"
 SHIPPED = ["git-cicd", "templates/workflows/open.yml",
@@ -143,8 +145,12 @@ def test_schema_installed(tmp_path, project):
     assert fields["jobs"]["type"] == "object" and fields["jobs"]["required"]
     assert fields["needs_nothing"]["type"] == "array"
     assert fields["max_parallel"]["type"] == "integer"
-    for field in fields.values():
-        assert set(field) == {"type", "required", "description"}
+    for name, field in fields.items():
+        extra = {"properties"} if name == "jobs" else set()
+        assert set(field) == {"type", "required", "description"} | extra
+    secrets = fields["jobs"]["properties"]["secrets"]
+    assert secrets["items"]["enum"] == list(git_cicd.DECLARABLE_SECRETS)
+    assert "deprecated" in secrets["description"]
 
 
 def test_workflow_generated_and_regenerated(tmp_path, project):

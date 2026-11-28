@@ -191,7 +191,8 @@ def test_merge_environment_reaches_step(repo, log):
     commit; the changed files are what the push brought."""
     repo.script("ci/env.sh", DUMP_ENV)
     repo.config({"jobs": {"envjob": {
-        "on": ["merge"], "branches": ["main"], "steps": ["ci/env.sh"]}}})
+        "on": ["merge"], "branches": ["main"], "steps": ["ci/env.sh"],
+        "secrets": ["VENDOR_PAT"]}}})
     before = repo.commit("base")
     repo.write("src/app.py", "x\n")
     landed = repo.commit("landed")
@@ -534,3 +535,105 @@ def test_manual_run_gets_only_its_own_fields(repo, log):
     assert "private" not in result.stdout
     assert sorted(logged(log)) == ["CICD_INPUT_EMPTY=", "CICD_INPUT_KIND=b",
                                    "CICD_INPUT_TEXT=mine"]
+
+
+# ── secrets ─────────────────────────────────────────────────────────────────
+
+SECRET_NAMES = git_cicd.DECLARABLE_SECRETS
+ECHO_SECRETS = "".join(
+    f'echo "{n}=${{{n}-unset}}" >> "$LOG"\n'
+    for n in ("GITHUB_TOKEN",) + SECRET_NAMES)
+ALL_SET = {"GITHUB_TOKEN": "gh-value", "CICD_WRITE_TOKEN": "write-value",
+           "CICD_READ_TOKEN": "read-value", "VENDOR_PAT": "pat-value"}
+
+
+def run_on(repo, trigger, base, head, *extra, env=None):
+    branch = "main" if trigger in ("merge", "cron", "manual") else None
+    return repo.run("run-job", "j", f"--trigger={trigger}", "--target=main",
+                    f"--source={branch or 'feature'}", f"--base={base}",
+                    f"--head={head}", *extra, env=env)
+
+
+def secret_job(repo, log, secrets=None):
+    repo.script("ci/echo.sh", ECHO_SECRETS)
+    job = {"on": ["open", "merge"], "branches": ["**"],
+           "steps": ["ci/echo.sh"]}
+    if secrets is not None:
+        job["secrets"] = secrets
+    return setup_repo(repo, {"j": job}, log)
+
+
+def seen(log):
+    return dict(line.split("=", 1) for line in logged(log))
+
+
+@pytest.mark.parametrize("trigger", git_cicd.ALL_TRIGGERS)
+def test_undeclared_secrets_never_reach_a_script(repo, log, trigger):
+    base, head = secret_job(repo, log)
+    result = run_on(repo, trigger, base, head, env=env_for(log, **ALL_SET))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert seen(log) == {"GITHUB_TOKEN": "gh-value",
+                         "CICD_WRITE_TOKEN": "unset",
+                         "CICD_READ_TOKEN": "unset", "VENDOR_PAT": "unset"}
+
+
+@pytest.mark.parametrize("trigger", git_cicd.ALL_TRIGGERS)
+def test_a_declared_secret_and_nothing_else(repo, log, trigger):
+    base, head = secret_job(repo, log, ["CICD_READ_TOKEN"])
+    result = run_on(repo, trigger, base, head, env=env_for(log, **ALL_SET))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert seen(log) == {"GITHUB_TOKEN": "gh-value",
+                         "CICD_WRITE_TOKEN": "unset",
+                         "CICD_READ_TOKEN": "read-value",
+                         "VENDOR_PAT": "unset"}
+    assert "declared secret" not in result.stdout
+
+
+@pytest.mark.parametrize("trigger", git_cicd.ALL_TRIGGERS)
+def test_every_declared_secret_reaches_the_script(repo, log, trigger):
+    base, head = secret_job(repo, log, list(SECRET_NAMES))
+    result = run_on(repo, trigger, base, head, env=env_for(log, **ALL_SET))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert seen(log) == ALL_SET
+
+
+@pytest.mark.parametrize("trigger", git_cicd.ALL_TRIGGERS)
+def test_declared_secret_empty_or_unset_reaches_the_script_unset(
+        repo, log, tmp_path, trigger):
+    base, head = secret_job(repo, log, ["CICD_WRITE_TOKEN",
+                                        "CICD_READ_TOKEN", "VENDOR_PAT"])
+    out = tmp_path / "result.json"
+    # CICD_WRITE_TOKEN empty (as the workflow gives an unset secret),
+    # CICD_READ_TOKEN unset, VENDOR_PAT set
+    result = run_on(repo, trigger, base, head, "--result", str(out),
+                    env=env_for(log, CICD_WRITE_TOKEN="",
+                                VENDOR_PAT="pat-value"))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert seen(log)["CICD_WRITE_TOKEN"] == "unset"
+    assert seen(log)["CICD_READ_TOKEN"] == "unset"
+    assert seen(log)["VENDOR_PAT"] == "pat-value"
+    data = json.loads(out.read_text())
+    assert data["absent_secrets"] == ["CICD_WRITE_TOKEN", "CICD_READ_TOKEN"]
+    out_text = result.stdout
+    assert "==> git-cicd: job j: declared secret CICD_WRITE_TOKEN is not " \
+        "set" in out_text
+    assert "==> git-cicd: job j: declared secret CICD_READ_TOKEN is not " \
+        "set" in out_text
+    # the note comes before the steps
+    assert out_text.index("declared secret") < out_text.index("step 1/1")
+    assert "pat-value" not in out_text + result.stderr + out.read_text()
+
+
+def test_script_env_removes_undeclared_secrets(monkeypatch):
+    for name, value in ALL_SET.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("CICD_READ_TOKEN", "")
+    facts = {"trigger": "merge", "target": "main", "source": "main",
+             "base": "b", "head": "h"}
+    env = git_cicd.script_env("j", facts, "/tmp/x", {}, ["CICD_READ_TOKEN",
+                                                         "VENDOR_PAT"])
+    assert env["GITHUB_TOKEN"] == "gh-value"
+    assert env["VENDOR_PAT"] == "pat-value"
+    assert "CICD_READ_TOKEN" not in env and "CICD_WRITE_TOKEN" not in env
+    assert git_cicd.absent_secrets(["CICD_READ_TOKEN", "VENDOR_PAT"]) == [
+        "CICD_READ_TOKEN"]

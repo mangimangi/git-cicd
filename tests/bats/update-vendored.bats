@@ -34,13 +34,19 @@ setup() {
     [ -z "$(args | grep -x -- --private)" ]
 }
 
-@test "GH_TOKEN is VENDOR_PAT when set" {
+@test "GH_TOKEN is CICD_WRITE_TOKEN over VENDOR_PAT and GITHUB_TOKEN" {
+    export CICD_WRITE_TOKEN=write_token VENDOR_PAT=pat_token GITHUB_TOKEN=ghs_token
+    run bash ci/update-vendored.sh
+    [ "$(env_of GH_TOKEN)" = "write_token" ]
+}
+
+@test "GH_TOKEN is VENDOR_PAT without CICD_WRITE_TOKEN" {
     export VENDOR_PAT=pat_token GITHUB_TOKEN=ghs_token
     run bash ci/update-vendored.sh
     [ "$(env_of GH_TOKEN)" = "pat_token" ]
 }
 
-@test "GH_TOKEN is GITHUB_TOKEN without VENDOR_PAT" {
+@test "GH_TOKEN is GITHUB_TOKEN without CICD_WRITE_TOKEN or VENDOR_PAT" {
     export GITHUB_TOKEN=ghs_token
     run bash ci/update-vendored.sh
     [ "$(env_of GH_TOKEN)" = "ghs_token" ]

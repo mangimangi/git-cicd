@@ -78,7 +78,7 @@ def test_the_manual_form_lists_release_and_update_vendored():
                                    "(job update-vendored)",
                     "required": False, "default": "latest",
                     "type": "string"},
-        "private": {"description": "Vendor repo is private (use VENDOR_PAT) "
+        "private": {"description": "Vendor repo is private (use CICD_WRITE_TOKEN) "
                                    "(job update-vendored)",
                     "required": False, "default": "false", "type": "choice",
                     "options": ["true", "false"]},
@@ -104,7 +104,7 @@ with open(os.environ["LOG"], "a") as f:
     f.write(json.dumps({"tool": sys.argv[0], "argv": sys.argv[1:],
                         "env": {k: v for k, v in os.environ.items()
                                 if k.startswith(("GITHUB_", "INPUT_", "GH_",
-                                                 "CICD_"))}})
+                                                 "CICD_", "VENDOR_"))}})
             + "\\n")
 """
 
@@ -272,6 +272,85 @@ def test_update_vendored_by_hand_private(own):
     assert call["argv"] == ["mangimangi/git-semver", "--version", "1.2.0",
                             "--pr", "--deps=install", "--private"]
     assert call["env"]["GH_TOKEN"] == "pat_token"
+
+
+def test_update_vendored_prefers_cicd_write_token(own):
+    sha = own.commit("head")
+    result = run_job(own, "update-vendored", "manual", sha,
+                     inputs={"private": "true"},
+                     CICD_WRITE_TOKEN="write_token", VENDOR_PAT="pat_token")
+    assert result.returncode == 0, result.stdout + result.stderr
+    (call,) = calls(own)
+    assert call["env"]["GH_TOKEN"] == "write_token"
+
+
+ALL_TOKENS = {"CICD_WRITE_TOKEN": "write_token",
+              "CICD_READ_TOKEN": "read_token", "VENDOR_PAT": "pat_token"}
+
+
+@pytest.mark.parametrize("job,trigger,expected", [
+    ("update-vendored", "cron", {"CICD_WRITE_TOKEN", "VENDOR_PAT"}),
+    ("update-vendored", "manual", {"CICD_WRITE_TOKEN", "VENDOR_PAT"}),
+    ("release", "merge", set()),
+    ("release", "manual", set()),
+])
+def test_own_jobs_get_only_what_they_declare(own, job, trigger, expected):
+    """With all three secrets in the caller's environment, update-vendored
+    sees CICD_WRITE_TOKEN and VENDOR_PAT, release none of them."""
+    before = own.commit("before")
+    sha = own.commit("head")
+    result = run_job(own, job, trigger, sha, base=before,
+                     inputs={} if trigger == "manual" else None,
+                     **ALL_TOKENS)
+    assert result.returncode == 0, result.stdout + result.stderr
+    (call,) = calls(own)
+    seen = {k for k in ALL_TOKENS if k in call["env"]}
+    assert seen == expected
+    assert call["env"]["GITHUB_TOKEN"] == "ghs_token"
+
+
+def test_own_declarations():
+    config = git_cicd.load_config(str(ROOT))
+    declared = {n: (j["secrets"], j["permissions"])
+                for n, j in config["jobs"].items()}
+    assert declared == {
+        "test": ([], {}), "version-check": ([], {}), "release": ([], {}),
+        "vendor-check": ([], {}),
+        "update-vendored": (["CICD_WRITE_TOKEN", "VENDOR_PAT"], {}),
+    }
+
+
+@pytest.mark.parametrize("trigger,job", [("cron", None),
+                                         ("manual", "update-vendored"),
+                                         ("merge", None),
+                                         ("manual", "release")])
+def test_generated_workflows_give_update_vendored_its_two_secrets(
+        own, tmp_path, trigger, job):
+    """The committed workflows select each secret by decide's `secrets`
+    output, which (from this repository's config) gives update-vendored's
+    matrix entry CICD_WRITE_TOKEN and VENDOR_PAT and release none."""
+    from tests.test_workflow import secret_lines
+    path = git_cicd.WORKFLOWS[trigger][1]
+    text = (ROOT / path).read_text()
+    matrix = "matrix.entry.job" if trigger == "cron" else "matrix.job"
+    for line in secret_lines(matrix):
+        assert line in text.splitlines(), line
+    sha = own.commit("head")
+    own.git("update-ref", "refs/remotes/origin/main", sha)
+    out = tmp_path / "out"
+    args = {"cron": ["--trigger=cron", "--cron=0 9 * * 1"],
+            "merge": ["--trigger=merge", "--target=main", "--source=main",
+                      f"--base={sha}", f"--head={sha}"],
+            "manual": ["--trigger=manual", f"--job={job}", "--target=main",
+                       "--source=main", f"--base={sha}", f"--head={sha}"]}
+    result = own.run("decide", *args[trigger],
+                     env={"GITHUB_OUTPUT": str(out)})
+    assert result.returncode == 0, result.stderr
+    values = dict(l.split("=", 1) for l in out.read_text().splitlines())
+    secrets = json.loads(values["secrets"])
+    assert secrets["update-vendored"] == ["CICD_WRITE_TOKEN", "VENDOR_PAT"]
+    assert secrets["release"] == []
+    assert all(v == [] for k, v in secrets.items() if k != "update-vendored")
 
 
 def test_scripts_are_executable_and_named_by_the_config():

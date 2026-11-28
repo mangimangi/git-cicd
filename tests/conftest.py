@@ -98,6 +98,19 @@ class Repo:
                               text=True, env=run_env)
 
 
+# The token names no test may read from the caller's environment. ci/test.sh
+# sets each to a sentinel value; the autouse fixture below removes them before
+# every test, and tests/test_token_guard.py fails while one is set.
+TOKEN_NAMES = ("CICD_WRITE_TOKEN", "CICD_READ_TOKEN", "VENDOR_PAT", "GH_TOKEN",
+               "GITHUB_TOKEN")
+
+
+@pytest.fixture(autouse=True)
+def no_tokens(monkeypatch):
+    for key in TOKEN_NAMES:
+        monkeypatch.delenv(key, raising=False)
+
+
 @pytest.fixture
 def repo(tmp_path, monkeypatch):
     path = tmp_path / "repo"

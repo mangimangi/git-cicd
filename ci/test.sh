@@ -16,7 +16,17 @@
 # The step fails below 99% (pyproject.toml fail_under), after the report.
 # In CI (CI set) a missing pytest-cov fails the step, so the gate is never
 # skipped; locally the suite still runs and says coverage was not checked.
+#
+# The suite never reads a real token: tests/conftest.py (an autouse fixture)
+# and tests/bats/helper.bash remove CICD_WRITE_TOKEN, CICD_READ_TOKEN,
+# VENDOR_PAT, GH_TOKEN and GITHUB_TOKEN before every test. This script sets
+# each of them to a sentinel value first, and a test in each suite fails
+# while one is set, so removing the guard fails the step.
 set -euo pipefail
+
+for TOKEN in CICD_WRITE_TOKEN CICD_READ_TOKEN VENDOR_PAT GH_TOKEN GITHUB_TOKEN; do
+    export "$TOKEN=git-cicd-test-sentinel"
+done
 
 FLOOR="$(sed -n 's/^requires-python *= *">= *\([0-9][0-9.]*\)".*/\1/p' pyproject.toml | head -n1)"
 CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/git-cicd"

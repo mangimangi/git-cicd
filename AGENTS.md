@@ -45,7 +45,10 @@ pytest suite), `version-check` (`open`, pull requests into `main`;
 `ci/vendor-check.sh` runs `.vendored/check`), `release` (`merge` on `main`;
 `.vendored/pkg/git-semver/release` with no subcommand) and `update-vendored`
 (`cron` `0 9 * * 1` on `main`; `ci/update-vendored.sh` runs
-`.vendored/install`).
+`.vendored/install`). A job gets only the secrets and permissions it
+declares: `update-vendored` declares the secrets `CICD_WRITE_TOKEN` and
+`VENDOR_PAT` (its script uses the first that is set, else `GITHUB_TOKEN`);
+the other four declare nothing.
 
 ## Releasing
 
