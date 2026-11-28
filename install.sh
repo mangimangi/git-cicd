@@ -37,7 +37,7 @@ INSTALL_DIR="${VENDOR_INSTALL_DIR:?VENDOR_INSTALL_DIR is required}"
 
 CONFIG=".vendored/configs/git-cicd.json"
 # The triggers whose workflow git-cicd generates (see WORKFLOWS in git-cicd).
-TRIGGERS=(open merge)
+TRIGGERS=(open merge manual)
 
 # File download helper - uses gh api when GH_TOKEN is set, curl otherwise
 fetch_file() {

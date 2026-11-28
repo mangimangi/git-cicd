@@ -195,6 +195,49 @@ def test_merge_environment_reaches_step(repo, log):
     assert (log.parent / "log.txt.changed").read_text() == "src/app.py\n"
 
 
+def test_manual_environment_reaches_step(repo, log):
+    """On manual, target and source are the branch the run was started on,
+    base and head the run's commit, and the changed files are empty."""
+    repo.script("ci/env.sh", DUMP_ENV)
+    repo.config({"jobs": {"envjob": {
+        "on": [], "branches": ["main"], "paths": ["src/**"],
+        "steps": ["ci/env.sh"]}}})
+    repo.commit("base")
+    repo.write("src/app.py", "x\n")
+    sha = repo.commit("run here")
+    result = repo.run("run-job", "envjob", "--trigger=manual", "--target=main",
+                      "--source=main", f"--base={sha}", f"--head={sha}",
+                      env=env_for(log))
+    assert result.returncode == 0, result.stdout + result.stderr
+    values = dict(line.split("=", 1) for line in logged(log)[:7])
+    assert values == {
+        "CICD_TRIGGER": "manual", "CICD_JOB": "envjob",
+        "CICD_TARGET_BRANCH": "main", "CICD_SOURCE_BRANCH": "main",
+        "CICD_BASE": sha, "CICD_HEAD": sha,
+        "CICD_CHANGED_FILES": values["CICD_CHANGED_FILES"],
+    }
+    assert (log.parent / "log.txt.changed").read_text() == ""
+
+
+@pytest.mark.parametrize("job,branch,reason", [
+    ("nope", "main", "unknown job 'nope'"),
+    ("off", "main", 'job off cannot be run by hand ("manual": false)'),
+    ("t", "dev", "branch dev does not match the branches of job t (main)"),
+])
+def test_manual_run_job_refusals(repo, log, job, branch, reason):
+    repo.script("ci/a.sh", LOG_STEP)
+    repo.config({"jobs": {
+        "t": {"branches": ["main"], "steps": ["ci/a.sh"]},
+        "off": {"branches": ["**"], "steps": ["ci/a.sh"], "manual": False}}})
+    sha = repo.commit("base")
+    result = repo.run("run-job", job, "--trigger=manual", f"--target={branch}",
+                      f"--source={branch}", f"--base={sha}", f"--head={sha}",
+                      env=env_for(log))
+    assert result.returncode == 2
+    assert reason in result.stderr
+    assert logged(log) == []
+
+
 def test_step_receives_trigger_not_moment(repo, log):
     """The step sees CICD_TRIGGER=open; the old name CICD_MOMENT is not set."""
     repo.script("ci/env.sh", 'env >> "$LOG"\n')
@@ -285,7 +328,7 @@ def test_unknown_job(repo, log):
     assert "unknown job 'nope'" in result.stderr
 
 
-@pytest.mark.parametrize("trigger", ["cron", "manual"])
+@pytest.mark.parametrize("trigger", ["cron"])
 def test_unbuilt_trigger(repo, log, trigger):
     repo.script("ci/a.sh")
     base, head = setup_repo(repo, {"t": {

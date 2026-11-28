@@ -41,7 +41,7 @@ WORKFLOWS = {
     "cron": ("Cron", ".github/workflows/git-cicd-cron.yml"),
     "manual": ("Manual", ".github/workflows/git-cicd-manual.yml"),
 }
-GENERATED_TRIGGERS = ("open", "merge")
+GENERATED_TRIGGERS = ("open", "merge", "manual")
 # The single workflow file of git-cicd before the per-trigger files; generate
 # removes it and verify fails while it is there.
 LEGACY_WORKFLOW_PATH = ".github/workflows/git-cicd.yml"
@@ -398,7 +398,7 @@ def load_config(root, path=None):
 
 ALL_TRIGGERS = TRIGGERS + ("manual",)
 # The triggers that execute; every other one is refused, never ignored.
-BUILT_TRIGGERS = ("open", "merge")
+BUILT_TRIGGERS = ("open", "merge", "manual")
 NOT_BUILT = ("the {trigger} trigger is not built yet (built: "
              + ", ".join(BUILT_TRIGGERS) + ")")
 
@@ -484,15 +484,63 @@ def _name_files(files, limit=5):
     return shown
 
 
+def manual_refusal(config, name, target):
+    """Why a manual run of job `name` on branch `target` is refused, or None
+    when it may run: the job must exist, allow manual runs and have branches
+    that match the branch the run was started on."""
+    job = config["jobs"].get(name)
+    if job is None:
+        return (f"unknown job {name!r} (declared: "
+                f"{', '.join(config['jobs']) or 'none'})")
+    if not job["manual"]:
+        return f'job {name} cannot be run by hand ("manual": false)'
+    if not match_any(job["branches"], target or ""):
+        return (f"branch {target} does not match the branches of job {name} "
+                f"({', '.join(job['branches'])})")
+    return None
+
+
+def decide_manual(config, target, source, base, head, job):
+    """A manual run: the named job is needed when it may run (paths and
+    needs_nothing are ignored); every other job is not needed. A refusal is
+    recorded in the decision record, never raised, so the report shows it."""
+    refused = manual_refusal(config, job, target)
+    decisions = []
+    for name, j in config["jobs"].items():
+        if name != job:
+            needed, reason = False, "not the job asked for"
+        elif refused:
+            needed, reason = False, refused
+        else:
+            needed, reason = True, "manual run"
+        decisions.append({"name": name, "title": j["title"],
+                          "needed": needed, "reason": reason,
+                          "blocking": j["blocking"]})
+    return {
+        "trigger": "manual",
+        "target": target,
+        "source": source,
+        "base": base,
+        "head": head,
+        "job": job,
+        "refused": refused,
+        "changed_files": [],
+        "jobs": decisions,
+        "max_parallel": config["max_parallel"],
+    }
+
+
 def _article(word):
     return "an" if word[:1] in "aeiou" else "a"
 
 
 def decide(config, root, trigger, target, source, base, head, files=None,
-           diff_error=None):
+           diff_error=None, job=None):
     """Decide every declared job for the trigger, one decision each, with a
     reason. Return the decision record (what `decide --json` prints)."""
     check_trigger(config, trigger)
+    if trigger == "manual":
+        return decide_manual(config, target, source, base, head, job)
     if files is None and diff_error is None:
         files, diff_error = changed_files(root, base, head)
 
@@ -569,6 +617,8 @@ def format_decision(decision):
              f"{decision['target']}, source {decision['source']}",
              f"  base {decision['base']}, head {decision['head']}",
              f"  {len(decision['changed_files'])} changed files"]
+    if decision.get("refused"):
+        lines.append(f"  refused: {decision['refused']}")
     for j in decision["jobs"]:
         state = "needed" if j["needed"] else "not needed"
         lines.append(f"  {j['name']}: {state} ({j['reason']})")
@@ -640,6 +690,11 @@ def run_job(config, root, name, facts, setup=False, files=None):
     if job is None:
         raise UsageError(f"unknown job {name!r} (declared: "
                          f"{', '.join(config['jobs']) or 'none'})")
+    if facts["trigger"] == "manual":
+        refused = manual_refusal(config, name, facts["target"])
+        if refused:
+            raise UsageError(f"manual run refused: {refused}")
+        files = []  # a manual run has no change
     if files is None:
         files, _ = changed_files(root, facts["base"], facts["head"])
     fd, changed_path = tempfile.mkstemp(prefix="git-cicd-changed-",
@@ -1007,6 +1062,11 @@ def verdict_line(rows, decision, workflow_ok):
     if decision is None:
         return passed, (f"{word} - no decisions: the decide step failed or "
                         "did not run (see its log)")
+    if decision.get("refused"):
+        text = f"FAILED - {decision['refused']}"
+        if not workflow_ok:
+            text += "; the workflows do not match the config"
+        return False, text
     if not needed:
         reasons = []
         for r in rows:
@@ -1227,8 +1287,13 @@ def cmd_validate(args, root):
 
 def cmd_decide(args, root):
     config = load_config(root, args.config)
+    if args.trigger == "manual" and args.job is None:
+        raise UsageError("--trigger manual needs --job NAME (the job to run)")
+    if args.trigger != "manual" and args.job is not None:
+        raise UsageError(f"--job is for --trigger manual only, not "
+                         f"--trigger {args.trigger}")
     decision = decide(config, root, args.trigger, args.target, args.source,
-                      args.base, args.head)
+                      args.base, args.head, job=args.job)
     if args.changed_files_out:
         write_changed_files(args.changed_files_out, decision["changed_files"])
     write_github_output(decision)
@@ -1365,6 +1430,9 @@ def build_parser():
 
     p = add("decide", cmd_decide, "decide which jobs a change needs")
     add_change_args(p)
+    p.add_argument("--job", metavar="NAME",
+                   help="with --trigger manual (and only then): the job the "
+                        "manual run is for")
     p.add_argument("--json", action="store_true",
                    help="print the decisions as JSON")
     p.add_argument("--changed-files-out", metavar="PATH",

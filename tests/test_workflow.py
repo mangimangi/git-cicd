@@ -8,6 +8,7 @@ from tests.conftest import ROOT, git_cicd
 
 WORKFLOW = ".github/workflows/git-cicd-open.yml"
 MERGE = ".github/workflows/git-cicd-merge.yml"
+MANUAL = ".github/workflows/git-cicd-manual.yml"
 TEMPLATES = ROOT / "templates" / "workflows"
 LEGACY = ".github/workflows/git-cicd.yml"
 TEMPLATE = ROOT / "templates" / "workflows" / "open.yml"
@@ -74,7 +75,8 @@ def test_generate_writes_file(tool_repo):
     assert "schedule:" not in text
 
 
-@pytest.mark.parametrize("path,count", [(WORKFLOW, 8), (MERGE, 8)])
+@pytest.mark.parametrize("path,count", [(WORKFLOW, 8), (MERGE, 8),
+                                        (MANUAL, 8)])
 def test_no_expressions_inside_run_blocks(tool_repo, path, count):
     generate(tool_repo, base_config())
     blocks = run_blocks((tool_repo.path / path).read_text())
@@ -241,7 +243,8 @@ def test_non_cron_differences_generate_identical_files(tool_repo):
     }, "needs_nothing": [".pearls/**", "*.md"], "max_parallel": 7}
     generate(tool_repo, b_config)
     assert generated_files(tool_repo) == files_a
-    assert sorted(files_a) == ["git-cicd-merge.yml", "git-cicd-open.yml"]
+    assert sorted(files_a) == ["git-cicd-manual.yml", "git-cicd-merge.yml",
+                               "git-cicd-open.yml"]
 
 
 def test_cron_jobs_do_not_change_the_open_file(tool_repo):
@@ -330,20 +333,20 @@ def test_verify_fails_while_the_old_file_is_there(tool_repo):
     result = tool_repo.run("verify")
     assert result.returncode == 1
     assert f"{LEGACY} is still there" in result.stdout
-    assert (f"run: {TOOL} generate and commit {WORKFLOW}, {MERGE} and the "
-            f"removal of {LEGACY}") in result.stdout
+    assert (f"run: {TOOL} generate and commit {WORKFLOW}, {MERGE}, {MANUAL} "
+            f"and the removal of {LEGACY}") in result.stdout
 
 
 def test_generated_files_are_named_for_their_triggers():
     """One workflow per trigger, its name the trigger's word and its file
-    fixed for good; `open` and `merge` are generated so far."""
+    fixed for good; `open`, `merge` and `manual` are generated so far."""
     assert git_cicd.WORKFLOWS == {
         "open": ("Open", ".github/workflows/git-cicd-open.yml"),
         "merge": ("Merge", ".github/workflows/git-cicd-merge.yml"),
         "cron": ("Cron", ".github/workflows/git-cicd-cron.yml"),
         "manual": ("Manual", ".github/workflows/git-cicd-manual.yml"),
     }
-    assert git_cicd.GENERATED_TRIGGERS == ("open", "merge")
+    assert git_cicd.GENERATED_TRIGGERS == ("open", "merge", "manual")
     templates = sorted(p.stem for p in (ROOT / "templates" / "workflows")
                        .glob("*.yml"))
     assert templates == sorted(git_cicd.GENERATED_TRIGGERS)
@@ -358,7 +361,7 @@ def test_this_repository_is_migrated():
     assert not (ROOT / LEGACY).exists()
     config = git_cicd.load_config(str(ROOT))
     rendered = git_cicd.render_workflows(config, "git-cicd")
-    assert list(rendered) == [WORKFLOW, MERGE]
+    assert list(rendered) == [WORKFLOW, MERGE, MANUAL]
     for path, text in rendered.items():
         assert (ROOT / path).read_text() == text, path
 
@@ -603,3 +606,73 @@ def test_verify_fails_when_the_merge_file_is_missing(tool_repo):
     result = tool_repo.run("verify")
     assert result.returncode == 1
     assert f"{MERGE} is missing" in result.stdout
+
+
+# ── manual: the Manual workflow ─────────────────────────────────────────────
+
+def generate_manual(repo):
+    generate(repo, base_config())
+    return (repo.path / MANUAL).read_text()
+
+
+def test_manual_file_is_written_with_the_dispatch_and_job_input(tool_repo):
+    text = generate_manual(tool_repo)
+    assert text.startswith(f"# {MANUAL} - GENERATED")
+    assert "\nname: Manual\n" in text
+    on = text.split("\non:\n", 1)[1].split("\npermissions:")[0]
+    assert on.startswith("  workflow_dispatch:\n    inputs:\n      job:\n")
+    assert "        required: true\n        type: string\n" in on
+    assert "config job to run" in on
+    assert "push" not in on and "schedule" not in on
+    assert "JOB: ${{ inputs.job }}" in text
+    assert (f'python3 {TOOL} decide --trigger=manual --job="$JOB"') in text
+    assert f"python3 {TOOL} run-job \"$JOB\" --trigger=manual" in text
+    assert f"python3 {TOOL} report --trigger=manual" in text
+    assert "__TOOL__" not in text
+    # the input appears only in env: entries
+    for block in run_blocks(text):
+        assert "inputs." not in block
+
+
+def test_manual_permissions_queue_and_checkout(tool_repo):
+    text = generate_manual(tool_repo)
+    jobs = job_blocks(text)
+    assert set(jobs) == {"decide", "run", "verdict"}
+    assert text.split("\njobs:\n", 1)[0].endswith(
+        "\npermissions:\n  contents: read\n")
+    assert ("    permissions:\n      contents: write\n"
+            "      pull-requests: write\n") in jobs["run"]
+    writes = re.findall(r"^\s*([a-z-]+):\s*write\s*$", text, re.M)
+    assert sorted(writes) == ["contents", "pull-requests", "statuses",
+                              "statuses"]
+    assert "concurrency" not in text.split("\nname: Manual\n", 1)[1]
+    merge = job_blocks(generate_merge(tool_repo))
+    queue = steps_of(jobs["decide"])[1]
+    assert queue.startswith("Wait for earlier Merge and Manual runs")
+    assert queue == steps_of(merge["decide"])[1]
+    checkout = steps_of(jobs["run"])[0]
+    assert "fetch-depth: 0" in checkout and "fetch-tags: true" in checkout
+
+
+def test_manual_verdict_pending_first_and_final_last(tool_repo):
+    jobs = job_blocks(generate_manual(tool_repo))
+    merge = job_blocks(generate_merge(tool_repo))
+    first = steps_of(jobs["decide"])[0]
+    last = steps_of(jobs["verdict"])[-1]
+    assert first.startswith(
+        "Set the Verdict / git-cicd:verdict status to pending\n")
+    assert last.startswith("Set the Verdict / git-cicd:verdict status\n")
+    assert "        if: always()\n" in last
+    # the same no-open-pull-request rule as Merge
+    assert first == steps_of(merge["decide"])[0]
+    assert last == steps_of(merge["verdict"])[-1]
+    assert "    if: always()\n" in jobs["verdict"]
+
+
+def test_verify_fails_on_a_hand_edit_of_the_manual_file(tool_repo):
+    text = generate_manual(tool_repo)
+    (tool_repo.path / MANUAL).write_text(text.replace("required: true",
+                                                      "required: false"))
+    result = tool_repo.run("verify")
+    assert result.returncode == 1
+    assert f"{MANUAL} (committed)" in result.stdout

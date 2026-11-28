@@ -282,7 +282,7 @@ def test_not_open_jobs_reported(repo):
     assert jobs["release"]["reason"] == "not an open job"
 
 
-@pytest.mark.parametrize("trigger", ["cron", "manual"])
+@pytest.mark.parametrize("trigger", ["cron"])
 def test_unbuilt_triggers_exit_2(repo, trigger):
     base = setup_repo(repo)
     result = repo.run("decide", "--trigger", trigger, "--target", "main",
@@ -513,3 +513,93 @@ def test_decide_function_with_given_files(repo):
     d = git_cicd.decide(config, str(repo.path), "open", "main", "f", "b", "h",
                         files=["src/sub/x.py"])
     assert git_cicd.needed_jobs(d) == ["test"]
+
+
+# ── manual: one named job, run by hand ──────────────────────────────────────
+
+MANUAL_JOBS = {
+    "test": {"on": ["open"], "branches": ["**"], "paths": ["src/**"],
+             "steps": ["ci/test.sh"]},
+    "release": {"on": ["merge"], "branches": ["main"], "steps": ["ci/bump.sh"]},
+    "lint": {"on": ["open"], "branches": ["**"], "steps": ["ci/lint.sh"],
+             "manual": False},
+}
+
+
+def decide_manual(repo, job, branch="main"):
+    head = repo.git("rev-parse", "HEAD")
+    result = repo.run("decide", "--trigger=manual", f"--job={job}",
+                      f"--target={branch}", f"--source={branch}",
+                      f"--base={head}", f"--head={head}", "--json")
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    return data, {j["name"]: j for j in data["jobs"]}
+
+
+def test_manual_run_of_a_job(repo):
+    setup_repo(repo, jobs=MANUAL_JOBS)
+    data, jobs = decide_manual(repo, "release")
+    assert data["trigger"] == "manual" and data["job"] == "release"
+    assert data["refused"] is None
+    assert data["changed_files"] == []
+    assert jobs["release"]["needed"] is True
+    assert jobs["release"]["reason"] == "manual run"
+    for name in ("test", "lint"):
+        assert jobs[name]["needed"] is False
+        assert jobs[name]["reason"] == "not the job asked for"
+
+
+def test_manual_ignores_paths_and_triggers(repo):
+    """paths and needs_nothing do not apply: a job with paths runs though
+    nothing changed, and a job need not list a trigger in on."""
+    setup_repo(repo, jobs=MANUAL_JOBS)
+    _, jobs = decide_manual(repo, "test", branch="feature")
+    assert jobs["test"]["needed"] is True
+    assert jobs["test"]["reason"] == "manual run"
+
+
+@pytest.mark.parametrize("job,branch,reason", [
+    ("nope", "main", "unknown job 'nope' (declared: test, release, lint)"),
+    ("lint", "main", 'job lint cannot be run by hand ("manual": false)'),
+    ("release", "feature",
+     "branch feature does not match the branches of job release (main)"),
+])
+def test_manual_refusals_are_recorded(repo, job, branch, reason):
+    setup_repo(repo, jobs=MANUAL_JOBS)
+    data, jobs = decide_manual(repo, job, branch=branch)
+    assert data["refused"] == reason
+    assert not any(j["needed"] for j in data["jobs"])
+    if job in jobs:
+        assert jobs[job]["reason"] == reason
+
+
+def test_manual_refusal_outputs_need_no_job(repo, tmp_path):
+    setup_repo(repo, jobs=MANUAL_JOBS)
+    head = repo.git("rev-parse", "HEAD")
+    out = tmp_path / "out"
+    result = repo.run("decide", "--trigger=manual", "--job=lint",
+                      "--target=main", "--source=main", f"--base={head}",
+                      f"--head={head}", env={"GITHUB_OUTPUT": str(out)})
+    assert result.returncode == 0
+    assert "refused: job lint cannot be run by hand" in result.stdout
+    outputs = dict(line.split("=", 1) for line in out.read_text().splitlines())
+    assert outputs["jobs"] == "[]" and outputs["any"] == "false"
+
+
+def test_manual_needs_job(repo):
+    base = setup_repo(repo, jobs=MANUAL_JOBS)
+    result = repo.run("decide", "--trigger=manual", "--target=main",
+                      "--source=main", f"--base={base}", f"--head={base}")
+    assert result.returncode == 2
+    assert "--trigger manual needs --job NAME" in result.stderr
+
+
+@pytest.mark.parametrize("trigger", ["open", "merge", "cron"])
+def test_job_refused_for_other_triggers(repo, trigger):
+    base = setup_repo(repo, jobs=MANUAL_JOBS)
+    result = repo.run("decide", f"--trigger={trigger}", "--job=test",
+                      "--target=main", "--source=main", f"--base={base}",
+                      f"--head={base}")
+    assert result.returncode == 2
+    assert (f"--job is for --trigger manual only, not --trigger {trigger}"
+            in result.stderr)

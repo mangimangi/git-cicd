@@ -304,6 +304,45 @@ def test_report_command_merge(config, repo, tmp_path):
         "failure", "FAILED - 1 of 3 jobs needed, 1 failed"]
 
 
+def test_report_manual_refusal_fails_with_the_reason(config, repo, tmp_path):
+    repo.install_tool()
+    assert repo.run("generate").returncode == 0
+    reason = 'job docs cannot be run by hand ("manual": false)'
+    dec = decision(docs=(False, reason))
+    dec.update(trigger="manual", job="docs", refused=reason)
+    for j in dec["jobs"]:
+        if j["name"] != "docs":
+            j["reason"] = "not the job asked for"
+    (tmp_path / "d.json").write_text(json.dumps(dec))
+    out = tmp_path / "verdict.txt"
+    summary = tmp_path / "summary.md"
+    result = repo.run("report", "--trigger", "manual", "--decisions",
+                      str(tmp_path / "d.json"), "--results",
+                      str(tmp_path / "none"), "--verdict-out", str(out),
+                      env={"GITHUB_STEP_SUMMARY": str(summary)})
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == f"FAILED - {reason}"
+    assert out.read_text().splitlines() == ["failure", f"FAILED - {reason}"]
+    assert "FAILED - job docs cannot be run by hand" in summary.read_text()
+    assert f"not needed ({reason})" in result.stdout
+
+
+def test_report_manual_run_passes(config, repo, tmp_path):
+    repo.install_tool()
+    assert repo.run("generate").returncode == 0
+    dec = decision(docs=(True, "manual run"))
+    dec.update(trigger="manual", job="docs", refused=None)
+    (tmp_path / "d.json").write_text(json.dumps(dec))
+    (tmp_path / "r").mkdir()
+    (tmp_path / "r" / "result.json").write_text(
+        json.dumps(passed_result("docs", steps=("ci/docs.sh",), setup=False)))
+    result = repo.run("report", "--trigger", "manual", "--decisions",
+                      str(tmp_path / "d.json"), "--results", str(tmp_path / "r"))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == \
+        "PASSED - 1 of 3 jobs needed, 1 passed"
+
+
 def test_load_results_ignores_other_json(tmp_path):
     (tmp_path / "a" / "b").mkdir(parents=True)
     (tmp_path / "a" / "b" / "r.json").write_text(json.dumps(

@@ -8,7 +8,7 @@
 #   open    Open    .github/workflows/git-cicd-open.yml    (generated)
 #   merge   Merge   .github/workflows/git-cicd-merge.yml   (generated)
 #   cron    Cron    .github/workflows/git-cicd-cron.yml    (not built yet)
-#   manual  Manual  .github/workflows/git-cicd-manual.yml  (not built yet)
+#   manual  Manual  .github/workflows/git-cicd-manual.yml  (generated)
 #
 # Every generated file is fixed text except the cron workflow's schedule
 # block; this file does not vary with the config at all, only with the
