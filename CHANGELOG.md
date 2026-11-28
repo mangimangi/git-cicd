@@ -2,6 +2,12 @@
 
 Releases of git-cicd, written by git-semver on each merge to `main`.
 
+## [0.0.4] - 2026-11-28
+
+### Changed
+- Every trigger executes; git-cicd runs its own release, vendor check and update (plan git-dev-883c) (#14)
+- chore: ignore medici-written modes/ and .medici/ (#11)
+
 ## [0.0.3] - 2026-11-27
 
 ### Changed
