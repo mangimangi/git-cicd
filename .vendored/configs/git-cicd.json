@@ -39,9 +39,10 @@
       "inputs": {
         "vendor": {"description": "Vendor to update (or all)", "default": "all"},
         "version": {"description": "Version to install (default: latest)", "default": "latest"},
-        "private": {"description": "Vendor repo is private (use CICD_WRITE_TOKEN)", "choices": ["true", "false"], "default": "false"}
+        "private": {"description": "Vendor repo is private (only needed when adding a new vendor)", "choices": ["true", "false"], "default": "false"}
       }
     }
   },
-  "needs_nothing": [".pearls/**", ".madreperla/**", "*.md", "LICENSE", "docs/**"]
+  "needs_nothing": [".pearls/**", ".madreperla/**", "*.md", "LICENSE", "docs/**"],
+  "repository": "git-cicd"
 }

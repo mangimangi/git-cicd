@@ -58,6 +58,9 @@ def test_this_repository_declares_its_own_jobs():
         "private": (["true", "false"], "false")}
 
 
+UPDATE = "Install Vendored / git-cicd:update-vendored"
+
+
 def test_the_manual_form_lists_release_and_update_vendored():
     """The committed Manual workflow's form, as generate writes it from this
     repository's config: the job dropdown and update-vendored's three named
@@ -70,16 +73,17 @@ def test_the_manual_form_lists_release_and_update_vendored():
     fields = form_fields(text)
     assert fields == {
         "job": {"description": "The config job to run", "required": True,
-                "type": "choice", "options": ["release", "update-vendored"]},
-        "vendor": {"description": "Vendor to update (or all) "
-                                  "(job update-vendored)",
+                "type": "choice",
+                "options": ["Release / git-cicd:release",
+                            "Install Vendored / git-cicd:update-vendored"]},
+        "vendor": {"description": f"Vendor to update (or all) ({UPDATE})",
                    "required": False, "default": "all", "type": "string"},
         "version": {"description": "Version to install (default: latest) "
-                                   "(job update-vendored)",
+                                   f"({UPDATE})",
                     "required": False, "default": "latest",
                     "type": "string"},
-        "private": {"description": "Vendor repo is private (use CICD_WRITE_TOKEN) "
-                                   "(job update-vendored)",
+        "private": {"description": "Vendor repo is private (only needed "
+                                   f"when adding a new vendor) ({UPDATE})",
                     "required": False, "default": "false", "type": "choice",
                     "options": ["true", "false"]},
     }

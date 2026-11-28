@@ -150,7 +150,9 @@ def test_explicit_base_and_head(project):
 
 
 def test_target_from_origin_head(project, tmp_path):
-    remote = tmp_path / "remote.git"
+    # named like the checkout, so the repository's name (the Manual form's
+    # rows) is the same with the origin remote as without it
+    remote = tmp_path / "origin" / "repo.git"
     project.git("init", "-q", "--bare", str(remote))
     project.git("remote", "add", "origin", str(remote))
     project.git("push", "-q", "origin", "main")

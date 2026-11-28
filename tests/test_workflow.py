@@ -305,7 +305,8 @@ def test_non_cron_differences_generate_identical_files(tool_repo):
     assert files_b["git-cicd-merge.yml"] == files_a["git-cicd-merge.yml"]
     # the Manual form lists the manual jobs: both configs have two
     assert files_b["git-cicd-manual.yml"] == files_a[
-        "git-cicd-manual.yml"].replace('- "test"', '- "other"')
+        "git-cicd-manual.yml"].replace('- "Test / repo:test"',
+                                       '- "Something Else / repo:other"')
 
 
 def test_cron_jobs_do_not_change_the_open_file(tool_repo):
@@ -686,7 +687,8 @@ def test_manual_file_is_written_with_the_dispatch_and_job_input(tool_repo):
         '  workflow_dispatch:\n    inputs:\n      job:\n'
         '        description: "The config job to run"\n'
         '        required: true\n        type: choice\n        options:\n'
-        '          - "test"\n          - "release"\n')
+        '          - "Test / repo:test"\n'
+        '          - "Release / repo:release"\n')
     assert "push" not in on and "schedule" not in on
     assert "JOB: ${{ inputs.job }}" in text
     assert (f'python3 {TOOL} decide --trigger=manual --job="$JOB"') in text
@@ -828,10 +830,11 @@ def test_hostile_declarations_cannot_change_the_files(tool_repo):
     files = generated_files(tool_repo)
     fields = form_fields(files["git-cicd-manual.yml"])
     assert list(fields) == ["job", "first", "second", "third", "fourth"]
-    assert fields["job"]["options"] == ["zz-hostile_job", "true",
-                                        "nightly-hostile"]
+    assert fields["job"]["options"] == [
+        "Zz Hostile Job / repo:zz-hostile_job", "True / repo:true",
+        "Nightly Hostile / repo:nightly-hostile"]
     assert fields["first"]["description"] == \
-        f"{HOSTILE[0]} (job zz-hostile_job)"
+        f"{HOSTILE[0]} (Zz Hostile Job / repo:zz-hostile_job)"
     assert fields["first"]["default"] == HOSTILE[1]
     assert fields["second"]["options"] == HOSTILE + HOSTILE_LINES
     assert fields["second"]["default"] == HOSTILE_LINES[0]
@@ -873,7 +876,7 @@ def test_declared_inputs_change_only_the_manual_form(tool_repo):
         if name != "git-cicd-manual.yml":
             assert files_b[name] == files_a[name], name
     field = ('      bump_type:\n'
-             '        description: "(job release)"\n'
+             '        description: "(Release / repo:release)"\n'
              '        required: false\n        default: "patch"\n'
              '        type: choice\n        options:\n'
              '          - "patch"\n          - "minor"\n')
@@ -911,10 +914,10 @@ FORM = (
     '        required: true\n'
     '        type: choice\n'
     '        options:\n'
-    '          - "release"\n'
-    '          - "update"\n'
+    '          - "Release / repo:release"\n'
+    '          - "Update / repo:update"\n'
     '      bump_type:\n'
-    '        description: "Version bump type (job release)"\n'
+    '        description: "Version bump type (Release / repo:release)"\n'
     '        required: false\n'
     '        default: "patch"\n'
     '        type: choice\n'
@@ -931,16 +934,16 @@ FORM = (
     '          - "true"\n'
     '          - "false"\n'
     '      note:\n'
-    '        description: "A note (job release)"\n'
+    '        description: "A note (Release / repo:release)"\n'
     '        required: false\n'
     '        type: string\n'
     '      vendor:\n'
-    '        description: "(job update)"\n'
+    '        description: "(Update / repo:update)"\n'
     '        required: false\n'
     '        default: "all"\n'
     '        type: string\n'
     '      token:\n'
-    '        description: "(job update)"\n'
+    '        description: "(Update / repo:update)"\n'
     '        required: false\n'
     '        type: string\n')
 
@@ -963,8 +966,9 @@ def test_manual_form_names_every_job_of_a_shared_input(tool_repo):
                        "c": job({})}}
     tool_repo.config(config)
     form = git_cicd.form_block(git_cicd.load_config(str(tool_repo.path)))
-    assert '      shared:\n        description: "S (jobs a, b)"\n' in form
-    assert '      a:\n        description: "(job a)"\n' in form
+    assert ('      shared:\n        description: '
+            '"S (A / repo:a, B / repo:b)"\n') in form
+    assert '      a:\n        description: "(A / repo:a)"\n' in form
     del config["jobs"]["c"]
     tool_repo.config(config)
     form = git_cicd.form_block(git_cicd.load_config(str(tool_repo.path)))

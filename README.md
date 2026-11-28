@@ -53,6 +53,7 @@ Top level:
 | `jobs` | object | required | job name → job. Names: letters, digits, `-`, `_` (they become runner and artifact names) |
 | `needs_nothing` | array of patterns | `[]` | files that need no job: documents, tracker records |
 | `max_parallel` | positive integer | `3` | how many job runners run at once |
+| `repository` | string (letters, digits, `.`, `-`, `_`) | the `origin` remote's name | the repository's name on GitHub, the `<repo>` of every row the tool writes (the report and the `Manual` form's options); state it only for a checkout whose `origin` remote names it differently (see [Rows](#rows)) |
 | `_vendor` | anything | | git-vendored's registry key; ignored by git-cicd |
 
 Any other key is refused, including `_comment_*` keys: comments belong here,
@@ -228,12 +229,15 @@ channel.
 
 **Giving values.** The `Manual` workflow's form is generated from the config
 (see [The generated workflows](#the-generated-workflows)): `job` is a dropdown
-of the jobs that allow manual runs, and every declared input of those jobs is
+of the jobs that allow manual runs, each named as its row
+(`<name> / <repo>:<job>`, as a pull request's checks show it), and every declared input of those jobs is
 a named field with its description, its default and, for an input with
 `choices`, a dropdown of them. The owner picks the job and fills the fields;
 from the command line, one `-f <name>=<value>` per input
-(`gh workflow run git-cicd-manual.yml --ref main -f job=release -f bump_type=minor`).
-The form reaches the tool only as one `env:` entry, `CICD_MANUAL_FORM`
+(`gh workflow run git-cicd-manual.yml --ref main -f job="Release / medici:release" -f bump_type=minor`;
+GitHub accepts only a value the dropdown lists, and the tool maps it back to
+the job; `decide --trigger manual --job release` also takes the bare job
+name). The form reaches the tool only as one `env:` entry, `CICD_MANUAL_FORM`
 (`${{ toJSON(inputs) }}`, a JSON object of strings), which the tool reads on a
 manual run and removes from the scripts' environment. A value typed into a
 field reaches the script exactly, quotes, `$`, backticks and newlines
@@ -246,8 +250,8 @@ so:
   Their declarations must be able to share it: the same `choices` and the
   same `default` (an absent default and `""` are the same). Their
   descriptions may differ; the field shows the first job's. A field not used
-  by every manual job says which jobs use it, for example
-  `Version bump type (job release)`;
+  by every manual job says which jobs use it, by their rows, for example
+  `Version bump type (Release / medici:release)`;
 - a run passes the chosen job **only the fields it declares**. Any other field
   is ignored, not an error; when its value is not the field's form default
   (its default, else the first choice, else empty) the report says so, for
@@ -473,7 +477,20 @@ line (at most 140 characters).
 `GITHUB_REPOSITORY`, and `github.event.repository.name` in a row). Locally
 (`git-cicd check`) it is the last path segment of the `origin` remote's URL
 without `.git`; with no `origin` remote, the name of the checkout's top-level
-directory.
+directory. The config's `repository` field, when set, is used instead
+everywhere the tool writes a row (not in the checks, which GitHub names).
+
+**The Manual form needs `<repo>` at generate time.** Its `job` options are
+rows, written into `.github/workflows/git-cicd-manual.yml`, and `verify`
+regenerates the file and compares it whole, so the name must be the same on
+every machine: `generate` and `verify` take it as above (no platform API is
+called). On GitHub that is `GITHUB_REPOSITORY`; on a machine whose `origin`
+remote is the repository, the same name. When a checkout's `origin` remote
+names it differently (a fork with another name, a mirror, no remote), set
+`"repository": "<name>"` in the config. When the name is the only difference,
+`verify` says so (`... differs only in the repository's name: its form names
+the jobs as in X, but this checkout's repository is Y (...)`) and what to do:
+set `repository` to the right name, or regenerate.
 
 After the jobs: whether the generated workflows match the config, then one
 verdict:
@@ -667,16 +684,21 @@ The `merge` workflow (`Merge`):
 The manual workflow (`Manual`):
 
 - Start one from the Actions tab: pick **Manual**, choose *Run workflow*,
-  pick the branch to run on, pick the job in the `job` dropdown and fill the
-  fields of that job (leave the other jobs' fields as they are). From the
-  command line, one `-f` per field:
-  `gh workflow run git-cicd-manual.yml --ref main -f job=release -f bump_type=minor`.
+  pick the branch to run on, pick the job in the `job` dropdown (each job
+  named as its row, `<name> / <repo>:<job>`) and fill the fields of that job
+  (leave the other jobs' fields as they are). From the command line, one
+  `-f` per field, `job` being the row:
+  `gh workflow run git-cicd-manual.yml --ref main -f job="Release / medici:release" -f bump_type=minor`.
 - Event: `workflow_dispatch` with the form generated from the config: `job`,
   a required dropdown of the jobs that allow manual runs, in config order,
+  each option the job's row name exactly as a pull request's checks show it
+  (`<name> / <repo>:<job>`; see [Rows](#rows) for where `<repo>` comes from),
   then one optional field per distinct [declared input](#declared-inputs) of
-  those jobs, in first-seen order. For a config with a `release` job (inputs
-  `bump_type` and `changelog_description`) and an `update-vendored` job
-  (input `vendor`) the form is:
+  those jobs, in first-seen order, whose description ends with the rows of
+  the jobs that use it when not every manual job does. In a repository
+  `medici`, for a config with a `release` job (inputs `bump_type` and
+  `changelog_description`) and an `update-vendored` job named
+  `Install Vendored` (input `vendor`) the form is:
 
   ```yaml
   on:
@@ -687,10 +709,10 @@ The manual workflow (`Manual`):
           required: true
           type: choice
           options:
-            - "release"
-            - "update-vendored"
+            - "Release / medici:release"
+            - "Install Vendored / medici:update-vendored"
         bump_type:
-          description: "Version bump type (job release)"
+          description: "Version bump type (Release / medici:release)"
           required: false
           default: "patch"
           type: choice
@@ -699,11 +721,11 @@ The manual workflow (`Manual`):
             - "minor"
             - "major"
         changelog_description:
-          description: "Changelog entry (job release)"
+          description: "Changelog entry (Release / medici:release)"
           required: false
           type: string
         vendor:
-          description: "Vendor to update (or all) (job update-vendored)"
+          description: "Vendor to update (or all) (Install Vendored / medici:update-vendored)"
           required: false
           default: "all"
           type: string
@@ -714,7 +736,9 @@ The manual workflow (`Manual`):
   (`${{` is refused by `validate`). The values reach the tool only as the
   one `env:` entry `CICD_MANUAL_FORM: ${{ toJSON(inputs) }}`, never
   `${{ }}` inside `run:`; the env lines are fixed text, only the form
-  varies. `decide --trigger manual --job NAME` decides: the job is needed
+  varies. `decide --trigger manual --job NAME` decides (`NAME` is the
+  chosen option, which the tool maps back to its job, or the bare job name;
+  anything that matches no job is refused as an unknown job): the job is needed
   (`manual run`) when it exists, allows manual runs and its `branches` match
   the branch; every other job is `not needed (not the job asked for)`.
   Inputs that fail (see [Declared inputs](#declared-inputs)) are refused the
@@ -810,6 +834,17 @@ install pull request of an upgrade does this for you when it may carry workflow
 files; otherwise run `generate` and commit from any branch. Then point
 branch protection and anything else that waited on `git-cicd verdict` at
 `Verdict / git-cicd:verdict`.
+
+### Upgrading to 0.3.0: the Manual form names jobs by their rows
+
+The `Manual` workflow's `job` options are now the jobs' rows
+(`Release / medici:release` instead of `release`), and an input field's
+description ends with the rows of its jobs instead of `(job release)`. Run
+`generate` and commit `.github/workflows/git-cicd-manual.yml` (`verify`
+fails until you do). Anything that starts a run from the command line passes
+the row: `-f job="Release / medici:release"` (GitHub refuses a value the
+dropdown does not list). If `verify` then says the file differs only in the
+repository's name, set `repository` in the config (see [Rows](#rows)).
 
 ### Upgrading to 0.2.0: a job declares its secrets and permissions
 
@@ -1020,9 +1055,13 @@ Run `release` by hand from the Actions tab (**Manual**, *Run workflow* on
 `main`, job `release`) to tag a merged version whose release did not run;
 it takes no fields. Start an update the same way with job `update-vendored`
 and its named fields: `vendor` (for example `mangimangi/git-semver`),
-`version` and `private` (a dropdown of true, false). Each field's
-description names the job that uses it. From the command line:
-`gh workflow run git-cicd-manual.yml --ref main -f job=update-vendored -f vendor=mangimangi/git-semver`.
+`version` and `private` (a dropdown of true, false; true only when adding a
+new vendor whose repository is private: the job's `secrets` decide which
+tokens the run has). The dropdown lists the jobs as their rows,
+`Release / git-cicd:release` and `Install Vendored / git-cicd:update-vendored`,
+and each field's description names the job that uses it the same way. From
+the command line:
+`gh workflow run git-cicd-manual.yml --ref main -f job="Install Vendored / git-cicd:update-vendored" -f vendor=mangimangi/git-semver`.
 `test`, `version-check` and `vendor-check` run on pull requests and are not
 in the dropdown (`"manual": false`). A change to a job's inputs (or its
 `manual`) changes the Manual workflow: run `./git-cicd generate` and commit
