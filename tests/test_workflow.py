@@ -896,7 +896,7 @@ def test_manual_file_carries_the_form_as_json_through_env(tool_repo):
         assert "\n      inputs:\n" not in t  # no free-text inputs field
     jobs = job_blocks(text)
     entry = "          CICD_MANUAL_FORM: ${{ toJSON(inputs) }}\n"
-    assert entry in steps_of(jobs["decide"])[3]
+    assert entry in steps_of(jobs["decide"])[4]
     assert entry in steps_of(jobs["run"])[1]
     header = text.split("\nname: Manual\n")[0]
     assert text.count("CICD_MANUAL_FORM") == 2 + header.count(

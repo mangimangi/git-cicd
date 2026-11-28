@@ -54,6 +54,7 @@ Top level:
 | `needs_nothing` | array of patterns | `[]` | files that need no job: documents, tracker records |
 | `max_parallel` | positive integer | `3` | how many job runners run at once |
 | `repository` | string (letters, digits, `.`, `-`, `_`) | none | the repository's name as rows show it (`<repo>` in `<name> / <repo>:<job>`); without it, the last path segment of the `origin` remote's URL, else the checkout's directory name (see [Rows](#rows)) |
+| `manual_role` | `"admin"` or `"write"` | `"admin"` | the lowest role that may start a manual run: `admin` only the repository's admins, `write` anyone with write access; see [Who can start a manual run](#who-can-start-a-manual-run) |
 | `_vendor` | anything | | git-vendored's registry key; ignored by git-cicd |
 
 Any other key is refused, including `_comment_*` keys: comments belong here,
@@ -75,6 +76,7 @@ in the README.
 | `inputs` | object | `{}` | the inputs a manual run of the job takes, input name → declaration; see [Declared inputs](#declared-inputs) |
 | `secrets` | array of `CICD_WRITE_TOKEN`, `CICD_READ_TOKEN`, `VENDOR_PAT` | `[]` | the secrets the job's scripts receive; nothing undeclared is passed; see [Declared secrets and permissions](#declared-secrets-and-permissions) |
 | `permissions` | object, scope → `read` or `write` | `{}` | permissions of the workflow's own token beyond the trigger's default (`{"packages": "write"}`); see [Declared secrets and permissions](#declared-secrets-and-permissions) |
+| `environment` | string (letters, digits, `-`, `_`) | none | the GitHub environment the job runs in, whose protection rules (required reviewers, allowed branches) and secrets the platform applies; see [Who can start a manual run](#who-can-start-a-manual-run) |
 
 **Title case by convention and by default, never by rewriting.** A job
 without `name` is shown under its job name with `-` and `_` as spaces and each
@@ -189,6 +191,70 @@ or release made with the workflow's own token starts no other workflow) with
 default; `contract` reads a private repository on a pull request with
 `CICD_READ_TOKEN` and gets nothing else; `update-vendored` proposes changes
 (pushes a branch, opens a pull request) with `CICD_WRITE_TOKEN`.
+
+### Who can start a manual run
+
+The jobs a manual run can start often hold the write token (a release, an
+update of the vendored tools), and the repository may be public. Two facts
+of the platform decide what can protect them:
+
+- **Only someone with write access to the repository can start a manual
+  run**, never the public. The gap is a collaborator who can write but is
+  not an admin.
+- **A manual run uses the workflow file of the ref it is started on.** A
+  check written into the workflow, or made by the tool, holds on a protected
+  default branch, but a writer can remove it on a branch of their own and
+  start the run there. The same writer can read any *repository* secret by
+  pushing a workflow of their own. Only what the platform enforces outside
+  the workflow file holds against a writer: a protected *environment*
+  (required reviewers, allowed branches, secrets kept in it).
+
+**The default: only an admin.** The config's `manual_role` is `"admin"`
+when absent. The Manual workflow's decide job reads the repository
+permission of whoever started the run (`github.triggering_actor`) with the
+workflow's own token and passes it to the tool as `CICD_ACTOR_ROLE`
+(`admin`, `write`, `read`, or empty when it could not be read), their name
+as `CICD_ACTOR`, both in fixed env lines, never in a command. A role below
+`manual_role` is refused like an unknown job: decide records the reason,
+needs no job, and the report is `FAILED - alice has the write role; a manual
+run needs the admin role ("manual_role" in the config)`. **An empty or
+unknown role is refused** (fail closed), the reason saying the role could
+not be read; so is a run in Actions whose workflow passes no role (a stale
+`git-cicd-manual.yml`: run `generate`). The run job checks it again. With
+`"manual_role": "write"` anyone the platform lets start a run may (what
+git-cicd did before 0.4.0). `git-cicd run-job --trigger=manual` on a laptop
+is not a manual run in this sense and is not asked for a role. Scripts never
+see `CICD_ACTOR_ROLE` or `CICD_ACTOR`.
+
+What the default protects against: a collaborator with write access
+starting a release or an update from the default branch, or by mistake.
+What it does not: the same collaborator removing the check on a branch of
+their own, or reading a repository secret with a workflow of their own.
+
+**The setup that holds against a writer:**
+
+1. Create an environment (*Settings → Environments*), for example
+   `release`, with the owner as a **required reviewer**, or with
+   **deployment branches** limited to the default branch.
+2. Store the write token (`CICD_WRITE_TOKEN`) as **that environment's
+   secret**, not as a repository secret (delete the repository secret).
+3. Declare the environment on each job that needs the token:
+   `"environment": "release"`, then run `generate` and commit.
+
+`generate` writes a job's `environment` as the environment of the run job
+that runs it, in every generated workflow the job appears in: jobs with
+different environments run in different run jobs (as jobs with different
+permissions do), `run-env-<name>` (or `run-<scope>-<level>...-env-<name>`
+with permissions too), with `environment: "<name>"`. The platform then
+applies the environment's rules before the job starts and gives it the
+environment's secrets; a secret still reaches a script only when the job
+declares it in `secrets`. A job without `environment` runs where it did.
+
+Required reviewers hold every run of a job in that environment, not only
+manual ones: a scheduled or `merge` job in an environment with required
+reviewers waits for approval too. So **reviewers suit an environment used
+only by manual jobs**, and **a branch limit suits one used by release and
+scheduled jobs** (they run on the default branch, a writer's branch cannot).
 
 ### Declared inputs
 
@@ -598,8 +664,12 @@ level words), its matrix (that group's entry of decide's `groups` output) and
 its placeholder entry (`(nothing:<group>)`, see [Rows](#rows)). Jobs with the
 same effective set share one; `run` keeps every other job, and the report
 job `needs` every group job. Each config job's rows, result artifacts
-(`git-cicd-result-<job>`) and report are unchanged. A config without such a
-declaration generates no group job, so its files are what they were.
+(`git-cicd-result-<job>`) and report are unchanged. A job that declares an
+`environment` runs the same way in a group run job of its own, one per
+distinct pair of permission set and environment, whose id ends in
+`env-<name>` and which says `environment: "<name>"` (see
+[Who can start a manual run](#who-can-start-a-manual-run)). A config without
+such a declaration generates no group job, so its files are what they were.
 `generate` writes the group jobs and `verify` fails when a declaration was
 added, changed or removed without regenerating.
 
@@ -758,6 +828,11 @@ The manual workflow (`Manual`):
   and the report is `FAILED - <reason>` in the report, the job summary and the
   status description. Fields the chosen job does not declare are recorded
   (`ignored`) and listed in the report when not at their form default.
+- **Who may start it:** the decide job reads the role of whoever started the
+  run with the workflow's own token and passes it as `CICD_ACTOR_ROLE`;
+  below the config's `manual_role` (default `admin`), empty or unknown, the
+  run is refused with a reason naming the person and the role required (see
+  [Who can start a manual run](#who-can-start-a-manual-run)).
 - **No manual job, no file.** With no job that allows manual runs (every job
   says `"manual": false`, or there is none), `generate` writes no
   `git-cicd-manual.yml` and removes an existing one (saying so; commit the
@@ -880,6 +955,17 @@ Manual workflow. A run started from the command line may keep passing the
 bare config key (`-f job=release`). `<repo>` no longer comes from
 `GITHUB_REPOSITORY`: it is the config's new `repository` key when set, else
 the `origin` remote's last path segment, else the directory's name.
+
+### Upgrading to 0.4.0: only an admin starts a manual run
+
+0.4.0 refuses a manual run started by anyone below the config's new
+`manual_role`, whose default is `admin`. After upgrading, **run `generate`**
+and commit the Manual workflow (it now reads and passes the role; a stale
+one is refused in Actions because it passes none). If collaborators who are
+not admins start manual runs, set `"manual_role": "write"` to keep what
+happened before. A job may now declare an `environment`; see
+[Who can start a manual run](#who-can-start-a-manual-run) for the setup that
+holds against a collaborator with write access.
 
 ## Installing
 
@@ -1019,7 +1105,7 @@ Exit codes:
 | Command | What |
 |---|---|
 | `validate [--config PATH]` | load and validate the config: `config ok: N jobs` or every error |
-| `decide --trigger open\|merge\|manual --target B --source B --base SHA --head SHA [--job NAME] [--json] [--changed-files-out PATH]`, or `decide --trigger cron --cron EXPR [--json]` | one decision per declared job, with the reason; `--job` names the job of a manual run (required with `--trigger manual`, refused with any other); `--cron` is the schedule that fired (required with `--trigger cron`, refused with any other); in Actions also writes `jobs`, `names`, `secrets`, `any`, `max_parallel` (and on cron `runs`, and `groups` when a job on the trigger declares `permissions` beyond its default) to `GITHUB_OUTPUT`, where `jobs` (and `runs`) is the default `run` job's matrix, the placeholder `(nothing)` when it has nothing to run, and `groups` each permission group's matrix |
+| `decide --trigger open\|merge\|manual --target B --source B --base SHA --head SHA [--job NAME] [--json] [--changed-files-out PATH]`, or `decide --trigger cron --cron EXPR [--json]` | one decision per declared job, with the reason; `--job` names the job of a manual run (required with `--trigger manual`, refused with any other); `--cron` is the schedule that fired (required with `--trigger cron`, refused with any other); in Actions also writes `jobs`, `names`, `secrets`, `any`, `max_parallel` (and on cron `runs`, and `groups` when a job on the trigger declares `permissions` beyond its default or an `environment`) to `GITHUB_OUTPUT`, where `jobs` (and `runs`) is the default `run` job's matrix, the placeholder `(nothing)` when it has nothing to run, and `groups` each permission group's matrix |
 | `run-job JOB --trigger open\|merge\|cron\|manual --target … --head SHA [--setup] [--result PATH]` | setup when asked, then the steps; result JSON with the times |
 | `generate` / `verify` | write / check the generated workflows (`.github/workflows/git-cicd-open.yml`, `.github/workflows/git-cicd-merge.yml` when a job has `merge` in `on`, `.github/workflows/git-cicd-manual.yml` when a job allows manual runs, and `.github/workflows/git-cicd-cron.yml` when a job has `cron` in `on`); `generate` removes, and `verify` fails on, the old `.github/workflows/git-cicd.yml` |
 | `report --decisions FILE --results DIR [--trigger open\|merge\|cron\|manual] [--verdict-out PATH]` | the report and verdict from `decide --json` and `run-job --result` files; `--verdict-out` writes the status state (`success`/`failure`) and description, one per line (on cron one line per branch head: `<sha> TAB <state> TAB <description>`) |

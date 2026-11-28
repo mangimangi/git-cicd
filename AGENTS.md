@@ -65,6 +65,7 @@ version it carries and creates its GitHub release; nothing is pushed to
 `main`.
 
 Only CI runs `release` and `update-vendored`. The owner starts either by hand
+(only an admin may: the config keeps the default `"manual_role": "admin"`)
 from the Actions tab: **Manual**, *Run workflow* on `main`, then picks the job
 in the `job` dropdown (each option is the job's row name, for example
 `Install Vendored / git-cicd:update-vendored`) and fills its named fields (left alone, each is its
