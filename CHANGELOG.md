@@ -2,6 +2,11 @@
 
 Releases of git-cicd. Each entry is written by `git-semver bump` in the pull request that raises the version; merging it into `main` tags and publishes that version.
 
+## [0.4.0] - 2026-11-28
+
+### Changed
+- Only an admin starts a manual run by default (gcd-63f3): the new config key manual_role (admin, the default, or write) is checked against the role the Manual workflow reads for whoever started the run (CICD_ACTOR_ROLE); a lower, empty or unknown role is refused with a reason naming the person and the role required. Adopters whose non-admin collaborators start manual runs set "manual_role": "write"; every adopter runs generate after upgrading and commits the Manual workflow. A job may declare an environment, written as the environment of its own run job in every generated workflow, so a protected environment (required reviewers, allowed branches, its own secrets) holds against a collaborator with write access.
+
 ## [0.3.0] - 2026-11-28
 
 ### Changed
