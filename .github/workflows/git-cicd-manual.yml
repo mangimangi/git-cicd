@@ -54,6 +54,13 @@
 # `Report / git-cicd:report`. Every fact reaches the tool as an environment
 # variable, never spliced into a command.
 #
+# A run that needs no job still runs the `run` job, once, as the placeholder
+# entry `(nothing)`, whose row is `Nothing needed / <repo>:(nothing)` and
+# whose steps are all skipped. The job has no job-level `if`: GitHub does not
+# expand a matrix job's name when the job is skipped before its matrix is
+# evaluated, so a skipped `run` job would show its `name:` expression as raw
+# text.
+#
 # The verdict: the `Verdict / git-cicd:verdict` COMMIT STATUS on the run's
 # commit, pending from the first step of decide and final from the last step
 # of report, and failure when the report did not run to the end - unless an
@@ -159,7 +166,6 @@ jobs:
   run:
     name: ${{ fromJSON(needs.decide.outputs.names)[matrix.job] }} / ${{ github.event.repository.name }}:${{ matrix.job }}
     needs: decide
-    if: needs.decide.outputs.any == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -171,12 +177,14 @@ jobs:
         job: ${{ fromJSON(needs.decide.outputs.jobs) }}
     steps:
       - name: Checkout repository
+        if: matrix.job != '(nothing)'
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           fetch-tags: true
 
       - name: Run job
+        if: matrix.job != '(nothing)'
         env:
           JOB: ${{ matrix.job }}
           CICD_MANUAL_INPUTS: ${{ inputs.inputs }}
@@ -191,7 +199,7 @@ jobs:
             --setup --result="$RUNNER_TEMP/git-cicd/result.json"
 
       - name: Upload result
-        if: always()
+        if: always() && matrix.job != '(nothing)'
         uses: actions/upload-artifact@v4
         with:
           name: git-cicd-result-${{ matrix.job }}
