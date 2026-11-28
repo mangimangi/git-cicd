@@ -22,14 +22,31 @@ non-zero on a failed verdict. Run a single job with `--job test`.
 After changing `.vendored/configs/git-cicd.json` or a template under
 `templates/workflows/`, run `./git-cicd generate` and commit the generated
 workflows (`.github/workflows/git-cicd-<trigger>.yml`, one per trigger;
-`git-cicd-open.yml` today); the verdict fails while they disagree.
+`git-cicd-open.yml`, `git-cicd-merge.yml`, `git-cicd-cron.yml` and `git-cicd-manual.yml`; the cron file exists only while a job has `cron` in `on`); the verdict fails while they disagree.
+
+## This repository's jobs
+
+`.vendored/configs/git-cicd.json` declares four jobs: `test` (`open`; the
+pytest suite), `vendor-check` (`open`; `ci/vendor-check.sh` runs
+`.vendored/check`), `release` (`merge` on `main`; `ci/release.sh` bumps or
+publishes with git-semver's `release`) and `update-vendored` (`cron`
+`0 9 * * 1` on `main`; `ci/update-vendored.sh` runs `.vendored/install`).
+Only CI runs `release` and `update-vendored`. The owner starts either by hand
+from the Actions tab: **Manual**, *Run workflow* on `main`, job `release` or
+`update-vendored`, and the `inputs` field as JSON (for example
+`{"bump_type": "minor"}` or `{"vendor": "mangimangi/git-semver"}`; empty for
+the defaults).
+
+The old vendor workflows (`version-bump.yml`, `check-vendor.yml`,
+`install-vendored.yml`) are removed from this repository; these jobs replace
+them.
 
 ## Vendored tools
 
 This repository's own vendored tools (git-vendored and git-semver, under
-`.vendored/` with their workflows in `.github/workflows/`) are updated only by
-the owner running the **Install Vendored** workflow from the Actions tab (its
-weekly schedule updates them too); each update arrives as a pull request from
+`.vendored/`) are updated only by the `update-vendored` job: the owner runs it
+from the Actions tab (**Manual**, job `update-vendored`), and its weekly
+schedule updates them too; each update arrives as a pull request from
 `chore/install-<vendor>`. git-vendored itself came once from its documented
 bootstrap. Adopting repositories install and upgrade git-cicd the same way
 (`README.md`, "Installing").
@@ -50,7 +67,7 @@ undo anything it reports.
 - `git-cicd` — the tool (validate, decide, run-job, generate, verify, report, check)
 - `templates/workflows/<trigger>.yml` — the workflow templates, one per generated trigger (`open.yml`); `templates/config.json`, `templates/config.schema` — installed config and schema
 - `install.sh` — the git-vendored installer
-- `ci/` — this repository's own job scripts; `.vendored/configs/git-cicd.json` — its own config
+- `ci/` — this repository's own job scripts (`setup.sh`, `test.sh`, `vendor-check.sh`, `release.sh`, `update-vendored.sh`); `.vendored/configs/git-cicd.json` — its own config
 - `tests/` — pytest suite
 
 ## Planning and issues

@@ -7,6 +7,35 @@
       "paths": ["git-cicd", "install.sh", "templates/**", "tests/**", "pyproject.toml", "ci/**"],
       "setup": "ci/setup.sh",
       "steps": ["ci/test.sh"]
+    },
+    "release": {
+      "name": "Release",
+      "on": ["merge"],
+      "branches": ["main"],
+      "steps": ["ci/release.sh"],
+      "inputs": {
+        "bump_type": {"description": "Version bump type", "choices": ["patch", "minor", "major"], "default": "patch"},
+        "subdirectory": {"description": "Subdirectory to bump (leave empty for root)", "default": ""},
+        "changelog_description": {"description": "Changelog entry (what changed in this release)", "default": ""}
+      }
+    },
+    "vendor-check": {
+      "name": "Check Vendor Files",
+      "on": ["open"],
+      "branches": ["**"],
+      "steps": ["ci/vendor-check.sh"]
+    },
+    "update-vendored": {
+      "name": "Install Vendored",
+      "on": ["cron"],
+      "cron": "0 9 * * 1",
+      "branches": ["main"],
+      "steps": ["ci/update-vendored.sh"],
+      "inputs": {
+        "vendor": {"description": "Vendor to update (or all)", "default": "all"},
+        "version": {"description": "Version to install (default: latest)", "default": "latest"},
+        "private": {"description": "Vendor repo is private (use VENDOR_PAT)", "choices": ["true", "false"], "default": "false"}
+      }
     }
   },
   "needs_nothing": [".pearls/**", ".madreperla/**", "*.md", "LICENSE", "docs/**"]

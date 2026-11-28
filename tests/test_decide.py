@@ -282,22 +282,120 @@ def test_not_open_jobs_reported(repo):
     assert jobs["release"]["reason"] == "not an open job"
 
 
-@pytest.mark.parametrize("trigger", ["merge", "cron", "manual"])
-def test_unbuilt_triggers_exit_2(repo, trigger):
+def test_unknown_trigger_is_refused(repo):
     base = setup_repo(repo)
-    result = repo.run("decide", "--trigger", trigger, "--target", "main",
+    result = repo.run("decide", "--trigger", "nightly", "--target", "main",
                       "--source", "feature", "--base", base, "--head", base)
     assert result.returncode == 2
-    assert (f"the {trigger} trigger is not built yet (git-cicd gcd-e74c builds "
-            "open only)") in result.stderr
-    assert result.stdout == ""
+    assert "invalid choice: 'nightly'" in result.stderr
 
 
-def test_unbuilt_trigger_lists_declaring_jobs(repo):
+@pytest.mark.parametrize("trigger", ["open", "merge", "cron", "manual"])
+def test_no_trigger_is_not_built(repo, trigger):
     base = setup_repo(repo)
-    result = repo.run("decide", "--trigger", "merge", "--target", "main",
-                      "--source", "feature", "--base", base, "--head", base)
-    assert "jobs declaring it: release" in result.stderr
+    extra = {"cron": ["--cron=0 3 * * *"], "manual": ["--job=test"]}
+    result = repo.run("decide", f"--trigger={trigger}", "--target=main",
+                      "--source=main", f"--base={base}", f"--head={base}",
+                      *extra.get(trigger, []))
+    assert "not built" not in result.stdout + result.stderr
+    assert result.returncode == 0, result.stderr
+
+
+# ── merge: a change landed on a branch ──────────────────────────────────────
+
+MERGE_JOBS = {
+    "test": {"on": ["open"], "branches": ["**"], "paths": ["src/**"],
+             "steps": ["ci/test.sh"]},
+    "release": {"on": ["merge"], "branches": ["main"], "steps": ["ci/bump.sh"]},
+    "docs": {"on": ["merge", "open"], "branches": ["main", "plan/**"],
+             "paths": ["docs/**"], "steps": ["ci/lint.sh"]},
+}
+
+
+def setup_merge(repo):
+    """A repo on main with the merge jobs; return the commit before a push."""
+    base = setup_repo(repo, jobs=MERGE_JOBS, needs_nothing=["*.md"])
+    repo.git("checkout", "-q", "main")
+    return base
+
+
+def decide_merge(repo, before, branch="main"):
+    return decide(repo, before, target=branch, source=branch,
+                  trigger="merge")
+
+
+def test_merge_paths_and_open_jobs(repo):
+    before = setup_merge(repo)
+    repo.write("docs/guide.md", "new\n")
+    repo.commit("docs")
+    data, jobs = decide_merge(repo, before)
+    assert data["trigger"] == "merge"
+    assert data["changed_files"] == ["docs/guide.md"]
+    assert jobs["test"] == dict(jobs["test"], needed=False,
+                                reason="not a merge job")
+    assert jobs["release"]["needed"] is True
+    assert jobs["release"]["reason"] == ("1 changed file outside needs_nothing "
+                                         "(the job has no paths)")
+    assert jobs["docs"]["needed"] is True
+    assert jobs["docs"]["reason"] == "1 changed file match paths"
+
+
+def test_merge_no_path_match(repo):
+    before = setup_merge(repo)
+    repo.write("src/app.py", "x = 3\n")
+    repo.commit("src")
+    _, jobs = decide_merge(repo, before)
+    assert jobs["release"]["needed"] is True
+    assert jobs["docs"]["needed"] is False
+    assert jobs["docs"]["reason"] == "no changed file matches paths"
+
+
+def test_merge_branches_bind(repo):
+    before = setup_merge(repo)
+    repo.write("docs/guide.md", "new\n")
+    repo.commit("docs")
+    _, jobs = decide_merge(repo, before, branch="plan/x")
+    assert jobs["release"]["needed"] is False
+    assert jobs["release"]["reason"] == "target plan/x does not match branches"
+    assert jobs["docs"]["needed"] is True
+
+
+def test_merge_only_needs_nothing(repo):
+    before = setup_merge(repo)
+    repo.write("README.md", "changed\n")
+    repo.commit("readme")
+    _, jobs = decide_merge(repo, before)
+    for name in ("release", "docs"):
+        assert jobs[name]["needed"] is False
+        assert jobs[name]["reason"] == "only needs_nothing files changed"
+
+
+def test_merge_job_script_forces(repo):
+    before = setup_merge(repo)
+    repo.script("ci/test.sh", "echo changed\n")  # an open job's script
+    repo.commit("script")
+    _, jobs = decide_merge(repo, before)
+    assert jobs["release"]["needed"] and jobs["docs"]["needed"]
+    assert jobs["docs"]["reason"] == "config or job script changed: ci/test.sh"
+
+
+@pytest.mark.parametrize("before,why", [
+    ("0" * 40, "is the all-zero commit (the push created the branch)"),
+    ("1" * 40, "is not a commit in this repository"),
+])
+def test_merge_without_a_diff_needs_every_matching_job(repo, before, why):
+    setup_merge(repo)
+    repo.write("README.md", "changed\n")  # needs_nothing only
+    repo.commit("readme")
+    data, jobs = decide_merge(repo, before)
+    assert data["changed_files"] == []
+    for name in ("release", "docs"):
+        assert jobs[name]["needed"] is True
+        assert jobs[name]["reason"] == (
+            f"cannot compute the diff: base {before!r} {why}")
+    assert jobs["test"]["needed"] is False
+    _, jobs = decide_merge(repo, before, branch="other")
+    assert not jobs["release"]["needed"] and not jobs["docs"]["needed"]
 
 
 @pytest.mark.parametrize("paths,changed,needed", [
@@ -413,3 +511,246 @@ def test_decide_function_with_given_files(repo):
     d = git_cicd.decide(config, str(repo.path), "open", "main", "f", "b", "h",
                         files=["src/sub/x.py"])
     assert git_cicd.needed_jobs(d) == ["test"]
+
+
+# ── manual: one named job, run by hand ──────────────────────────────────────
+
+MANUAL_JOBS = {
+    "test": {"on": ["open"], "branches": ["**"], "paths": ["src/**"],
+             "steps": ["ci/test.sh"]},
+    "release": {"on": ["merge"], "branches": ["main"], "steps": ["ci/bump.sh"]},
+    "lint": {"on": ["open"], "branches": ["**"], "steps": ["ci/lint.sh"],
+             "manual": False},
+}
+
+
+def decide_manual(repo, job, branch="main"):
+    head = repo.git("rev-parse", "HEAD")
+    result = repo.run("decide", "--trigger=manual", f"--job={job}",
+                      f"--target={branch}", f"--source={branch}",
+                      f"--base={head}", f"--head={head}", "--json")
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    return data, {j["name"]: j for j in data["jobs"]}
+
+
+def test_manual_run_of_a_job(repo):
+    setup_repo(repo, jobs=MANUAL_JOBS)
+    data, jobs = decide_manual(repo, "release")
+    assert data["trigger"] == "manual" and data["job"] == "release"
+    assert data["refused"] is None
+    assert data["changed_files"] == []
+    assert jobs["release"]["needed"] is True
+    assert jobs["release"]["reason"] == "manual run"
+    for name in ("test", "lint"):
+        assert jobs[name]["needed"] is False
+        assert jobs[name]["reason"] == "not the job asked for"
+
+
+def test_manual_ignores_paths_and_triggers(repo):
+    """paths and needs_nothing do not apply: a job with paths runs though
+    nothing changed, and a job need not list a trigger in on."""
+    setup_repo(repo, jobs=MANUAL_JOBS)
+    _, jobs = decide_manual(repo, "test", branch="feature")
+    assert jobs["test"]["needed"] is True
+    assert jobs["test"]["reason"] == "manual run"
+
+
+@pytest.mark.parametrize("job,branch,reason", [
+    ("nope", "main", "unknown job 'nope' (declared: test, release, lint)"),
+    ("lint", "main", 'job lint cannot be run by hand ("manual": false)'),
+    ("release", "feature",
+     "branch feature does not match the branches of job release (main)"),
+])
+def test_manual_refusals_are_recorded(repo, job, branch, reason):
+    setup_repo(repo, jobs=MANUAL_JOBS)
+    data, jobs = decide_manual(repo, job, branch=branch)
+    assert data["refused"] == reason
+    assert not any(j["needed"] for j in data["jobs"])
+    if job in jobs:
+        assert jobs[job]["reason"] == reason
+
+
+def test_manual_refusal_outputs_need_no_job(repo, tmp_path):
+    setup_repo(repo, jobs=MANUAL_JOBS)
+    head = repo.git("rev-parse", "HEAD")
+    out = tmp_path / "out"
+    result = repo.run("decide", "--trigger=manual", "--job=lint",
+                      "--target=main", "--source=main", f"--base={head}",
+                      f"--head={head}", env={"GITHUB_OUTPUT": str(out)})
+    assert result.returncode == 0
+    assert "refused: job lint cannot be run by hand" in result.stdout
+    outputs = dict(line.split("=", 1) for line in out.read_text().splitlines())
+    assert outputs["jobs"] == "[]" and outputs["any"] == "false"
+
+
+def test_manual_needs_job(repo):
+    base = setup_repo(repo, jobs=MANUAL_JOBS)
+    result = repo.run("decide", "--trigger=manual", "--target=main",
+                      "--source=main", f"--base={base}", f"--head={base}")
+    assert result.returncode == 2
+    assert "--trigger manual needs --job NAME" in result.stderr
+
+
+@pytest.mark.parametrize("trigger", ["open", "merge", "cron"])
+def test_job_refused_for_other_triggers(repo, trigger):
+    base = setup_repo(repo, jobs=MANUAL_JOBS)
+    result = repo.run("decide", f"--trigger={trigger}", "--job=test",
+                      "--target=main", "--source=main", f"--base={base}",
+                      f"--head={base}")
+    assert result.returncode == 2
+    assert (f"--job is for --trigger manual only, not --trigger {trigger}"
+            in result.stderr)
+
+
+# ── manual: declared inputs ─────────────────────────────────────────────────
+
+INPUT_JOBS = {"release": {"branches": ["main"], "steps": ["ci/bump.sh"],
+                          "inputs": {
+                              "bump_type": {"choices": ["patch", "minor",
+                                                        "major"],
+                                            "default": "patch"},
+                              "note": {"required": True}}}}
+
+
+def decide_inputs(repo, inputs):
+    head = repo.git("rev-parse", "HEAD")
+    result = repo.run("decide", "--trigger=manual", "--job=release",
+                      "--target=main", "--source=main", f"--base={head}",
+                      f"--head={head}", "--json",
+                      env={"CICD_MANUAL_INPUTS": inputs})
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def test_manual_inputs_accepted(repo):
+    setup_repo(repo, jobs=INPUT_JOBS)
+    data = decide_inputs(repo, '{"bump_type": "minor", "note": "x"}')
+    assert data["refused"] is None
+    assert data["jobs"][0]["needed"] is True
+
+
+@pytest.mark.parametrize("inputs,reason", [
+    ("", "job release: input note is required"),
+    ('{"note": "x", "bump_type": "huge"}',
+     "job release: input bump_type: 'huge' is not one of the choices "
+     "(patch, minor, major)"),
+    ('{"note": "x", "extra": "y"}',
+     "job release declares no input 'extra' (declared: bump_type, note)"),
+    ("not json", "the inputs are not valid JSON"),
+    ('{"note": ["x"]}', "the inputs must be a JSON object of string values"),
+])
+def test_manual_input_failures_are_refusals(repo, inputs, reason):
+    setup_repo(repo, jobs=INPUT_JOBS)
+    data = decide_inputs(repo, inputs)
+    assert data["refused"].startswith(reason), data["refused"]
+    assert not data["jobs"][0]["needed"]
+
+
+# ── cron: a schedule fired ──────────────────────────────────────────────────
+
+CRON_JOBS = {
+    "test": {"on": ["open"], "branches": ["**"], "steps": ["ci/test.sh"]},
+    "nightly": {"on": ["cron"], "branches": ["main", "dev"],
+                "cron": "0 3 * * *", "paths": ["src/**"],
+                "steps": ["ci/lint.sh"]},
+    "weekly": {"on": ["cron", "open"], "branches": ["main"],
+               "cron": "0 9 * * 1", "steps": ["ci/bump.sh"]},
+    "again": {"on": ["cron"], "branches": ["dev"], "cron": "0 3 * * *",
+              "steps": ["ci/test.sh"]},
+}
+
+
+def setup_cron(repo, branches=("main", "dev")):
+    """Remote-tracking heads for the cron branches, as after a full
+    checkout. Return {branch: sha}."""
+    setup_repo(repo, jobs=CRON_JOBS)
+    heads = {}
+    for branch in branches:
+        repo.write(f"{branch}.txt", branch)
+        heads[branch] = repo.commit(f"on {branch}")
+        repo.git("update-ref", f"refs/remotes/origin/{branch}", heads[branch])
+    return heads
+
+
+def decide_cron(repo, expr, env=None):
+    result = repo.run("decide", "--trigger=cron", f"--cron={expr}", "--json",
+                      env=env)
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    return data, {j["name"]: j for j in data["jobs"]}
+
+
+def test_cron_needs_the_jobs_of_the_fired_expression_on_each_branch(repo):
+    heads = setup_cron(repo)
+    data, jobs = decide_cron(repo, "0 3 * * *")
+    assert data["trigger"] == "cron" and data["cron"] == "0 3 * * *"
+    assert data["changed_files"] == []
+    assert jobs["nightly"] == dict(jobs["nightly"], needed=True,
+                                   reason="scheduled 0 3 * * *")
+    assert jobs["again"]["needed"] is True
+    assert jobs["weekly"]["needed"] is False
+    assert jobs["weekly"]["reason"] == "scheduled at 0 9 * * 1"
+    assert jobs["test"]["reason"] == "not a cron job"
+    assert data["runs"] == [
+        {"key": "nightly-1", "job": "nightly", "branch": "main",
+         "sha": heads["main"]},
+        {"key": "nightly-2", "job": "nightly", "branch": "dev",
+         "sha": heads["dev"]},
+        {"key": "again-1", "job": "again", "branch": "dev",
+         "sha": heads["dev"]},
+    ]
+    assert data["heads"] == {"main": heads["main"], "dev": heads["dev"]}
+    assert data["missing"] == []
+
+
+def test_cron_other_expression(repo):
+    heads = setup_cron(repo)
+    data, jobs = decide_cron(repo, "0 9 * * 1")
+    assert [r["job"] for r in data["runs"]] == ["weekly"]
+    assert data["heads"] == {"main": heads["main"]}
+    assert jobs["nightly"]["reason"] == "scheduled at 0 3 * * *"
+
+
+def test_cron_missing_branch_is_recorded(repo):
+    heads = setup_cron(repo, branches=("main",))
+    data, _ = decide_cron(repo, "0 3 * * *")
+    assert data["heads"] == {"main": heads["main"], "dev": None}
+    assert [(r["job"], r["branch"]) for r in data["runs"]] == [
+        ("nightly", "main")]
+    assert data["missing"] == [
+        {"job": "nightly", "branch": "dev",
+         "reason": "branch dev does not exist"},
+        {"job": "again", "branch": "dev",
+         "reason": "branch dev does not exist"}]
+
+
+def test_cron_outputs(repo, tmp_path):
+    setup_cron(repo)
+    out = tmp_path / "out"
+    data, _ = decide_cron(repo, "0 3 * * *", env={"GITHUB_OUTPUT": str(out)})
+    outputs = dict(line.split("=", 1) for line in out.read_text().splitlines())
+    assert json.loads(outputs["runs"]) == data["runs"]
+    assert outputs["any"] == "true"
+    assert json.loads(outputs["names"])["nightly"] == "Nightly"
+    # the other triggers' outputs carry no runs
+    base = repo.git("rev-parse", "HEAD")
+    out.write_text("")
+    repo.run("decide", "--trigger=open", "--target=main", "--source=f",
+             f"--base={base}", f"--head={base}", env={"GITHUB_OUTPUT": str(out)})
+    assert "runs=" not in out.read_text()
+
+
+def test_cron_needs_cron(repo):
+    setup_cron(repo)
+    result = repo.run("decide", "--trigger=cron")
+    assert result.returncode == 2
+    assert "--trigger cron needs --cron EXPR" in result.stderr
+    result = repo.run("decide", "--trigger=open", "--cron=0 3 * * *",
+                      "--target=main", "--source=f", "--base=HEAD",
+                      "--head=HEAD")
+    assert result.returncode == 2
+    assert "--cron is for --trigger cron only" in result.stderr
+    result = repo.run("decide", "--trigger=open", "--target=main")
+    assert result.returncode == 2
+    assert "--trigger open needs --source, --base, --head" in result.stderr
